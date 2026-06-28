@@ -1,0 +1,9 @@
+fastapi==0.138.1
+uvicorn[standard]==0.35.0
+SQLAlchemy==2.0.41
+pydantic-settings==2.10.1
+psycopg[binary]==3.3.4
+python-dotenv==1.1.1
+sqladmin==0.27.2
+alembic==1.18.5
+itsdangerous==2.2.0

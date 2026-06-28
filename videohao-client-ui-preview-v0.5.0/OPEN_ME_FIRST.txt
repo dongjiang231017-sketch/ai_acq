@@ -1,0 +1,24 @@
+视频号团购商家AI获客客户端 UI - v0.5.0 客户确认版
+
+打开方式：
+1. 解压整个文件夹，不要只单独拖出 index.html。
+2. 双击 index.html 即可查看 UI。
+3. 如果浏览器限制本地文件，可以双击 start-mac.command 或 start-windows.bat，用本地服务打开。
+
+本版覆盖：
+- 10 个模块总览页面。
+- 39 个点击内页。
+- 11 个操作抽屉。
+- 外呼任务创建表单和校验。
+- 移动端基础适配。
+
+验证报告：
+- UI_COVERAGE_REPORT.md
+
+截图目录：
+- screenshots/pages：全部页面截图。
+- screenshots/drawers：全部操作抽屉截图。
+- screenshots/mobile-dashboard.png：移动端截图。
+
+注意：
+这是客户确认 UI 原型，用于确认产品功能、页面结构和交互范围；暂未接真实后端、电话线路、平台账号或模型 API。
