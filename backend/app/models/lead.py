@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -17,6 +17,7 @@ class MerchantLead(Base):
     category: Mapped[str] = mapped_column(String(80), index=True)
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     contact_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    platform_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(80), default="手动录入")
     intent_score: Mapped[int] = mapped_column(Integer, default=60)
     status: Mapped[str] = mapped_column(String(40), default="待外呼")

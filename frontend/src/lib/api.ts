@@ -16,6 +16,7 @@ export type Lead = {
   category: string;
   phone?: string | null;
   contactName?: string | null;
+  platformUrl?: string | null;
   source: string;
   intentScore: number;
   status: string;
@@ -174,6 +175,9 @@ export type DmConfig = {
   queueName: string;
   redisUrlConfigured: boolean;
   browserProfileRoot: string;
+  browserHeadless: boolean;
+  browserChannel: string;
+  browserLiveSendEnabled: boolean;
 };
 
 export type DmPlatformConfig = {
@@ -182,10 +186,17 @@ export type DmPlatformConfig = {
   homeUrl: string;
   inboxUrl: string;
   merchantSearchUrl: string;
+  loginCheckSelector: string;
+  riskCheckSelector: string;
+  merchantLinkSelector: string;
   messageButtonSelector: string;
   inputSelector: string;
   sendButtonSelector: string;
+  sentSuccessSelector: string;
   unreadSelector: string;
+  conversationItemSelector: string;
+  conversationTitleSelector: string;
+  messageTextSelector: string;
   enabled: boolean;
   createdAt: string;
 };
@@ -280,6 +291,11 @@ export const api = {
   createDmPlatformConfig: (config: Omit<DmPlatformConfig, "id" | "createdAt">) =>
     request<DmPlatformConfig>("/direct-messages/platform-configs", {
       method: "POST",
+      body: JSON.stringify(config),
+    }),
+  updateDmPlatformConfig: (configId: string, config: Partial<DmPlatformConfig>) =>
+    request<DmPlatformConfig>(`/direct-messages/platform-configs/${configId}`, {
+      method: "PATCH",
       body: JSON.stringify(config),
     }),
   dmTemplates: () => request<DmTemplate[]>("/direct-messages/templates"),

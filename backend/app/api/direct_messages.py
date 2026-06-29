@@ -25,14 +25,16 @@ from app.schemas.dm import (
     DmOverview,
     DmPlatformConfigCreate,
     DmPlatformConfigRead,
+    DmPlatformConfigUpdate,
     DmSyncResult,
     DmTaskCreate,
     DmTemplateCreate,
     DmTemplateRead,
 )
 from app.schemas.task import TaskRead
-from app.services.dm_browser_profile import attach_profile_defaults, normalize_account_state
-from app.services.dm_listener import sync_simulated_dm_replies
+from app.services.dm_browser_profile import normalize_account_state
+from app.services.dm_gateway import BrowserAutomationDmGateway
+from app.services.dm_listener import sync_dm_replies as sync_dm_replies_service
 from app.services.dm_queue import enqueue_dm_task
 from app.services.dm_runner import run_dm_task
 
@@ -147,6 +149,9 @@ def dm_config() -> dict[str, object]:
         "queueName": settings.dm_queue_name,
         "redisUrlConfigured": bool(settings.redis_url),
         "browserProfileRoot": settings.dm_browser_profile_root,
+        "browserHeadless": settings.dm_browser_headless,
+        "browserChannel": settings.dm_browser_channel,
+        "browserLiveSendEnabled": settings.dm_browser_live_send_enabled,
     }
 
 
@@ -198,6 +203,17 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
         account.session_status = "模拟可用"
         account.risk_status = "正常"
         account.last_error = None
+    elif settings.dm_gateway_mode == "browser":
+        config = db.scalar(
+            select(DirectMessagePlatformConfig)
+            .where(DirectMessagePlatformConfig.platform == account.platform)
+            .order_by(DirectMessagePlatformConfig.created_at.desc())
+        )
+        result = BrowserAutomationDmGateway().preflight_account(account, config)
+        account.status = result.account_status
+        account.session_status = result.session_status
+        account.risk_status = result.risk_status
+        account.last_error = result.last_error
     elif account.session_status != "已登录":
         account.status = "待登录"
         account.last_error = "请先在客户端完成该平台账号扫码登录"
@@ -216,6 +232,23 @@ def list_dm_platform_configs(db: Session = Depends(get_db)) -> list[DirectMessag
 def create_dm_platform_config(payload: DmPlatformConfigCreate, db: Session = Depends(get_db)) -> DirectMessagePlatformConfig:
     config = DirectMessagePlatformConfig(**payload.model_dump(by_alias=False))
     db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
+
+
+@router.patch("/platform-configs/{config_id}", response_model=DmPlatformConfigRead)
+def update_dm_platform_config(
+    config_id: str,
+    payload: DmPlatformConfigUpdate,
+    db: Session = Depends(get_db),
+) -> DirectMessagePlatformConfig:
+    config = db.get(DirectMessagePlatformConfig, config_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="平台选择器配置不存在")
+
+    for key, value in payload.model_dump(by_alias=False, exclude_unset=True).items():
+        setattr(config, key, value)
     db.commit()
     db.refresh(config)
     return config
@@ -310,7 +343,10 @@ def list_dm_conversations(db: Session = Depends(get_db)) -> list[DirectMessageCo
 
 @router.post("/sync-replies", response_model=DmSyncResult)
 def sync_dm_replies(db: Session = Depends(get_db)) -> dict[str, int]:
-    result = sync_simulated_dm_replies(db)
+    try:
+        result = sync_dm_replies_service(db)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"checked": result.checked, "newReplies": result.new_replies, "needsHandoff": result.needs_handoff}
 
 

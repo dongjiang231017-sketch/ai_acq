@@ -9,6 +9,7 @@ from app.models.task import (
     DirectMessage,
     DirectMessageAccount,
     DirectMessageConversation,
+    DirectMessagePlatformConfig,
     DirectMessageTemplate,
     OutreachTask,
 )
@@ -44,6 +45,14 @@ def _get_dm_template(db: Session, task: OutreachTask) -> DirectMessageTemplate |
         return db.get(DirectMessageTemplate, template_id)
     return db.scalar(
         select(DirectMessageTemplate).where(DirectMessageTemplate.is_active.is_(True)).order_by(DirectMessageTemplate.created_at.desc())
+    )
+
+
+def _get_platform_config(db: Session, platform: str) -> DirectMessagePlatformConfig | None:
+    return db.scalar(
+        select(DirectMessagePlatformConfig)
+        .where(DirectMessagePlatformConfig.platform == platform)
+        .order_by(DirectMessagePlatformConfig.created_at.desc())
     )
 
 
@@ -119,9 +128,23 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
             continue
 
         try:
-            result = active_gateway.send_message(DmAttempt(task=task, lead=lead, account=account, template=template, sequence=index))
+            platform_config = _get_platform_config(db, account.platform)
+            result = active_gateway.send_message(
+                DmAttempt(
+                    task=task,
+                    lead=lead,
+                    account=account,
+                    template=template,
+                    sequence=index,
+                    platform_config=platform_config,
+                )
+            )
         except RuntimeError as exc:
-            pause_account_for_risk(account, str(exc), now)
+            error_message = str(exc)
+            if any(keyword in error_message for keyword in ["安全闸门", "缺少平台选择器", "选择器未启用", "缺少首页", "缺少商家页"]):
+                account.last_error = error_message
+            else:
+                pause_account_for_risk(account, error_message, now)
             db.add(
                 DirectMessageConversation(
                     task_id=task.id,
@@ -131,7 +154,7 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
                     merchant_name=lead.name,
                     status="发送失败",
                     intent_level="失败",
-                    last_message=str(exc),
+                    last_message=error_message,
                     last_message_at=now,
                     need_handoff=False,
                 )

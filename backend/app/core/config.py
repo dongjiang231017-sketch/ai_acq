@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     dm_queue_name: str = "ai_acq:dm_tasks"
     dm_gateway_mode: str = "simulator"
     dm_browser_profile_root: str = ".dm_browser_profiles"
+    dm_browser_headless: bool = True
+    dm_browser_channel: str = "chrome"
+    dm_browser_timeout_ms: int = 15000
+    dm_browser_slow_mo_ms: int = 0
+    dm_browser_live_send_enabled: bool = False
     telephony_gateway_mode: str = "simulator"
     asterisk_host: str = "127.0.0.1"
     asterisk_ami_port: int = 5038

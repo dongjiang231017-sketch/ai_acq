@@ -23,6 +23,7 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)) -> MerchantL
         category=payload.category,
         phone=payload.phone,
         contact_name=payload.contact_name,
+        platform_url=payload.platform_url,
         source=payload.source,
         intent_score=60,
         status="待外呼",

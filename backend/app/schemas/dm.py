@@ -109,10 +109,17 @@ class DmPlatformConfigCreate(BaseModel):
     home_url: Annotated[str, Field(alias="homeUrl")] = ""
     inbox_url: Annotated[str, Field(alias="inboxUrl")] = ""
     merchant_search_url: Annotated[str, Field(alias="merchantSearchUrl")] = ""
+    login_check_selector: Annotated[str, Field(alias="loginCheckSelector")] = ""
+    risk_check_selector: Annotated[str, Field(alias="riskCheckSelector")] = ""
+    merchant_link_selector: Annotated[str, Field(alias="merchantLinkSelector")] = ""
     message_button_selector: Annotated[str, Field(alias="messageButtonSelector")] = ""
     input_selector: Annotated[str, Field(alias="inputSelector")] = ""
     send_button_selector: Annotated[str, Field(alias="sendButtonSelector")] = ""
+    sent_success_selector: Annotated[str, Field(alias="sentSuccessSelector")] = ""
     unread_selector: Annotated[str, Field(alias="unreadSelector")] = ""
+    conversation_item_selector: Annotated[str, Field(alias="conversationItemSelector")] = ""
+    conversation_title_selector: Annotated[str, Field(alias="conversationTitleSelector")] = ""
+    message_text_selector: Annotated[str, Field(alias="messageTextSelector")] = ""
     enabled: bool = True
 
     model_config = ConfigDict(populate_by_name=True)
@@ -123,6 +130,27 @@ class DmPlatformConfigRead(DmPlatformConfigCreate):
     created_at: Annotated[datetime, Field(alias="createdAt")]
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class DmPlatformConfigUpdate(BaseModel):
+    platform: str | None = None
+    home_url: Annotated[str | None, Field(alias="homeUrl")] = None
+    inbox_url: Annotated[str | None, Field(alias="inboxUrl")] = None
+    merchant_search_url: Annotated[str | None, Field(alias="merchantSearchUrl")] = None
+    login_check_selector: Annotated[str | None, Field(alias="loginCheckSelector")] = None
+    risk_check_selector: Annotated[str | None, Field(alias="riskCheckSelector")] = None
+    merchant_link_selector: Annotated[str | None, Field(alias="merchantLinkSelector")] = None
+    message_button_selector: Annotated[str | None, Field(alias="messageButtonSelector")] = None
+    input_selector: Annotated[str | None, Field(alias="inputSelector")] = None
+    send_button_selector: Annotated[str | None, Field(alias="sendButtonSelector")] = None
+    sent_success_selector: Annotated[str | None, Field(alias="sentSuccessSelector")] = None
+    unread_selector: Annotated[str | None, Field(alias="unreadSelector")] = None
+    conversation_item_selector: Annotated[str | None, Field(alias="conversationItemSelector")] = None
+    conversation_title_selector: Annotated[str | None, Field(alias="conversationTitleSelector")] = None
+    message_text_selector: Annotated[str | None, Field(alias="messageTextSelector")] = None
+    enabled: bool | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class DmSyncResult(BaseModel):
@@ -150,5 +178,8 @@ class DmConfigRead(BaseModel):
     queue_name: Annotated[str, Field(alias="queueName")]
     redis_url_configured: Annotated[bool, Field(alias="redisUrlConfigured")]
     browser_profile_root: Annotated[str, Field(alias="browserProfileRoot")]
+    browser_headless: Annotated[bool, Field(alias="browserHeadless")]
+    browser_channel: Annotated[str, Field(alias="browserChannel")]
+    browser_live_send_enabled: Annotated[bool, Field(alias="browserLiveSendEnabled")]
 
     model_config = ConfigDict(populate_by_name=True)

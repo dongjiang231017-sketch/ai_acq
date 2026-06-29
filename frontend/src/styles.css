@@ -395,7 +395,7 @@ button {
 }
 
 .form-grid .wide,
-.form-grid button {
+.form-grid > button {
   grid-column: 1 / -1;
 }
 
@@ -895,7 +895,7 @@ td small {
   border: 1px solid #e2ebf6;
   border-radius: 12px;
   display: grid;
-  grid-template-columns: 78px auto minmax(0, 1fr);
+  grid-template-columns: 78px auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -920,6 +920,19 @@ td small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.adapter-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.adapter-form .wide {
+  grid-column: 1 / -1;
+}
+
+.adapter-form input {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
 }
 
 .template-card small {

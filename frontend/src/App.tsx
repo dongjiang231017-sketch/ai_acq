@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock3,
+  Code2,
   Database,
   Headphones,
   MessageSquareText,
@@ -63,6 +64,7 @@ const fallbackLeads: Lead[] = [
     category: "丽人美业",
     phone: "13800000001",
     contactName: "陈店长",
+    platformUrl: null,
     source: "平台采集",
     intentScore: 86,
     status: "待外呼",
@@ -75,6 +77,7 @@ const fallbackLeads: Lead[] = [
     category: "本地餐饮",
     phone: "13800000002",
     contactName: "周经理",
+    platformUrl: "https://e.meituan.com/",
     source: "导入线索",
     intentScore: 58,
     status: "待外呼",
@@ -87,6 +90,7 @@ const fallbackLeads: Lead[] = [
     category: "宠物服务",
     phone: "13800000003",
     contactName: "李老板",
+    platformUrl: "https://business.douyin.com/",
     source: "公开商源",
     intentScore: 77,
     status: "跟进中",
@@ -283,10 +287,17 @@ const fallbackDmPlatformConfigs: DmPlatformConfig[] = [
     homeUrl: "https://e.meituan.com/",
     inboxUrl: "",
     merchantSearchUrl: "",
+    loginCheckSelector: "",
+    riskCheckSelector: "",
+    merchantLinkSelector: "",
     messageButtonSelector: "",
     inputSelector: "",
     sendButtonSelector: "",
+    sentSuccessSelector: "",
     unreadSelector: "",
+    conversationItemSelector: "",
+    conversationTitleSelector: "",
+    messageTextSelector: "",
     enabled: false,
     createdAt: new Date().toISOString(),
   },
@@ -296,6 +307,25 @@ const fallbackDmSyncResult: DmSyncResult = {
   checked: 0,
   newReplies: 0,
   needsHandoff: 0,
+};
+
+const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
+  platform: "美团",
+  homeUrl: "https://e.meituan.com/",
+  inboxUrl: "",
+  merchantSearchUrl: "",
+  loginCheckSelector: "",
+  riskCheckSelector: "",
+  merchantLinkSelector: "",
+  messageButtonSelector: "",
+  inputSelector: "",
+  sendButtonSelector: "",
+  sentSuccessSelector: "",
+  unreadSelector: "",
+  conversationItemSelector: "",
+  conversationTitleSelector: "",
+  messageTextSelector: "",
+  enabled: false,
 };
 
 const fallbackDmTemplates: DmTemplate[] = [
@@ -408,6 +438,7 @@ function App() {
     category: "",
     phone: "",
     contactName: "",
+    platformUrl: "",
     source: "手动录入",
   });
   const [taskForm, setTaskForm] = useState({
@@ -444,6 +475,8 @@ function App() {
     content: "您好，看到{商家名称}适合做视频号本地生活团购曝光，想了解下您是否考虑新增线上获客渠道？",
     isActive: true,
   });
+  const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
+  const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
 
   const active = useMemo(
     () => modules.find((module) => module.key === activeModule) ?? modules[0],
@@ -533,11 +566,21 @@ function App() {
       ...leadForm,
       phone: leadForm.phone || null,
       contactName: leadForm.contactName || null,
+      platformUrl: leadForm.platformUrl || null,
     });
     setLeads((current) => [created, ...current]);
     setSelectedLeadIds((current) => [created.id, ...current]);
     setSelectedDmLeadIds((current) => [created.id, ...current]);
-    setLeadForm({ name: "", platform: "视频号", city: "", category: "", phone: "", contactName: "", source: "手动录入" });
+    setLeadForm({
+      name: "",
+      platform: "视频号",
+      city: "",
+      category: "",
+      phone: "",
+      contactName: "",
+      platformUrl: "",
+      source: "手动录入",
+    });
   }
 
   async function submitTask(event: React.FormEvent<HTMLFormElement>) {
@@ -674,6 +717,45 @@ function App() {
     setLeads(leadData);
   }
 
+  async function submitDmPlatformConfig(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const payload = {
+      ...dmPlatformForm,
+      enabled: Boolean(dmPlatformForm.enabled),
+    };
+    const saved = editingDmPlatformConfigId
+      ? await api.updateDmPlatformConfig(editingDmPlatformConfigId, payload)
+      : await api.createDmPlatformConfig(payload);
+    setDmPlatformConfigs((current) => {
+      if (!editingDmPlatformConfigId) return [saved, ...current];
+      return current.map((config) => (config.id === saved.id ? saved : config));
+    });
+    setEditingDmPlatformConfigId(null);
+    setDmPlatformForm(defaultDmPlatformForm);
+  }
+
+  function editDmPlatformConfig(config: DmPlatformConfig) {
+    setEditingDmPlatformConfigId(config.id);
+    setDmPlatformForm({
+      platform: config.platform,
+      homeUrl: config.homeUrl,
+      inboxUrl: config.inboxUrl,
+      merchantSearchUrl: config.merchantSearchUrl,
+      loginCheckSelector: config.loginCheckSelector,
+      riskCheckSelector: config.riskCheckSelector,
+      merchantLinkSelector: config.merchantLinkSelector,
+      messageButtonSelector: config.messageButtonSelector,
+      inputSelector: config.inputSelector,
+      sendButtonSelector: config.sendButtonSelector,
+      sentSuccessSelector: config.sentSuccessSelector,
+      unreadSelector: config.unreadSelector,
+      conversationItemSelector: config.conversationItemSelector,
+      conversationTitleSelector: config.conversationTitleSelector,
+      messageTextSelector: config.messageTextSelector,
+      enabled: config.enabled,
+    });
+  }
+
   function toggleLead(leadId: string) {
     setSelectedLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
@@ -733,6 +815,14 @@ function App() {
               <label>
                 电话
                 <input value={leadForm.phone} onChange={(event) => setLeadForm({ ...leadForm, phone: event.target.value })} />
+              </label>
+              <label className="wide">
+                平台店铺 URL
+                <input
+                  placeholder="用于真实平台私信定位商家，可先留空"
+                  value={leadForm.platformUrl}
+                  onChange={(event) => setLeadForm({ ...leadForm, platformUrl: event.target.value })}
+                />
               </label>
               <button className="primary-button" type="submit">
                 <CheckCircle2 size={16} />
@@ -1368,9 +1458,161 @@ function App() {
                     <strong>{config.platform}</strong>
                     <span>{config.enabled ? "已启用" : "待配置"}</span>
                     <small>{config.homeUrl || "未配置首页"}</small>
+                    <button className="row-action" onClick={() => editDmPlatformConfig(config)} type="button">
+                      编辑
+                    </button>
                   </article>
                 ))}
               </div>
+            </article>
+
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Adapter</p>
+                  <h2>真实平台适配器配置</h2>
+                </div>
+                <Code2 size={22} />
+              </div>
+              <form className="form-grid adapter-form" onSubmit={submitDmPlatformConfig}>
+                <label>
+                  平台
+                  <select
+                    value={dmPlatformForm.platform}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, platform: event.target.value })}
+                  >
+                    <option>美团</option>
+                    <option>饿了么</option>
+                    <option>抖音</option>
+                    <option>视频号</option>
+                  </select>
+                </label>
+                <label>
+                  启用状态
+                  <select
+                    value={dmPlatformForm.enabled ? "enabled" : "disabled"}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, enabled: event.target.value === "enabled" })}
+                  >
+                    <option value="disabled">待配置</option>
+                    <option value="enabled">已启用</option>
+                  </select>
+                </label>
+                <label>
+                  平台首页
+                  <input
+                    value={dmPlatformForm.homeUrl}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, homeUrl: event.target.value })}
+                  />
+                </label>
+                <label>
+                  收件箱 URL
+                  <input
+                    value={dmPlatformForm.inboxUrl}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, inboxUrl: event.target.value })}
+                  />
+                </label>
+                <label className="wide">
+                  商家搜索 URL 模板
+                  <input
+                    placeholder="支持 {商家名称}、{城市}、{品类}、{平台}"
+                    value={dmPlatformForm.merchantSearchUrl}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, merchantSearchUrl: event.target.value })}
+                  />
+                </label>
+                <label>
+                  登录态选择器
+                  <input
+                    value={dmPlatformForm.loginCheckSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, loginCheckSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  风控选择器
+                  <input
+                    value={dmPlatformForm.riskCheckSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, riskCheckSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  商家结果选择器
+                  <input
+                    value={dmPlatformForm.merchantLinkSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, merchantLinkSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  私信按钮选择器
+                  <input
+                    value={dmPlatformForm.messageButtonSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, messageButtonSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  输入框选择器
+                  <input
+                    value={dmPlatformForm.inputSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, inputSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  发送按钮选择器
+                  <input
+                    value={dmPlatformForm.sendButtonSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, sendButtonSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  发送成功选择器
+                  <input
+                    value={dmPlatformForm.sentSuccessSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, sentSuccessSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  未读消息选择器
+                  <input
+                    value={dmPlatformForm.unreadSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, unreadSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  会话条目选择器
+                  <input
+                    value={dmPlatformForm.conversationItemSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, conversationItemSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  会话标题选择器
+                  <input
+                    value={dmPlatformForm.conversationTitleSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, conversationTitleSelector: event.target.value })}
+                  />
+                </label>
+                <label>
+                  消息文本选择器
+                  <input
+                    value={dmPlatformForm.messageTextSelector}
+                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, messageTextSelector: event.target.value })}
+                  />
+                </label>
+                <div className="button-row wide">
+                  <button className="primary-button" type="submit">
+                    <CheckCircle2 size={16} />
+                    {editingDmPlatformConfigId ? "保存配置" : "新增配置"}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    onClick={() => {
+                      setEditingDmPlatformConfigId(null);
+                      setDmPlatformForm(defaultDmPlatformForm);
+                    }}
+                    type="button"
+                  >
+                    重置
+                  </button>
+                </div>
+              </form>
             </article>
           </section>
         )}
