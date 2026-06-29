@@ -33,6 +33,8 @@ export type OutreachTask = {
   failedCount: number;
   concurrency: number;
   scriptId?: string | null;
+  dmAccountId?: string | null;
+  dmTemplateId?: string | null;
   scheduledAt?: string | null;
   startedAt?: string | null;
   finishedAt?: string | null;
@@ -101,6 +103,69 @@ export type TelephonyConfig = {
   asteriskTrunkName: string;
 };
 
+export type DmOverview = {
+  accounts: number;
+  activeAccounts: number;
+  todaySent: number;
+  replies: number;
+  needsHandoff: number;
+  intentCount: number;
+};
+
+export type DmAccount = {
+  id: string;
+  platform: string;
+  accountName: string;
+  loginLabel?: string | null;
+  status: string;
+  dailyLimit: number;
+  sentToday: number;
+  lastSyncAt?: string | null;
+  createdAt: string;
+};
+
+export type DmTemplate = {
+  id: string;
+  name: string;
+  platform: string;
+  content: string;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type DmConversation = {
+  id: string;
+  taskId: string;
+  leadId: string;
+  accountId?: string | null;
+  platform: string;
+  merchantName: string;
+  status: string;
+  intentLevel: string;
+  lastMessage: string;
+  lastMessageAt?: string | null;
+  needHandoff: boolean;
+  createdAt: string;
+};
+
+export type DmMessage = {
+  id: string;
+  conversationId: string;
+  direction: "outbound" | "inbound" | string;
+  content: string;
+  status: string;
+  externalMessageId?: string | null;
+  rawPayload?: string | null;
+  createdAt: string;
+};
+
+export type DmConfig = {
+  gatewayMode: string;
+  queueEnabled: boolean;
+  queueName: string;
+  redisUrlConfigured: boolean;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -154,4 +219,45 @@ export const api = {
   callScripts: () => request<CallScript[]>("/outbound/scripts"),
   recallRules: () => request<RecallRule[]>("/outbound/recall-rules"),
   telephonyConfig: () => request<TelephonyConfig>("/outbound/telephony/config"),
+  dmOverview: () => request<DmOverview>("/direct-messages/overview"),
+  dmConfig: () => request<DmConfig>("/direct-messages/config"),
+  dmAccounts: () => request<DmAccount[]>("/direct-messages/accounts"),
+  createDmAccount: (account: {
+    platform: string;
+    accountName: string;
+    loginLabel?: string | null;
+    status: string;
+    dailyLimit: number;
+  }) =>
+    request<DmAccount>("/direct-messages/accounts", {
+      method: "POST",
+      body: JSON.stringify(account),
+    }),
+  dmTemplates: () => request<DmTemplate[]>("/direct-messages/templates"),
+  createDmTemplate: (template: { name: string; platform: string; content: string; isActive: boolean }) =>
+    request<DmTemplate>("/direct-messages/templates", {
+      method: "POST",
+      body: JSON.stringify(template),
+    }),
+  dmTasks: () => request<OutreachTask[]>("/direct-messages/tasks"),
+  createDmTask: (task: {
+    name: string;
+    leadIds: string[];
+    accountId?: string | null;
+    templateId?: string | null;
+    scheduledAt?: string | null;
+  }) =>
+    request<OutreachTask>("/direct-messages/tasks", {
+      method: "POST",
+      body: JSON.stringify(task),
+    }),
+  startDmTask: (taskId: string) =>
+    request<OutreachTask>(`/direct-messages/tasks/${taskId}/start`, {
+      method: "POST",
+    }),
+  dmConversations: () => request<DmConversation[]>("/direct-messages/conversations"),
+  dmMessages: (conversationId?: string) =>
+    request<DmMessage[]>(
+      conversationId ? `/direct-messages/messages?conversationId=${encodeURIComponent(conversationId)}` : "/direct-messages/messages",
+    ),
 };

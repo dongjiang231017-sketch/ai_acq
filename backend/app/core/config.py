@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     outbound_queue_enabled: bool = False
     outbound_queue_name: str = "ai_acq:outbound_tasks"
+    dm_queue_enabled: bool = False
+    dm_queue_name: str = "ai_acq:dm_tasks"
+    dm_gateway_mode: str = "simulator"
     telephony_gateway_mode: str = "simulator"
     asterisk_host: str = "127.0.0.1"
     asterisk_ami_port: int = 5038

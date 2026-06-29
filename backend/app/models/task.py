@@ -21,6 +21,8 @@ class OutreachTask(Base):
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
     concurrency: Mapped[int] = mapped_column(Integer, default=1)
     script_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dm_account_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dm_template_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     target_lead_ids: Mapped[str] = mapped_column(Text, default="")
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -87,3 +89,70 @@ class RecallRule(Base):
 
     def __repr__(self) -> str:
         return self.name
+
+
+class DirectMessageAccount(Base):
+    __tablename__ = "dm_accounts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    platform: Mapped[str] = mapped_column(String(40), index=True)
+    account_name: Mapped[str] = mapped_column(String(120), index=True)
+    login_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="待登录", index=True)
+    daily_limit: Mapped[int] = mapped_column(Integer, default=200)
+    sent_today: Mapped[int] = mapped_column(Integer, default=0)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"{self.platform} {self.account_name}"
+
+
+class DirectMessageTemplate(Base):
+    __tablename__ = "dm_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    platform: Mapped[str] = mapped_column(String(40), default="通用", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+class DirectMessageConversation(Base):
+    __tablename__ = "dm_conversations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    task_id: Mapped[str] = mapped_column(String(32), ForeignKey("outreach_tasks.id"), index=True)
+    lead_id: Mapped[str] = mapped_column(String(32), ForeignKey("merchant_leads.id"), index=True)
+    account_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("dm_accounts.id"), nullable=True, index=True)
+    platform: Mapped[str] = mapped_column(String(40), index=True)
+    merchant_name: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="已发送", index=True)
+    intent_level: Mapped[str] = mapped_column(String(20), default="C", index=True)
+    last_message: Mapped[str] = mapped_column(Text, default="")
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    need_handoff: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"{self.platform} {self.merchant_name}"
+
+
+class DirectMessage(Base):
+    __tablename__ = "dm_messages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    conversation_id: Mapped[str] = mapped_column(String(32), ForeignKey("dm_conversations.id"), index=True)
+    direction: Mapped[str] = mapped_column(String(20), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(40), default="sent", index=True)
+    external_message_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"{self.direction} {self.status}"

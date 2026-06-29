@@ -24,6 +24,11 @@ import {
 import {
   CallRecord,
   CallScript,
+  DmAccount,
+  DmConversation,
+  DmMessage,
+  DmOverview,
+  DmTemplate,
   Lead,
   ModuleSummary,
   OutboundOverview,
@@ -217,8 +222,109 @@ const fallbackRules: RecallRule[] = [
   },
 ];
 
+const fallbackDmOverview: DmOverview = {
+  accounts: 3,
+  activeAccounts: 2,
+  todaySent: 128,
+  replies: 32,
+  needsHandoff: 9,
+  intentCount: 18,
+};
+
+const fallbackDmAccounts: DmAccount[] = [
+  {
+    id: "dm_account_1",
+    platform: "美团",
+    accountName: "南昌本地生活招商号",
+    loginLabel: "已登录",
+    status: "可用",
+    dailyLimit: 200,
+    sentToday: 86,
+    lastSyncAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "dm_account_2",
+    platform: "饿了么",
+    accountName: "餐饮团购增长号",
+    loginLabel: "待扫码",
+    status: "待登录",
+    dailyLimit: 150,
+    sentToday: 0,
+    lastSyncAt: null,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackDmTemplates: DmTemplate[] = [
+  {
+    id: "dm_template_1",
+    name: "视频号团购邀约私信",
+    platform: "通用",
+    content: "您好，看到{商家名称}适合做视频号本地生活团购曝光，想了解下您是否考虑新增线上获客渠道？",
+    isActive: true,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackDmConversations: DmConversation[] = [
+  {
+    id: "dm_conv_1",
+    taskId: "task_2",
+    leadId: "lead_3",
+    accountId: "dm_account_1",
+    platform: "美团",
+    merchantName: "宠物生活馆",
+    status: "已回复",
+    intentLevel: "A",
+    lastMessage: "可以，发我入驻资料看看。",
+    lastMessageAt: new Date().toISOString(),
+    needHandoff: true,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "dm_conv_2",
+    taskId: "task_2",
+    leadId: "lead_2",
+    accountId: "dm_account_1",
+    platform: "美团",
+    merchantName: "南昌餐饮店",
+    status: "已发送",
+    intentLevel: "C",
+    lastMessage: "您好，看到南昌餐饮店适合做视频号本地生活团购曝光。",
+    lastMessageAt: new Date().toISOString(),
+    needHandoff: false,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackDmMessages: DmMessage[] = [
+  {
+    id: "dm_msg_1",
+    conversationId: "dm_conv_1",
+    direction: "outbound",
+    content: "您好，看到宠物生活馆适合做视频号本地生活团购曝光，想了解下您是否考虑新增线上获客渠道？",
+    status: "已回复",
+    externalMessageId: "sim-dm-task_2-lead_3",
+    rawPayload: '{"provider":"simulator","disposition":"interested_reply"}',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "dm_msg_2",
+    conversationId: "dm_conv_1",
+    direction: "inbound",
+    content: "可以，发我入驻资料看看。",
+    status: "已接收",
+    externalMessageId: "sim-dm-task_2-lead_3-reply",
+    rawPayload: '{"provider":"simulator","direction":"inbound"}',
+    createdAt: new Date().toISOString(),
+  },
+];
+
 const outboundTabs = ["外呼总览", "任务列表", "话术流程", "通话记录", "重拨规则", "实时监听"] as const;
 type OutboundTab = (typeof outboundTabs)[number];
+const dmTabs = ["私信总览", "任务列表", "账号管理", "消息模板", "会话记录", "回复监听"] as const;
+type DmTab = (typeof dmTabs)[number];
 
 function formatDuration(seconds: number) {
   const minute = Math.floor(seconds / 60)
@@ -239,11 +345,18 @@ function App() {
   const [liveCalls, setLiveCalls] = useState<CallRecord[]>(fallbackRecords);
   const [scripts, setScripts] = useState<CallScript[]>(fallbackScripts);
   const [recallRules, setRecallRules] = useState<RecallRule[]>(fallbackRules);
+  const [dmOverview, setDmOverview] = useState<DmOverview>(fallbackDmOverview);
+  const [dmAccounts, setDmAccounts] = useState<DmAccount[]>(fallbackDmAccounts);
+  const [dmTemplates, setDmTemplates] = useState<DmTemplate[]>(fallbackDmTemplates);
+  const [dmConversations, setDmConversations] = useState<DmConversation[]>(fallbackDmConversations);
+  const [dmMessages, setDmMessages] = useState<DmMessage[]>(fallbackDmMessages);
   const [activeModule, setActiveModule] = useState("outbound");
   const [apiStatus, setApiStatus] = useState("连接中");
   const [isLoading, setIsLoading] = useState(false);
   const [activeOutboundTab, setActiveOutboundTab] = useState<OutboundTab>("实时监听");
+  const [activeDmTab, setActiveDmTab] = useState<DmTab>("回复监听");
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
+  const [selectedDmLeadIds, setSelectedDmLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [leadForm, setLeadForm] = useState({
     name: "",
     platform: "视频号",
@@ -264,15 +377,38 @@ function App() {
     concurrency: 10,
     scheduledAt: "",
   });
+  const [dmForm, setDmForm] = useState({
+    name: "美团高意向商家首轮私信",
+    accountId: "",
+    templateId: "",
+    scheduledAt: "",
+  });
+  const [dmAccountForm, setDmAccountForm] = useState({
+    platform: "美团",
+    accountName: "",
+    loginLabel: "待扫码",
+    status: "待登录",
+    dailyLimit: 200,
+  });
+  const [dmTemplateForm, setDmTemplateForm] = useState({
+    name: "视频号团购邀约私信",
+    platform: "通用",
+    content: "您好，看到{商家名称}适合做视频号本地生活团购曝光，想了解下您是否考虑新增线上获客渠道？",
+    isActive: true,
+  });
 
   const active = useMemo(
     () => modules.find((module) => module.key === activeModule) ?? modules[0],
     [activeModule, modules],
   );
   const outboundTasks = useMemo(() => tasks.filter((task) => task.channel === "call"), [tasks]);
+  const dmTasks = useMemo(() => tasks.filter((task) => task.channel === "dm"), [tasks]);
   const callableLeads = useMemo(() => leads.filter((lead) => Boolean(lead.phone)), [leads]);
+  const dmReachableLeads = useMemo(() => leads.filter((lead) => Boolean(lead.platform)), [leads]);
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
+  const activeDmAccount = dmAccounts.find((account) => account.id === dmForm.accountId) ?? dmAccounts[0];
+  const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
 
   async function loadData() {
     setIsLoading(true);
@@ -286,6 +422,11 @@ function App() {
       api.liveCalls(),
       api.callScripts(),
       api.recallRules(),
+      api.dmOverview(),
+      api.dmAccounts(),
+      api.dmTemplates(),
+      api.dmConversations(),
+      api.dmMessages(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -299,6 +440,7 @@ function App() {
       const nextLeads = leadResult.value;
       setLeads(nextLeads);
       setSelectedLeadIds((current) => current.filter((id) => nextLeads.some((lead) => lead.id === id)));
+      setSelectedDmLeadIds((current) => current.filter((id) => nextLeads.some((lead) => lead.id === id)));
     }
     if (results[3].status === "fulfilled") setTasks(results[3].value);
     if (results[4].status === "fulfilled") setOverview(results[4].value);
@@ -306,6 +448,27 @@ function App() {
     if (results[6].status === "fulfilled") setLiveCalls(results[6].value);
     if (results[7].status === "fulfilled") setScripts(results[7].value);
     if (results[8].status === "fulfilled") setRecallRules(results[8].value);
+    if (results[9].status === "fulfilled") setDmOverview(results[9].value);
+    const dmAccountsResult = results[10];
+    if (dmAccountsResult.status === "fulfilled") {
+      const nextAccounts = dmAccountsResult.value;
+      setDmAccounts(nextAccounts);
+      setDmForm((current) => ({
+        ...current,
+        accountId: current.accountId || nextAccounts[0]?.id || "",
+      }));
+    }
+    const dmTemplatesResult = results[11];
+    if (dmTemplatesResult.status === "fulfilled") {
+      const nextTemplates = dmTemplatesResult.value;
+      setDmTemplates(nextTemplates);
+      setDmForm((current) => ({
+        ...current,
+        templateId: current.templateId || nextTemplates[0]?.id || "",
+      }));
+    }
+    if (results[12].status === "fulfilled") setDmConversations(results[12].value);
+    if (results[13].status === "fulfilled") setDmMessages(results[13].value);
     setIsLoading(false);
   }
 
@@ -324,6 +487,7 @@ function App() {
     });
     setLeads((current) => [created, ...current]);
     setSelectedLeadIds((current) => [created.id, ...current]);
+    setSelectedDmLeadIds((current) => [created.id, ...current]);
     setLeadForm({ name: "", platform: "视频号", city: "", category: "", phone: "", contactName: "", source: "手动录入" });
   }
 
@@ -373,8 +537,71 @@ function App() {
     setActiveOutboundTab("实时监听");
   }
 
+  async function submitDmTask(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const leadIds = selectedDmLeadIds.length > 0 ? selectedDmLeadIds : dmReachableLeads.slice(0, 20).map((lead) => lead.id);
+    if (!dmForm.name.trim() || leadIds.length === 0) return;
+
+    const created = await api.createDmTask({
+      name: dmForm.name,
+      leadIds,
+      accountId: activeDmAccount?.id ?? null,
+      templateId: activeDmTemplate?.id ?? null,
+      scheduledAt: dmForm.scheduledAt || null,
+    });
+    setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
+    setActiveModule("dm");
+    setActiveDmTab("任务列表");
+  }
+
+  async function startDmTask(taskId: string) {
+    const updated = await api.startDmTask(taskId);
+    setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)));
+    const [overviewData, conversationData, messageData, leadData, accountData] = await Promise.all([
+      api.dmOverview(),
+      api.dmConversations(),
+      api.dmMessages(),
+      api.leads(),
+      api.dmAccounts(),
+    ]);
+    setDmOverview(overviewData);
+    setDmConversations(conversationData);
+    setDmMessages(messageData);
+    setLeads(leadData);
+    setDmAccounts(accountData);
+    setActiveDmTab("回复监听");
+  }
+
+  async function submitDmAccount(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!dmAccountForm.accountName.trim()) return;
+
+    const created = await api.createDmAccount({
+      ...dmAccountForm,
+      dailyLimit: Number(dmAccountForm.dailyLimit),
+    });
+    setDmAccounts((current) => [created, ...current]);
+    setDmForm((current) => ({ ...current, accountId: created.id }));
+    setDmAccountForm({ platform: "美团", accountName: "", loginLabel: "待扫码", status: "待登录", dailyLimit: 200 });
+  }
+
+  async function submitDmTemplate(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!dmTemplateForm.name.trim() || !dmTemplateForm.content.trim()) return;
+
+    const created = await api.createDmTemplate(dmTemplateForm);
+    setDmTemplates((current) => [created, ...current]);
+    setDmForm((current) => ({ ...current, templateId: created.id }));
+  }
+
   function toggleLead(leadId: string) {
     setSelectedLeadIds((current) =>
+      current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
+    );
+  }
+
+  function toggleDmLead(leadId: string) {
+    setSelectedDmLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
     );
   }
@@ -783,6 +1010,339 @@ function App() {
     );
   }
 
+  function renderDmWorkspace() {
+    const showOverview = activeDmTab === "私信总览";
+    const showTasks = showOverview || activeDmTab === "任务列表";
+    const showAccounts = showOverview || activeDmTab === "账号管理";
+    const showTemplates = showOverview || activeDmTab === "消息模板";
+    const showConversations = showOverview || activeDmTab === "会话记录";
+    const showRealtime = showOverview || activeDmTab === "回复监听";
+
+    return (
+      <>
+        <section className="outbound-tabs" aria-label="平台私信模块页面">
+          {dmTabs.map((tab) => (
+            <button className={tab === activeDmTab ? "is-active" : ""} key={tab} onClick={() => setActiveDmTab(tab)} type="button">
+              {tab}
+            </button>
+          ))}
+        </section>
+
+        <section className="metrics outbound-metrics">
+          <MetricCard icon={<MessageSquareText size={20} />} label="平台账号" value={dmOverview.activeAccounts} detail={`共 ${dmOverview.accounts} 个`} tone="blue" />
+          <MetricCard icon={<Zap size={20} />} label="今日发送" value={dmOverview.todaySent} detail="平台私信" tone="green" />
+          <MetricCard icon={<Activity size={20} />} label="商家回复" value={dmOverview.replies} detail="今日回复" tone="amber" />
+          <MetricCard icon={<Headphones size={20} />} label="需接管" value={dmOverview.needsHandoff} detail="人工跟进" tone="rose" />
+        </section>
+
+        {showRealtime && (
+          <section className="content-grid outbound-main">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Live Inbox</p>
+                  <h2>平台私信回复监听</h2>
+                </div>
+                <button className="secondary-button" onClick={loadData} type="button">
+                  <RefreshCw size={16} className={isLoading ? "spin" : ""} />
+                  刷新
+                </button>
+              </div>
+              <div className="dm-inbox-grid">
+                <div className="conversation-list">
+                  {dmConversations.length === 0 && <div className="empty-state">暂无私信会话，创建任务后点击启动。</div>}
+                  {dmConversations.slice(0, 8).map((conversation) => (
+                    <article className={conversation.needHandoff ? "dm-conversation is-hot" : "dm-conversation"} key={conversation.id}>
+                      <div>
+                        <strong>{conversation.merchantName}</strong>
+                        <span>{conversation.platform}</span>
+                      </div>
+                      <p>{conversation.lastMessage}</p>
+                      <small>
+                        {conversation.status} · 意向 {conversation.intentLevel} · {conversation.needHandoff ? "需接管" : "自动跟进"}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+                <div className="message-list">
+                  {dmMessages.length === 0 && <div className="empty-state">暂无消息内容。</div>}
+                  {dmMessages.slice(0, 8).map((message) => (
+                    <article className={`message-bubble ${message.direction === "inbound" ? "is-inbound" : "is-outbound"}`} key={message.id}>
+                      <span>{message.direction === "inbound" ? "商家回复" : "系统私信"}</span>
+                      <p>{message.content}</p>
+                      <small>{message.status}</small>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showTasks && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Form</p>
+                  <h2>创建平台私信任务</h2>
+                </div>
+                <MessageSquareText size={22} />
+              </div>
+              <form className="form-grid" onSubmit={submitDmTask}>
+                <label className="wide">
+                  任务名称
+                  <input value={dmForm.name} onChange={(event) => setDmForm({ ...dmForm, name: event.target.value })} />
+                </label>
+                <label>
+                  平台账号
+                  <select value={dmForm.accountId} onChange={(event) => setDmForm({ ...dmForm, accountId: event.target.value })}>
+                    {dmAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.platform} · {account.accountName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  消息模板
+                  <select value={dmForm.templateId} onChange={(event) => setDmForm({ ...dmForm, templateId: event.target.value })}>
+                    {dmTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="wide">
+                  预约时间
+                  <input
+                    type="datetime-local"
+                    value={dmForm.scheduledAt}
+                    onChange={(event) => setDmForm({ ...dmForm, scheduledAt: event.target.value })}
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  <Plus size={16} />
+                  创建私信任务
+                </button>
+              </form>
+
+              <div className="lead-picker">
+                <div className="section-caption">
+                  <strong>筛选私信对象</strong>
+                  <small>{selectedDmLeadIds.length} 个已选</small>
+                </div>
+                <LeadTable leads={dmReachableLeads} selectable selectedLeadIds={selectedDmLeadIds} onToggleLead={toggleDmLead} />
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Queue</p>
+                  <h2>私信任务列表</h2>
+                </div>
+                <Clock3 size={22} />
+              </div>
+              <TaskList tasks={dmTasks} onStart={startDmTask} startableChannel="dm" />
+            </article>
+          </section>
+        )}
+
+        {showAccounts && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Accounts</p>
+                  <h2>平台账号管理</h2>
+                </div>
+                <Users size={22} />
+              </div>
+              <form className="form-grid" onSubmit={submitDmAccount}>
+                <label>
+                  平台
+                  <select value={dmAccountForm.platform} onChange={(event) => setDmAccountForm({ ...dmAccountForm, platform: event.target.value })}>
+                    <option>美团</option>
+                    <option>饿了么</option>
+                    <option>抖音</option>
+                    <option>视频号</option>
+                  </select>
+                </label>
+                <label>
+                  账号名称
+                  <input
+                    value={dmAccountForm.accountName}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, accountName: event.target.value })}
+                  />
+                </label>
+                <label>
+                  登录标识
+                  <input
+                    value={dmAccountForm.loginLabel}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, loginLabel: event.target.value })}
+                  />
+                </label>
+                <label>
+                  日发送上限
+                  <input
+                    min={1}
+                    type="number"
+                    value={dmAccountForm.dailyLimit}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, dailyLimit: Number(event.target.value) })}
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  <CheckCircle2 size={16} />
+                  保存账号
+                </button>
+              </form>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Status</p>
+                  <h2>账号额度和登录状态</h2>
+                </div>
+                <ShieldAlert size={22} />
+              </div>
+              <div className="account-list">
+                {dmAccounts.map((account) => (
+                  <article className="account-row" key={account.id}>
+                    <div>
+                      <strong>{account.accountName}</strong>
+                      <small>{account.platform} · {account.loginLabel ?? "未绑定"}</small>
+                    </div>
+                    <span>{account.status}</span>
+                    <em>
+                      {account.sentToday}/{account.dailyLimit}
+                    </em>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showTemplates && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Template</p>
+                  <h2>私信模板表单</h2>
+                </div>
+                <Bot size={22} />
+              </div>
+              <form className="form-grid" onSubmit={submitDmTemplate}>
+                <label>
+                  模板名称
+                  <input value={dmTemplateForm.name} onChange={(event) => setDmTemplateForm({ ...dmTemplateForm, name: event.target.value })} />
+                </label>
+                <label>
+                  适用平台
+                  <select value={dmTemplateForm.platform} onChange={(event) => setDmTemplateForm({ ...dmTemplateForm, platform: event.target.value })}>
+                    <option>通用</option>
+                    <option>美团</option>
+                    <option>饿了么</option>
+                    <option>抖音</option>
+                  </select>
+                </label>
+                <label className="wide">
+                  私信内容
+                  <textarea
+                    value={dmTemplateForm.content}
+                    onChange={(event) => setDmTemplateForm({ ...dmTemplateForm, content: event.target.value })}
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  <CheckCircle2 size={16} />
+                  保存模板
+                </button>
+              </form>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Library</p>
+                  <h2>模板库</h2>
+                </div>
+                <ClipboardList size={22} />
+              </div>
+              <div className="template-list">
+                {dmTemplates.map((template) => (
+                  <article className="template-card" key={template.id}>
+                    <div>
+                      <strong>{template.name}</strong>
+                      <span>{template.platform}</span>
+                    </div>
+                    <p>{template.content}</p>
+                    <small>{template.isActive ? "启用中" : "停用"}</small>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showConversations && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Records</p>
+                  <h2>私信会话记录</h2>
+                </div>
+                <ClipboardList size={22} />
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>商家</th>
+                      <th>平台</th>
+                      <th>状态</th>
+                      <th>意向</th>
+                      <th>最后消息</th>
+                      <th>动作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dmConversations.length === 0 && (
+                      <tr>
+                        <td colSpan={6}>
+                          <span className="empty-state">暂无私信会话。</span>
+                        </td>
+                      </tr>
+                    )}
+                    {dmConversations.map((conversation) => (
+                      <tr key={conversation.id}>
+                        <td>
+                          <strong>{conversation.merchantName}</strong>
+                          <small>{conversation.lastMessageAt ? new Date(conversation.lastMessageAt).toLocaleString() : "未回复"}</small>
+                        </td>
+                        <td>{conversation.platform}</td>
+                        <td>{conversation.status}</td>
+                        <td>
+                          <span className={`intent-pill intent-${conversation.intentLevel.toLowerCase()}`}>{conversation.intentLevel}</span>
+                        </td>
+                        <td>{conversation.lastMessage}</td>
+                        <td>{conversation.needHandoff ? "人工接管" : "自动跟进"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+        )}
+      </>
+    );
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -834,8 +1394,12 @@ function App() {
             <button
               className="primary-button"
               onClick={() => {
-                setActiveModule("outbound");
-                setActiveOutboundTab("任务列表");
+                if (activeModule === "dm") {
+                  setActiveDmTab("任务列表");
+                } else {
+                  setActiveModule("outbound");
+                  setActiveOutboundTab("任务列表");
+                }
               }}
               type="button"
             >
@@ -847,6 +1411,8 @@ function App() {
 
         {activeModule === "outbound" ? (
           renderOutboundWorkspace()
+        ) : activeModule === "dm" ? (
+          renderDmWorkspace()
         ) : (
           <>
             <section className="metrics">
@@ -949,7 +1515,15 @@ function LeadTable({
   );
 }
 
-function TaskList({ tasks, onStart }: { tasks: OutreachTask[]; onStart: (taskId: string) => void }) {
+function TaskList({
+  tasks,
+  onStart,
+  startableChannel = "call",
+}: {
+  tasks: OutreachTask[];
+  onStart: (taskId: string) => void;
+  startableChannel?: OutreachTask["channel"];
+}) {
   return (
     <div className="task-list">
       {tasks.length === 0 && <div className="empty-state">暂无任务，先创建一个外呼或私信任务。</div>}
@@ -963,7 +1537,7 @@ function TaskList({ tasks, onStart }: { tasks: OutreachTask[]; onStart: (taskId:
             </small>
           </div>
           <em>{task.status}</em>
-          {task.channel === "call" && (
+          {task.channel === startableChannel && (
             <button className="row-action" onClick={() => onStart(task.id)} type="button">
               启动
             </button>

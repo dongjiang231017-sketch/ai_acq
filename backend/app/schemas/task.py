@@ -28,6 +28,8 @@ class TaskRead(BaseModel):
     failed_count: Annotated[int, Field(alias="failedCount")]
     concurrency: int
     script_id: Annotated[str | None, Field(alias="scriptId")]
+    dm_account_id: Annotated[str | None, Field(alias="dmAccountId")]
+    dm_template_id: Annotated[str | None, Field(alias="dmTemplateId")]
     scheduled_at: Annotated[datetime | None, Field(alias="scheduledAt")]
     started_at: Annotated[datetime | None, Field(alias="startedAt")]
     finished_at: Annotated[datetime | None, Field(alias="finishedAt")]

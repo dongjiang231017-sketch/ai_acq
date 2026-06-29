@@ -8,7 +8,16 @@ from starlette.responses import RedirectResponse
 from app.core.config import settings
 from app.db.session import engine
 from app.models.lead import MerchantLead
-from app.models.task import CallRecord, CallScript, OutreachTask, RecallRule
+from app.models.task import (
+    CallRecord,
+    CallScript,
+    DirectMessage,
+    DirectMessageAccount,
+    DirectMessageConversation,
+    DirectMessageTemplate,
+    OutreachTask,
+    RecallRule,
+)
 
 
 class AdminAuth(AuthenticationBackend):
@@ -185,6 +194,113 @@ class RecallRuleAdmin(ModelView, model=RecallRule):
     }
 
 
+class DirectMessageAccountAdmin(ModelView, model=DirectMessageAccount):
+    name = "平台账号"
+    name_plural = "平台私信账号"
+    icon = "fa-solid fa-user-shield"
+
+    column_list = [
+        DirectMessageAccount.platform,
+        DirectMessageAccount.account_name,
+        DirectMessageAccount.login_label,
+        DirectMessageAccount.status,
+        DirectMessageAccount.daily_limit,
+        DirectMessageAccount.sent_today,
+        DirectMessageAccount.last_sync_at,
+    ]
+    column_searchable_list = [DirectMessageAccount.platform, DirectMessageAccount.account_name, DirectMessageAccount.status]
+    column_sortable_list = [DirectMessageAccount.created_at, DirectMessageAccount.sent_today, DirectMessageAccount.daily_limit]
+    column_labels = {
+        DirectMessageAccount.platform: "平台",
+        DirectMessageAccount.account_name: "账号名称",
+        DirectMessageAccount.login_label: "登录标识",
+        DirectMessageAccount.status: "状态",
+        DirectMessageAccount.daily_limit: "日上限",
+        DirectMessageAccount.sent_today: "今日已发",
+        DirectMessageAccount.last_sync_at: "最近同步",
+        DirectMessageAccount.created_at: "创建时间",
+    }
+
+
+class DirectMessageTemplateAdmin(ModelView, model=DirectMessageTemplate):
+    name = "私信模板"
+    name_plural = "私信模板"
+    icon = "fa-solid fa-message"
+
+    column_list = [
+        DirectMessageTemplate.name,
+        DirectMessageTemplate.platform,
+        DirectMessageTemplate.is_active,
+        DirectMessageTemplate.created_at,
+    ]
+    column_searchable_list = [DirectMessageTemplate.name, DirectMessageTemplate.platform, DirectMessageTemplate.content]
+    column_sortable_list = [DirectMessageTemplate.created_at, DirectMessageTemplate.is_active]
+    column_labels = {
+        DirectMessageTemplate.name: "模板名称",
+        DirectMessageTemplate.platform: "适用平台",
+        DirectMessageTemplate.content: "内容",
+        DirectMessageTemplate.is_active: "启用",
+        DirectMessageTemplate.created_at: "创建时间",
+    }
+
+
+class DirectMessageConversationAdmin(ModelView, model=DirectMessageConversation):
+    name = "私信会话"
+    name_plural = "私信会话"
+    icon = "fa-solid fa-comments"
+
+    column_list = [
+        DirectMessageConversation.platform,
+        DirectMessageConversation.merchant_name,
+        DirectMessageConversation.status,
+        DirectMessageConversation.intent_level,
+        DirectMessageConversation.need_handoff,
+        DirectMessageConversation.last_message_at,
+        DirectMessageConversation.created_at,
+    ]
+    column_searchable_list = [
+        DirectMessageConversation.platform,
+        DirectMessageConversation.merchant_name,
+        DirectMessageConversation.status,
+    ]
+    column_sortable_list = [DirectMessageConversation.created_at, DirectMessageConversation.last_message_at]
+    column_default_sort = [(DirectMessageConversation.created_at, True)]
+    column_labels = {
+        DirectMessageConversation.platform: "平台",
+        DirectMessageConversation.merchant_name: "商家",
+        DirectMessageConversation.status: "状态",
+        DirectMessageConversation.intent_level: "意向等级",
+        DirectMessageConversation.last_message: "最后消息",
+        DirectMessageConversation.need_handoff: "需接管",
+        DirectMessageConversation.last_message_at: "最后消息时间",
+        DirectMessageConversation.created_at: "创建时间",
+    }
+
+
+class DirectMessageAdmin(ModelView, model=DirectMessage):
+    name = "私信消息"
+    name_plural = "私信消息"
+    icon = "fa-solid fa-envelope-open-text"
+
+    column_list = [
+        DirectMessage.direction,
+        DirectMessage.status,
+        DirectMessage.external_message_id,
+        DirectMessage.created_at,
+    ]
+    column_searchable_list = [DirectMessage.direction, DirectMessage.status, DirectMessage.content]
+    column_sortable_list = [DirectMessage.created_at]
+    column_default_sort = [(DirectMessage.created_at, True)]
+    column_labels = {
+        DirectMessage.direction: "方向",
+        DirectMessage.content: "内容",
+        DirectMessage.status: "状态",
+        DirectMessage.external_message_id: "平台消息ID",
+        DirectMessage.raw_payload: "原始事件",
+        DirectMessage.created_at: "创建时间",
+    }
+
+
 def setup_admin(app: FastAPI) -> None:
     authentication_backend = AdminAuth(secret_key=settings.admin_secret_key, same_site="lax")
     admin = Admin(
@@ -199,3 +315,7 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(CallScriptAdmin)
     admin.add_view(CallRecordAdmin)
     admin.add_view(RecallRuleAdmin)
+    admin.add_view(DirectMessageAccountAdmin)
+    admin.add_view(DirectMessageTemplateAdmin)
+    admin.add_view(DirectMessageConversationAdmin)
+    admin.add_view(DirectMessageAdmin)
