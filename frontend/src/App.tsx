@@ -35,11 +35,23 @@ import {
   DmPlatformConfig,
   DmSyncResult,
   DmTemplate,
+  FollowUpWorkOrder,
+  IntentCustomer,
+  IntentEvent,
+  IntentOverview,
+  KnowledgeBaseItem,
   Lead,
+  LearningExperiment,
+  LearningOverview,
+  LearningSuggestion,
   ModuleSummary,
   OutboundOverview,
   OutreachTask,
   RecallRule,
+  VoiceOverview,
+  VoiceProfile,
+  VoiceTrainingJob,
+  VoiceUsageRecord,
   api,
 } from "./lib/api";
 
@@ -232,8 +244,8 @@ const fallbackRules: RecallRule[] = [
 ];
 
 const fallbackDmOverview: DmOverview = {
-  accounts: 3,
-  activeAccounts: 2,
+  accounts: 4,
+  activeAccounts: 4,
   todaySent: 128,
   replies: 32,
   needsHandoff: 9,
@@ -264,12 +276,12 @@ const fallbackDmAccounts: DmAccount[] = [
   {
     id: "dm_account_2",
     platform: "饿了么",
-    accountName: "餐饮团购增长号",
+    accountName: "饿了么个人号-餐饮招商",
     loginLabel: "待绑定个人号",
-    status: "待登录",
+    status: "可用",
     browserProfileKey: "eleme-food-growth",
     browserProfilePath: ".dm_browser_profiles/eleme-food-growth",
-    sessionStatus: "未登录",
+    sessionStatus: "模拟可用",
     riskStatus: "正常",
     dailyLimit: 150,
     sentToday: 0,
@@ -278,32 +290,77 @@ const fallbackDmAccounts: DmAccount[] = [
     lastSentAt: null,
     lastSyncAt: null,
     lastLoginCheckAt: null,
-    lastError: "请先扫码登录",
+    lastError: null,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "dm_account_3",
+    platform: "抖音",
+    accountName: "抖音个人号-团购拓客",
+    loginLabel: "待绑定个人号",
+    status: "可用",
+    browserProfileKey: "douyin-group-growth",
+    browserProfilePath: ".dm_browser_profiles/douyin-group-growth",
+    sessionStatus: "模拟可用",
+    riskStatus: "正常",
+    dailyLimit: 120,
+    sentToday: 0,
+    minSendIntervalSeconds: 60,
+    cooldownUntil: null,
+    lastSentAt: null,
+    lastSyncAt: null,
+    lastLoginCheckAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "dm_account_4",
+    platform: "视频号",
+    accountName: "视频号个人号-本地生活",
+    loginLabel: "待绑定个人号",
+    status: "可用",
+    browserProfileKey: "channels-local-life",
+    browserProfilePath: ".dm_browser_profiles/channels-local-life",
+    sessionStatus: "模拟可用",
+    riskStatus: "正常",
+    dailyLimit: 120,
+    sentToday: 0,
+    minSendIntervalSeconds: 60,
+    cooldownUntil: null,
+    lastSentAt: null,
+    lastSyncAt: null,
+    lastLoginCheckAt: null,
+    lastError: null,
     createdAt: new Date().toISOString(),
   },
 ];
 
+const createFallbackDmPlatformConfig = (id: string, platform: string): DmPlatformConfig => ({
+  id,
+  platform,
+  homeUrl: "",
+  inboxUrl: "",
+  merchantSearchUrl: "",
+  loginCheckSelector: "",
+  riskCheckSelector: "",
+  merchantLinkSelector: "",
+  messageButtonSelector: "",
+  inputSelector: "",
+  sendButtonSelector: "",
+  sentSuccessSelector: "",
+  unreadSelector: "",
+  conversationItemSelector: "",
+  conversationTitleSelector: "",
+  messageTextSelector: "",
+  enabled: false,
+  createdAt: new Date().toISOString(),
+});
+
 const fallbackDmPlatformConfigs: DmPlatformConfig[] = [
-  {
-    id: "dm_platform_1",
-    platform: "美团",
-    homeUrl: "",
-    inboxUrl: "",
-    merchantSearchUrl: "",
-    loginCheckSelector: "",
-    riskCheckSelector: "",
-    merchantLinkSelector: "",
-    messageButtonSelector: "",
-    inputSelector: "",
-    sendButtonSelector: "",
-    sentSuccessSelector: "",
-    unreadSelector: "",
-    conversationItemSelector: "",
-    conversationTitleSelector: "",
-    messageTextSelector: "",
-    enabled: false,
-    createdAt: new Date().toISOString(),
-  },
+  createFallbackDmPlatformConfig("dm_platform_1", "美团"),
+  createFallbackDmPlatformConfig("dm_platform_2", "饿了么"),
+  createFallbackDmPlatformConfig("dm_platform_3", "抖音"),
+  createFallbackDmPlatformConfig("dm_platform_4", "视频号"),
 ];
 
 const fallbackDmSyncResult: DmSyncResult = {
@@ -313,15 +370,19 @@ const fallbackDmSyncResult: DmSyncResult = {
 };
 
 const platformLoginUrls: Record<string, string> = {
-  美团: "",
-  饿了么: "https://open.shop.ele.me/",
-  抖音: "https://business.douyin.com/",
+  美团: "https://passport.meituan.com/account/unitivelogin",
+  饿了么: "https://h5.ele.me/login/",
+  抖音: "https://www.douyin.com/",
   视频号: "https://channels.weixin.qq.com/",
 };
 
 function isLegacyBusinessBackendUrl(platform: string, url?: string | null) {
   const normalized = (url ?? "").trim().replace(/\/+$/, "");
-  return platform === "美团" && normalized === "https://e.meituan.com";
+  return (
+    (platform === "美团" && normalized === "https://e.meituan.com") ||
+    (platform === "饿了么" && normalized === "https://open.shop.ele.me") ||
+    (platform === "抖音" && normalized === "https://business.douyin.com")
+  );
 }
 
 function personalLoginUrl(platform: string, url?: string | null) {
@@ -333,6 +394,13 @@ function accountLoginLabel(account: DmAccount) {
   const label = account.loginLabel?.trim();
   if (!label || label === "待绑定真实平台账号" || label === "待绑定商家号") return "待绑定个人号";
   return label;
+}
+
+function platformLoginEntryLabel(config: DmPlatformConfig) {
+  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "已拦截商家后台入口，改用内置个人号入口";
+  if (config.homeUrl?.trim()) return "自定义网页登录入口";
+  if (platformLoginUrls[config.platform]) return "系统内置网页登录入口";
+  return "未配置网页登录入口";
 }
 
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
@@ -419,10 +487,263 @@ const fallbackDmMessages: DmMessage[] = [
   },
 ];
 
+const fallbackIntentOverview: IntentOverview = {
+  totalCustomers: 3,
+  highIntent: 2,
+  needsHandoff: 2,
+  pendingWorkOrders: 2,
+  dncBlocked: 0,
+};
+
+const fallbackIntentCustomers: IntentCustomer[] = [
+  {
+    id: "intent_1",
+    leadId: "lead_3",
+    merchantName: "宠物生活馆",
+    platform: "美团",
+    city: "南昌",
+    category: "宠物服务",
+    contactName: "李老板",
+    phone: "13800000003",
+    intentLevel: "A",
+    intentScore: 92,
+    sourceChannels: "外呼,私信",
+    latestSignal: "可以，发我入驻资料看看。",
+    evidenceSummary: "外呼加私信均表现为高意向",
+    ownerName: "待分配",
+    followStatus: "待分配",
+    nextFollowAt: null,
+    needHandoff: true,
+    dncStatus: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "intent_2",
+    leadId: "lead_1",
+    merchantName: "青岚美甲工作室",
+    platform: "视频号",
+    city: "南昌",
+    category: "丽人美业",
+    contactName: "陈店长",
+    phone: "13800000001",
+    intentLevel: "B",
+    intentScore: 86,
+    sourceChannels: "外呼",
+    latestSignal: "商家追问费用，需要发基础方案。",
+    evidenceSummary: "价格异议后仍愿意收资料",
+    ownerName: "待分配",
+    followStatus: "待分配",
+    nextFollowAt: null,
+    needHandoff: true,
+    dncStatus: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+const fallbackIntentEvents: IntentEvent[] = [
+  {
+    id: "intent_event_1",
+    customerId: "intent_1",
+    leadId: "lead_3",
+    sourceType: "dm_conversation",
+    sourceRecordId: "dm_conv_1",
+    channel: "私信",
+    intentLevel: "A",
+    summary: "已回复",
+    evidenceText: "可以，发我入驻资料看看。",
+    needHandoff: true,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "intent_event_2",
+    customerId: "intent_2",
+    leadId: "lead_1",
+    sourceType: "call_record",
+    sourceRecordId: "call_1",
+    channel: "外呼",
+    intentLevel: "B",
+    summary: "已接通",
+    evidenceText: "商家：怎么收费？AI：可以先给您发基础方案。",
+    needHandoff: true,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackWorkOrders: FollowUpWorkOrder[] = [
+  {
+    id: "work_order_1",
+    customerId: "intent_1",
+    title: "宠物生活馆 A级意向跟进",
+    ownerName: "待分配",
+    status: "待分配",
+    priority: "P0",
+    slaDueAt: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+    lastNote: "私信回复要求发送资料",
+    closedReason: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "work_order_2",
+    customerId: "intent_2",
+    title: "青岚美甲工作室 B级意向跟进",
+    ownerName: "待分配",
+    status: "待分配",
+    priority: "P1",
+    slaDueAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    lastNote: "价格异议后需要人工发案例",
+    closedReason: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+const fallbackLearningOverview: LearningOverview = {
+  suggestions: 2,
+  pending: 2,
+  approved: 0,
+  published: 0,
+  knowledgeItems: 1,
+  activeExperiments: 1,
+};
+
+const fallbackLearningSuggestions: LearningSuggestion[] = [
+  {
+    id: "learning_1",
+    sourceType: "call_record",
+    sourceRecordId: "call_1",
+    targetType: "外呼话术",
+    title: "补强价格异议后的案例承接",
+    summary: "客户追问费用时，先给低风险试跑路径，再引导人工顾问发送资料。",
+    proposedContent: "遇到价格异议时，先说明可从基础入驻和活动试跑开始，再询问是否愿意接收同城案例。",
+    evidenceText: "商家：怎么收费？AI：可以先给您发基础方案。",
+    status: "待审核",
+    reviewer: null,
+    reviewNote: null,
+    impactScore: 76,
+    rollbackPoint: null,
+    createdAt: new Date().toISOString(),
+    reviewedAt: null,
+    publishedAt: null,
+  },
+  {
+    id: "learning_2",
+    sourceType: "dm_conversation",
+    sourceRecordId: "dm_conv_1",
+    targetType: "私信模板",
+    title: "私信首句增加商家品类和城市上下文",
+    summary: "首轮私信需要减少模板感，优先呈现城市、品类和平台来源。",
+    proposedContent: "您好，看到{城市}{品类}商家{商家名称}适合做视频号团购曝光，想了解下您是否考虑新增线上获客渠道？",
+    evidenceText: "可以，发我入驻资料看看。",
+    status: "待审核",
+    reviewer: null,
+    reviewNote: null,
+    impactScore: 68,
+    rollbackPoint: null,
+    createdAt: new Date().toISOString(),
+    reviewedAt: null,
+    publishedAt: null,
+  },
+];
+
+const fallbackKnowledge: KnowledgeBaseItem[] = [
+  {
+    id: "knowledge_1",
+    title: "视频号团购入驻基础答疑",
+    category: "产品资料",
+    content: "覆盖入驻条件、试跑方式、资料清单、费用说明和人工顾问交接边界。",
+    status: "已发布",
+    version: "v1",
+    sourceSuggestionId: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+const fallbackExperiments: LearningExperiment[] = [
+  {
+    id: "experiment_1",
+    name: "价格异议话术灰度实验",
+    targetType: "外呼话术",
+    status: "计划中",
+    hypothesis: "先给基础试跑路径可以降低价格异议流失。",
+    variant: "A: 标准价格解释；B: 基础试跑加同城案例。",
+    sampleSize: 0,
+    successMetric: "A/B 级意向率",
+    resultSummary: "等待人工审核建议后开始灰度。",
+    startedAt: null,
+    endedAt: null,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackVoiceOverview: VoiceOverview = {
+  profiles: 2,
+  usableProfiles: 1,
+  pendingAuthorization: 1,
+  trainingJobs: 0,
+  usageRecords: 1,
+  fallbackUsage: 0,
+};
+
+const fallbackVoiceProfiles: VoiceProfile[] = [
+  {
+    id: "voice_1",
+    name: "标准AI音色",
+    ownerName: "系统",
+    scenario: "外呼",
+    status: "可用",
+    authorizationStatus: "系统内置",
+    sampleCount: 0,
+    fallbackVoice: "标准AI音色",
+    consentMaterial: "系统内置安全音色，无真人克隆样本。",
+    riskNote: "可作为所有未授权音色的回退。",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "voice_2",
+    name: "招商顾问授权音色",
+    ownerName: "待授权顾问",
+    scenario: "外呼",
+    status: "待授权",
+    authorizationStatus: "待提交",
+    sampleCount: 0,
+    fallbackVoice: "标准AI音色",
+    consentMaterial: "等待上传授权材料和样本元数据。",
+    riskNote: "未授权前不可训练、不可被任务选择。",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+const fallbackVoiceTrainingJobs: VoiceTrainingJob[] = [];
+
+const fallbackVoiceUsageRecords: VoiceUsageRecord[] = [
+  {
+    id: "voice_usage_1",
+    profileId: "voice_1",
+    taskId: null,
+    merchantName: "模拟商家",
+    scenario: "外呼",
+    result: "默认安全音色模拟使用",
+    fallbackUsed: false,
+    createdAt: new Date().toISOString(),
+  },
+];
+
 const outboundTabs = ["外呼总览", "任务列表", "话术流程", "通话记录", "重拨规则", "实时监听"] as const;
 type OutboundTab = (typeof outboundTabs)[number];
 const dmTabs = ["私信总览", "任务列表", "账号管理", "消息模板", "会话记录", "回复监听"] as const;
 type DmTab = (typeof dmTabs)[number];
+const intentTabs = ["客户池", "跟进工单", "客户详情", "分配规则"] as const;
+type IntentTab = (typeof intentTabs)[number];
+const learningTabs = ["学习总览", "建议队列", "话术版本", "知识库", "效果实验"] as const;
+type LearningTab = (typeof learningTabs)[number];
+const voiceTabs = ["声音档案", "授权审核", "音色训练", "使用记录"] as const;
+type VoiceTab = (typeof voiceTabs)[number];
 
 function formatDuration(seconds: number) {
   const minute = Math.floor(seconds / 60)
@@ -450,11 +771,26 @@ function App() {
   const [dmMessages, setDmMessages] = useState<DmMessage[]>(fallbackDmMessages);
   const [dmPlatformConfigs, setDmPlatformConfigs] = useState<DmPlatformConfig[]>(fallbackDmPlatformConfigs);
   const [dmSyncResult, setDmSyncResult] = useState<DmSyncResult>(fallbackDmSyncResult);
+  const [intentOverview, setIntentOverview] = useState<IntentOverview>(fallbackIntentOverview);
+  const [intentCustomers, setIntentCustomers] = useState<IntentCustomer[]>(fallbackIntentCustomers);
+  const [intentEvents, setIntentEvents] = useState<IntentEvent[]>(fallbackIntentEvents);
+  const [followUpWorkOrders, setFollowUpWorkOrders] = useState<FollowUpWorkOrder[]>(fallbackWorkOrders);
+  const [learningOverview, setLearningOverview] = useState<LearningOverview>(fallbackLearningOverview);
+  const [learningSuggestions, setLearningSuggestions] = useState<LearningSuggestion[]>(fallbackLearningSuggestions);
+  const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBaseItem[]>(fallbackKnowledge);
+  const [learningExperiments, setLearningExperiments] = useState<LearningExperiment[]>(fallbackExperiments);
+  const [voiceOverview, setVoiceOverview] = useState<VoiceOverview>(fallbackVoiceOverview);
+  const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>(fallbackVoiceProfiles);
+  const [voiceTrainingJobs, setVoiceTrainingJobs] = useState<VoiceTrainingJob[]>(fallbackVoiceTrainingJobs);
+  const [voiceUsageRecords, setVoiceUsageRecords] = useState<VoiceUsageRecord[]>(fallbackVoiceUsageRecords);
   const [activeModule, setActiveModule] = useState("outbound");
   const [apiStatus, setApiStatus] = useState("连接中");
   const [isLoading, setIsLoading] = useState(false);
   const [activeOutboundTab, setActiveOutboundTab] = useState<OutboundTab>("实时监听");
   const [activeDmTab, setActiveDmTab] = useState<DmTab>("回复监听");
+  const [activeIntentTab, setActiveIntentTab] = useState<IntentTab>("客户池");
+  const [activeLearningTab, setActiveLearningTab] = useState<LearningTab>("学习总览");
+  const [activeVoiceTab, setActiveVoiceTab] = useState<VoiceTab>("声音档案");
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [selectedDmLeadIds, setSelectedDmLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [leadForm, setLeadForm] = useState({
@@ -507,6 +843,16 @@ function App() {
   const [isOpeningDmLogin, setIsOpeningDmLogin] = useState(false);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
+  const [voiceProfileForm, setVoiceProfileForm] = useState({
+    name: "",
+    ownerName: "",
+    scenario: "外呼",
+    authorizationStatus: "待提交",
+    sampleCount: 0,
+    fallbackVoice: "标准AI音色",
+    consentMaterial: "",
+    riskNote: "未授权前不可训练、不可被任务选择。",
+  });
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
 
   const active = useMemo(
@@ -532,10 +878,21 @@ function App() {
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginConfig?.homeUrl) ||
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginAccount ? platformLoginUrls[activeLoginAccount.platform] : "") ||
     "";
+  const activeLoginEntryText = activeLoginAccount
+    ? activeLoginConfig
+      ? platformLoginEntryLabel(activeLoginConfig)
+      : activeLoginUrl
+        ? "系统内置网页登录入口"
+        : "未配置网页登录入口"
+    : "选择平台个人号";
   const activeProfileKey =
     dmLoginSession?.profileKey || activeLoginAccount?.browserProfileKey || `${activeLoginAccount?.platform ?? "platform"}-account`;
   const activeProfilePath =
     dmLoginSession?.profilePath || activeLoginAccount?.browserProfilePath || `.dm_browser_profiles/${activeProfileKey}`;
+  const activeIntentCustomer = intentCustomers[0];
+  const activeIntentCustomerEvents = activeIntentCustomer
+    ? intentEvents.filter((event) => event.customerId === activeIntentCustomer.id)
+    : [];
 
   async function loadData() {
     setIsLoading(true);
@@ -555,6 +912,18 @@ function App() {
       api.dmConversations(),
       api.dmMessages(),
       api.dmPlatformConfigs(),
+      api.intentOverview(),
+      api.intentCustomers(),
+      api.intentEvents(),
+      api.followUpWorkOrders(),
+      api.learningOverview(),
+      api.learningSuggestions(),
+      api.knowledgeBase(),
+      api.learningExperiments(),
+      api.voiceOverview(),
+      api.voiceProfiles(),
+      api.voiceTrainingJobs(),
+      api.voiceUsageRecords(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -598,6 +967,18 @@ function App() {
     if (results[12].status === "fulfilled") setDmConversations(results[12].value);
     if (results[13].status === "fulfilled") setDmMessages(results[13].value);
     if (results[14].status === "fulfilled") setDmPlatformConfigs(results[14].value);
+    if (results[15].status === "fulfilled") setIntentOverview(results[15].value);
+    if (results[16].status === "fulfilled") setIntentCustomers(results[16].value);
+    if (results[17].status === "fulfilled") setIntentEvents(results[17].value);
+    if (results[18].status === "fulfilled") setFollowUpWorkOrders(results[18].value);
+    if (results[19].status === "fulfilled") setLearningOverview(results[19].value);
+    if (results[20].status === "fulfilled") setLearningSuggestions(results[20].value);
+    if (results[21].status === "fulfilled") setKnowledgeBase(results[21].value);
+    if (results[22].status === "fulfilled") setLearningExperiments(results[22].value);
+    if (results[23].status === "fulfilled") setVoiceOverview(results[23].value);
+    if (results[24].status === "fulfilled") setVoiceProfiles(results[24].value);
+    if (results[25].status === "fulfilled") setVoiceTrainingJobs(results[25].value);
+    if (results[26].status === "fulfilled") setVoiceUsageRecords(results[26].value);
     setIsLoading(false);
   }
 
@@ -826,7 +1207,7 @@ function App() {
     setEditingDmPlatformConfigId(config.id);
     setDmPlatformForm({
       platform: config.platform,
-      homeUrl: config.homeUrl,
+      homeUrl: isLegacyBusinessBackendUrl(config.platform, config.homeUrl) ? "" : config.homeUrl,
       inboxUrl: config.inboxUrl,
       merchantSearchUrl: config.merchantSearchUrl,
       loginCheckSelector: config.loginCheckSelector,
@@ -844,6 +1225,64 @@ function App() {
     });
   }
 
+  async function reviewLearningSuggestion(suggestionId: string, status: string) {
+    const updated = await api.updateLearningSuggestion(suggestionId, {
+      status,
+      reviewer: "运营审核",
+      reviewNote: status === "已通过" ? "通过后先生成草稿版本，不直接影响线上任务。" : "暂不采纳，保留证据。",
+    });
+    setLearningSuggestions((current) => current.map((suggestion) => (suggestion.id === updated.id ? updated : suggestion)));
+    const overviewData = await api.learningOverview();
+    setLearningOverview(overviewData);
+  }
+
+  async function submitVoiceProfile(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!voiceProfileForm.name.trim() || !voiceProfileForm.ownerName.trim()) return;
+
+    const created = await api.createVoiceProfile({
+      ...voiceProfileForm,
+      status: "待授权",
+      sampleCount: Number(voiceProfileForm.sampleCount),
+    });
+    setVoiceProfiles((current) => [created, ...current]);
+    const overviewData = await api.voiceOverview();
+    setVoiceOverview(overviewData);
+    setVoiceProfileForm({
+      name: "",
+      ownerName: "",
+      scenario: "外呼",
+      authorizationStatus: "待提交",
+      sampleCount: 0,
+      fallbackVoice: "标准AI音色",
+      consentMaterial: "",
+      riskNote: "未授权前不可训练、不可被任务选择。",
+    });
+  }
+
+  async function updateVoiceAuthorization(profile: VoiceProfile, authorizationStatus: string) {
+    const updated = await api.updateVoiceProfile(profile.id, {
+      authorizationStatus,
+      status: authorizationStatus === "授权通过" ? "可训练" : "已停用",
+      riskNote: authorizationStatus === "授权通过" ? "授权已通过，可进入训练队列。" : "授权已撤回，任务只能使用回退音色。",
+    });
+    setVoiceProfiles((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    const overviewData = await api.voiceOverview();
+    setVoiceOverview(overviewData);
+  }
+
+  async function createVoiceTrainingJob(profile: VoiceProfile) {
+    const job = await api.createVoiceTrainingJob(profile.id, {
+      engine: "mock-voice-engine",
+      sampleMinutes: Math.max(profile.sampleCount, 1),
+      message: "训练任务已创建；真实克隆服务保持后置安全门。",
+    });
+    setVoiceTrainingJobs((current) => [job, ...current]);
+    const [overviewData, profileData] = await Promise.all([api.voiceOverview(), api.voiceProfiles()]);
+    setVoiceOverview(overviewData);
+    setVoiceProfiles(profileData);
+  }
+
   function toggleLead(leadId: string) {
     setSelectedLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
@@ -853,6 +1292,623 @@ function App() {
   function toggleDmLead(leadId: string) {
     setSelectedDmLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
+    );
+  }
+
+  function renderIntentWorkspace() {
+    const showPool = activeIntentTab === "客户池";
+    const showWorkOrders = activeIntentTab === "跟进工单";
+    const showDetails = activeIntentTab === "客户详情";
+    const showRules = activeIntentTab === "分配规则";
+
+    return (
+      <>
+        <section className="outbound-tabs" aria-label="意向客户模块页面">
+          {intentTabs.map((tab) => (
+            <button className={tab === activeIntentTab ? "is-active" : ""} key={tab} onClick={() => setActiveIntentTab(tab)} type="button">
+              {tab}
+            </button>
+          ))}
+        </section>
+
+        <section className="metrics outbound-metrics">
+          <MetricCard icon={<Users size={20} />} label="意向客户" value={intentOverview.totalCustomers} detail="统一客户池" tone="blue" />
+          <MetricCard icon={<Zap size={20} />} label="A/B 意向" value={intentOverview.highIntent} detail="优先跟进" tone="green" />
+          <MetricCard icon={<Headphones size={20} />} label="需接管" value={intentOverview.needsHandoff} detail="外呼或私信触发" tone="amber" />
+          <MetricCard icon={<ShieldAlert size={20} />} label="勿扰保护" value={intentOverview.dncBlocked} detail="阻断触达" tone="rose" />
+        </section>
+
+        {showPool && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Customer Pool</p>
+                  <h2>电话和私信统一意向客户池</h2>
+                </div>
+                <Users size={22} />
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>商家</th>
+                      <th>来源</th>
+                      <th>意向</th>
+                      <th>负责人</th>
+                      <th>跟进</th>
+                      <th>最近信号</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {intentCustomers.length === 0 && (
+                      <tr>
+                        <td colSpan={6}>
+                          <span className="empty-state">暂无意向客户，模拟外呼或私信后会自动沉淀。</span>
+                        </td>
+                      </tr>
+                    )}
+                    {intentCustomers.map((customer) => (
+                      <tr key={customer.id}>
+                        <td>
+                          <strong>{customer.merchantName}</strong>
+                          <small>
+                            {customer.city || "未知城市"} · {customer.category || "未知品类"}
+                          </small>
+                        </td>
+                        <td>{customer.sourceChannels}</td>
+                        <td>
+                          <span className={`intent-pill intent-${customer.intentLevel.toLowerCase()}`}>
+                            {customer.intentLevel} · {customer.intentScore}
+                          </span>
+                        </td>
+                        <td>{customer.ownerName}</td>
+                        <td>{customer.dncStatus ? "勿扰" : customer.followStatus}</td>
+                        <td>{customer.latestSignal}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showWorkOrders && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Work Orders</p>
+                  <h2>销售跟进工单</h2>
+                </div>
+                <ClipboardList size={22} />
+              </div>
+              <div className="record-grid">
+                {followUpWorkOrders.length === 0 && <div className="empty-state">暂无跟进工单。</div>}
+                {followUpWorkOrders.map((order) => {
+                  const customer = intentCustomers.find((item) => item.id === order.customerId);
+                  return (
+                    <article className="record-card" key={order.id}>
+                      <div>
+                        <strong>{order.title}</strong>
+                        <span>{order.priority}</span>
+                      </div>
+                      <p>{order.lastNote || customer?.latestSignal || "等待销售接手"}</p>
+                      <small>
+                        {order.ownerName} · {order.status} · SLA {order.slaDueAt ? new Date(order.slaDueAt).toLocaleString() : "未设置"}
+                      </small>
+                    </article>
+                  );
+                })}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showDetails && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Customer Detail</p>
+                  <h2>{activeIntentCustomer?.merchantName ?? "客户详情"}</h2>
+                </div>
+                <Activity size={22} />
+              </div>
+              {activeIntentCustomer ? (
+                <div className="profile-grid">
+                  <div>
+                    <span>平台</span>
+                    <strong>{activeIntentCustomer.platform}</strong>
+                  </div>
+                  <div>
+                    <span>联系人</span>
+                    <strong>{activeIntentCustomer.contactName ?? "未填写"}</strong>
+                  </div>
+                  <div>
+                    <span>电话</span>
+                    <strong>{activeIntentCustomer.phone ?? "未填写"}</strong>
+                  </div>
+                  <div>
+                    <span>状态</span>
+                    <strong>{activeIntentCustomer.followStatus}</strong>
+                  </div>
+                  <div className="wide">
+                    <span>AI 判断依据</span>
+                    <strong>{activeIntentCustomer.evidenceSummary || activeIntentCustomer.latestSignal}</strong>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">暂无客户详情。</div>
+              )}
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Evidence</p>
+                  <h2>来源证据</h2>
+                </div>
+                <Database size={22} />
+              </div>
+              <div className="timeline-list">
+                {activeIntentCustomerEvents.length === 0 && <div className="empty-state">暂无来源事件。</div>}
+                {activeIntentCustomerEvents.map((event) => (
+                  <article className="timeline-item" key={event.id}>
+                    <span>{event.channel}</span>
+                    <strong>
+                      {event.intentLevel} · {event.summary}
+                    </strong>
+                    <p>{event.evidenceText}</p>
+                    <small>{new Date(event.createdAt).toLocaleString()}</small>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showRules && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Assignment</p>
+                  <h2>分配规则和保护边界</h2>
+                </div>
+                <ShieldAlert size={22} />
+              </div>
+              <div className="rule-detail-grid">
+                <div>
+                  <strong>A级客户</strong>
+                  <span>4 小时内分配销售，电话和私信证据合并，不重复派单。</span>
+                </div>
+                <div>
+                  <strong>B级客户</strong>
+                  <span>24 小时内跟进，优先发送资料和案例，再安排人工沟通。</span>
+                </div>
+                <div>
+                  <strong>人工接管</strong>
+                  <span>客户追问价格、合作细节或要求资料时自动生成工单。</span>
+                </div>
+                <div>
+                  <strong>勿扰保护</strong>
+                  <span>拒绝、投诉、无效号码或撤回授权后阻断后续触达。</span>
+                </div>
+              </div>
+            </article>
+          </section>
+        )}
+      </>
+    );
+  }
+
+  function renderLearningWorkspace() {
+    const showOverview = activeLearningTab === "学习总览";
+    const showSuggestions = showOverview || activeLearningTab === "建议队列";
+    const showVersions = showOverview || activeLearningTab === "话术版本";
+    const showKnowledge = showOverview || activeLearningTab === "知识库";
+    const showExperiments = showOverview || activeLearningTab === "效果实验";
+
+    return (
+      <>
+        <section className="outbound-tabs" aria-label="AI学习模块页面">
+          {learningTabs.map((tab) => (
+            <button
+              className={tab === activeLearningTab ? "is-active" : ""}
+              key={tab}
+              onClick={() => setActiveLearningTab(tab)}
+              type="button"
+            >
+              {tab}
+            </button>
+          ))}
+        </section>
+
+        <section className="metrics outbound-metrics">
+          <MetricCard icon={<Bot size={20} />} label="学习建议" value={learningOverview.suggestions} detail="需人审" tone="blue" />
+          <MetricCard icon={<Clock3 size={20} />} label="待审核" value={learningOverview.pending} detail="不自动发布" tone="amber" />
+          <MetricCard icon={<CheckCircle2 size={20} />} label="已通过" value={learningOverview.approved} detail="可生成草稿" tone="green" />
+          <MetricCard icon={<BarChart3 size={20} />} label="实验" value={learningOverview.activeExperiments} detail="灰度验证" tone="rose" />
+        </section>
+
+        {showSuggestions && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Review Queue</p>
+                  <h2>学习建议审核队列</h2>
+                </div>
+                <Bot size={22} />
+              </div>
+              <div className="record-grid">
+                {learningSuggestions.map((suggestion) => (
+                  <article className="record-card" key={suggestion.id}>
+                    <div>
+                      <strong>{suggestion.title}</strong>
+                      <span>{suggestion.status}</span>
+                    </div>
+                    <p>{suggestion.summary}</p>
+                    <small>
+                      {suggestion.targetType} · 影响分 {suggestion.impactScore} · 来源 {suggestion.sourceType}
+                    </small>
+                    <div className="button-row card-actions">
+                      <button className="row-action is-primary" onClick={() => reviewLearningSuggestion(suggestion.id, "已通过")} type="button">
+                        通过
+                      </button>
+                      <button className="row-action" onClick={() => reviewLearningSuggestion(suggestion.id, "已拒绝")} type="button">
+                        拒绝
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showVersions && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Script Versions</p>
+                  <h2>外呼话术版本</h2>
+                </div>
+                <PhoneCall size={22} />
+              </div>
+              <div className="template-list">
+                {scripts.map((script) => (
+                  <article className="template-card" key={script.id}>
+                    <div>
+                      <strong>{script.name}</strong>
+                      <span>{script.isActive ? "线上" : "草稿"}</span>
+                    </div>
+                    <p>{script.opening}</p>
+                    <small>发布需人工审核和回滚点</small>
+                  </article>
+                ))}
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Template Versions</p>
+                  <h2>私信模板版本</h2>
+                </div>
+                <MessageSquareText size={22} />
+              </div>
+              <div className="template-list">
+                {dmTemplates.map((template) => (
+                  <article className="template-card" key={template.id}>
+                    <div>
+                      <strong>{template.name}</strong>
+                      <span>{template.isActive ? "线上" : "草稿"}</span>
+                    </div>
+                    <p>{template.content}</p>
+                    <small>{template.platform} · 建议通过后只生成草稿版本</small>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showKnowledge && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Knowledge Base</p>
+                  <h2>知识库</h2>
+                </div>
+                <Database size={22} />
+              </div>
+              <div className="record-grid">
+                {knowledgeBase.map((item) => (
+                  <article className="record-card" key={item.id}>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <span>{item.version}</span>
+                    </div>
+                    <p>{item.content}</p>
+                    <small>
+                      {item.category} · {item.status}
+                    </small>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showExperiments && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Experiments</p>
+                  <h2>效果实验</h2>
+                </div>
+                <BarChart3 size={22} />
+              </div>
+              <div className="rule-detail-grid">
+                {learningExperiments.map((experiment) => (
+                  <div key={experiment.id}>
+                    <strong>{experiment.name}</strong>
+                    <span>
+                      {experiment.status} · {experiment.successMetric} · 样本 {experiment.sampleSize}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+      </>
+    );
+  }
+
+  function renderVoiceWorkspace() {
+    const showProfiles = activeVoiceTab === "声音档案";
+    const showAuth = activeVoiceTab === "授权审核";
+    const showTraining = activeVoiceTab === "音色训练";
+    const showUsage = activeVoiceTab === "使用记录";
+
+    return (
+      <>
+        <section className="outbound-tabs" aria-label="声音档案模块页面">
+          {voiceTabs.map((tab) => (
+            <button className={tab === activeVoiceTab ? "is-active" : ""} key={tab} onClick={() => setActiveVoiceTab(tab)} type="button">
+              {tab}
+            </button>
+          ))}
+        </section>
+
+        <section className="metrics outbound-metrics">
+          <MetricCard icon={<Headphones size={20} />} label="声音档案" value={voiceOverview.profiles} detail="授权资产" tone="blue" />
+          <MetricCard icon={<CheckCircle2 size={20} />} label="可用音色" value={voiceOverview.usableProfiles} detail="可被任务选择" tone="green" />
+          <MetricCard icon={<ShieldAlert size={20} />} label="待授权" value={voiceOverview.pendingAuthorization} detail="不可训练" tone="amber" />
+          <MetricCard icon={<Activity size={20} />} label="使用记录" value={voiceOverview.usageRecords} detail="审计留痕" tone="rose" />
+        </section>
+
+        {showProfiles && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Profile Form</p>
+                  <h2>新增声音档案</h2>
+                </div>
+                <Headphones size={22} />
+              </div>
+              <form className="form-grid" onSubmit={submitVoiceProfile}>
+                <label>
+                  档案名称
+                  <input value={voiceProfileForm.name} onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, name: event.target.value })} />
+                </label>
+                <label>
+                  授权人
+                  <input
+                    value={voiceProfileForm.ownerName}
+                    onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, ownerName: event.target.value })}
+                  />
+                </label>
+                <label>
+                  使用场景
+                  <select value={voiceProfileForm.scenario} onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, scenario: event.target.value })}>
+                    <option>外呼</option>
+                    <option>试听</option>
+                    <option>客服回访</option>
+                  </select>
+                </label>
+                <label>
+                  样本数量
+                  <input
+                    min={0}
+                    type="number"
+                    value={voiceProfileForm.sampleCount}
+                    onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, sampleCount: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="wide">
+                  授权材料
+                  <textarea
+                    value={voiceProfileForm.consentMaterial}
+                    onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, consentMaterial: event.target.value })}
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  <Plus size={16} />
+                  新增声音档案
+                </button>
+              </form>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Profiles</p>
+                  <h2>档案状态</h2>
+                </div>
+                <ClipboardList size={22} />
+              </div>
+              <div className="account-list">
+                {voiceProfiles.map((profile) => (
+                  <article className="account-row" key={profile.id}>
+                    <div className="account-row-head">
+                      <div>
+                        <strong>{profile.name}</strong>
+                        <small>{profile.ownerName} · {profile.scenario} · 回退 {profile.fallbackVoice}</small>
+                        <small>{profile.riskNote}</small>
+                      </div>
+                      <em>{profile.sampleCount} 样本</em>
+                    </div>
+                    <div className="account-row-meta">
+                      <span>{profile.status}</span>
+                      <span>{profile.authorizationStatus}</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showAuth && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Authorization</p>
+                  <h2>授权审核</h2>
+                </div>
+                <ShieldAlert size={22} />
+              </div>
+              <div className="record-grid">
+                {voiceProfiles.map((profile) => (
+                  <article className="record-card" key={profile.id}>
+                    <div>
+                      <strong>{profile.name}</strong>
+                      <span>{profile.authorizationStatus}</span>
+                    </div>
+                    <p>{profile.consentMaterial || "等待授权材料。"}</p>
+                    <small>{profile.riskNote}</small>
+                    <div className="button-row card-actions">
+                      <button className="row-action is-primary" onClick={() => updateVoiceAuthorization(profile, "授权通过")} type="button">
+                        通过授权
+                      </button>
+                      <button className="row-action" onClick={() => updateVoiceAuthorization(profile, "授权撤回")} type="button">
+                        撤回授权
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showTraining && (
+          <section className="content-grid lower">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Training</p>
+                  <h2>训练入口</h2>
+                </div>
+                <Activity size={22} />
+              </div>
+              <div className="account-list">
+                {voiceProfiles.map((profile) => (
+                  <article className="account-row" key={profile.id}>
+                    <div className="account-row-head">
+                      <div>
+                        <strong>{profile.name}</strong>
+                        <small>{profile.authorizationStatus} · {profile.status}</small>
+                      </div>
+                      <button
+                        className="row-action is-primary"
+                        disabled={!["授权通过", "系统内置"].includes(profile.authorizationStatus)}
+                        onClick={() => createVoiceTrainingJob(profile)}
+                        type="button"
+                      >
+                        创建训练
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
+
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Jobs</p>
+                  <h2>训练任务</h2>
+                </div>
+                <Clock3 size={22} />
+              </div>
+              <div className="task-list">
+                {voiceTrainingJobs.length === 0 && <div className="empty-state">暂无训练任务。</div>}
+                {voiceTrainingJobs.map((job) => (
+                  <div className="task-row" key={job.id}>
+                    <span>{job.progress}%</span>
+                    <div>
+                      <strong>{voiceProfiles.find((profile) => profile.id === job.profileId)?.name ?? "声音档案"}</strong>
+                      <small>{job.engine} · {job.message}</small>
+                    </div>
+                    <em>{job.status}</em>
+                  </div>
+                ))}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showUsage && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Audit</p>
+                  <h2>声音使用记录</h2>
+                </div>
+                <Database size={22} />
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>档案</th>
+                      <th>商家</th>
+                      <th>场景</th>
+                      <th>结果</th>
+                      <th>回退</th>
+                      <th>时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {voiceUsageRecords.map((record) => (
+                      <tr key={record.id}>
+                        <td>{voiceProfiles.find((profile) => profile.id === record.profileId)?.name ?? "标准音色"}</td>
+                        <td>{record.merchantName}</td>
+                        <td>{record.scenario}</td>
+                        <td>{record.result}</td>
+                        <td>{record.fallbackUsed ? "是" : "否"}</td>
+                        <td>{new Date(record.createdAt).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+        )}
+      </>
     );
   }
 
@@ -1552,18 +2608,14 @@ function App() {
               </div>
               <div className="platform-config-list">
                 <div className="section-caption">
-                  <strong>个人号页面选择器</strong>
+                  <strong>个人号网页登录入口</strong>
                   <small>{dmPlatformConfigs.length} 个平台</small>
                 </div>
                 {dmPlatformConfigs.map((config) => (
                   <article className="platform-config-row" key={config.id}>
                     <strong>{config.platform}</strong>
                     <span>{config.enabled ? "已启用" : "待配置"}</span>
-                    <small>
-                      {isLegacyBusinessBackendUrl(config.platform, config.homeUrl)
-                        ? "需改为个人号登录 URL"
-                        : config.homeUrl || "未配置个人号登录 URL"}
-                    </small>
+                    <small>{platformLoginEntryLabel(config)}</small>
                     <button className="row-action" onClick={() => editDmPlatformConfig(config)} type="button">
                       编辑
                     </button>
@@ -1602,7 +2654,7 @@ function App() {
                   <div className="embedded-browser-bar">
                     <span className="status-dot" />
                     <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录页` : "选择平台个人号"}</strong>
-                    <em>{activeLoginUrl || "请先配置个人号登录 URL"}</em>
+                    <em>{activeLoginEntryText}</em>
                   </div>
                   <div className={`embedded-login-body ${dmLoginWindowUrl ? "is-open" : ""}`}>
                     <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
@@ -1710,9 +2762,9 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  个人号登录 URL
+                  网页登录入口
                   <input
-                    placeholder="填写平台个人号登录 URL"
+                    placeholder="默认使用系统内置入口，一般不用填"
                     value={dmPlatformForm.homeUrl}
                     onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, homeUrl: event.target.value })}
                   />
@@ -1947,6 +2999,38 @@ function App() {
     );
   }
 
+  const primaryActionLabel =
+    activeModule === "intent"
+      ? "分配销售"
+      : activeModule === "learning"
+        ? "审核建议"
+        : activeModule === "voice"
+          ? "新增档案"
+          : activeModule === "dm"
+            ? "新建私信"
+            : "新建任务";
+
+  function runPrimaryAction() {
+    if (activeModule === "dm") {
+      setActiveDmTab("任务列表");
+      return;
+    }
+    if (activeModule === "intent") {
+      setActiveIntentTab("跟进工单");
+      return;
+    }
+    if (activeModule === "learning") {
+      setActiveLearningTab("建议队列");
+      return;
+    }
+    if (activeModule === "voice") {
+      setActiveVoiceTab("声音档案");
+      return;
+    }
+    setActiveModule("outbound");
+    setActiveOutboundTab("任务列表");
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -1997,18 +3081,11 @@ function App() {
             </button>
             <button
               className="primary-button"
-              onClick={() => {
-                if (activeModule === "dm") {
-                  setActiveDmTab("任务列表");
-                } else {
-                  setActiveModule("outbound");
-                  setActiveOutboundTab("任务列表");
-                }
-              }}
+              onClick={runPrimaryAction}
               type="button"
             >
               <Plus size={16} />
-              新建任务
+              {primaryActionLabel}
             </button>
           </div>
         </header>
@@ -2017,6 +3094,12 @@ function App() {
           renderOutboundWorkspace()
         ) : activeModule === "dm" ? (
           renderDmWorkspace()
+        ) : activeModule === "intent" ? (
+          renderIntentWorkspace()
+        ) : activeModule === "learning" ? (
+          renderLearningWorkspace()
+        ) : activeModule === "voice" ? (
+          renderVoiceWorkspace()
         ) : (
           <>
             <section className="metrics">

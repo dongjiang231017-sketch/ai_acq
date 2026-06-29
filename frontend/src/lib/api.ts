@@ -225,6 +225,168 @@ export type DmSyncResult = {
   needsHandoff: number;
 };
 
+export type IntentOverview = {
+  totalCustomers: number;
+  highIntent: number;
+  needsHandoff: number;
+  pendingWorkOrders: number;
+  dncBlocked: number;
+};
+
+export type IntentCustomer = {
+  id: string;
+  leadId?: string | null;
+  merchantName: string;
+  platform: string;
+  city: string;
+  category: string;
+  contactName?: string | null;
+  phone?: string | null;
+  intentLevel: string;
+  intentScore: number;
+  sourceChannels: string;
+  latestSignal: string;
+  evidenceSummary: string;
+  ownerName: string;
+  followStatus: string;
+  nextFollowAt?: string | null;
+  needHandoff: boolean;
+  dncStatus: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IntentEvent = {
+  id: string;
+  customerId: string;
+  leadId?: string | null;
+  sourceType: string;
+  sourceRecordId?: string | null;
+  channel: string;
+  intentLevel: string;
+  summary: string;
+  evidenceText: string;
+  needHandoff: boolean;
+  createdAt: string;
+};
+
+export type FollowUpWorkOrder = {
+  id: string;
+  customerId: string;
+  title: string;
+  ownerName: string;
+  status: string;
+  priority: string;
+  slaDueAt?: string | null;
+  lastNote: string;
+  closedReason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LearningOverview = {
+  suggestions: number;
+  pending: number;
+  approved: number;
+  published: number;
+  knowledgeItems: number;
+  activeExperiments: number;
+};
+
+export type LearningSuggestion = {
+  id: string;
+  sourceType: string;
+  sourceRecordId?: string | null;
+  targetType: string;
+  title: string;
+  summary: string;
+  proposedContent: string;
+  evidenceText: string;
+  status: string;
+  reviewer?: string | null;
+  reviewNote?: string | null;
+  impactScore: number;
+  rollbackPoint?: string | null;
+  createdAt: string;
+  reviewedAt?: string | null;
+  publishedAt?: string | null;
+};
+
+export type KnowledgeBaseItem = {
+  id: string;
+  title: string;
+  category: string;
+  content: string;
+  status: string;
+  version: string;
+  sourceSuggestionId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LearningExperiment = {
+  id: string;
+  name: string;
+  targetType: string;
+  status: string;
+  hypothesis: string;
+  variant: string;
+  sampleSize: number;
+  successMetric: string;
+  resultSummary: string;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  createdAt: string;
+};
+
+export type VoiceOverview = {
+  profiles: number;
+  usableProfiles: number;
+  pendingAuthorization: number;
+  trainingJobs: number;
+  usageRecords: number;
+  fallbackUsage: number;
+};
+
+export type VoiceProfile = {
+  id: string;
+  name: string;
+  ownerName: string;
+  scenario: string;
+  status: string;
+  authorizationStatus: string;
+  sampleCount: number;
+  fallbackVoice: string;
+  consentMaterial: string;
+  riskNote: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VoiceTrainingJob = {
+  id: string;
+  profileId: string;
+  status: string;
+  progress: number;
+  engine: string;
+  sampleMinutes: number;
+  message: string;
+  createdAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+};
+
+export type VoiceUsageRecord = {
+  id: string;
+  profileId?: string | null;
+  taskId?: string | null;
+  merchantName: string;
+  scenario: string;
+  result: string;
+  fallbackUsed: boolean;
+  createdAt: string;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -366,4 +528,42 @@ export const api = {
     request<DmMessage[]>(
       conversationId ? `/direct-messages/messages?conversationId=${encodeURIComponent(conversationId)}` : "/direct-messages/messages",
     ),
+  intentOverview: () => request<IntentOverview>("/intent/overview"),
+  intentCustomers: () => request<IntentCustomer[]>("/intent/customers"),
+  updateIntentCustomer: (customerId: string, customer: Partial<IntentCustomer>) =>
+    request<IntentCustomer>(`/intent/customers/${customerId}`, {
+      method: "PATCH",
+      body: JSON.stringify(customer),
+    }),
+  intentEvents: () => request<IntentEvent[]>("/intent/events"),
+  intentCustomerEvents: (customerId: string) => request<IntentEvent[]>(`/intent/customers/${customerId}/events`),
+  followUpWorkOrders: () => request<FollowUpWorkOrder[]>("/intent/work-orders"),
+  learningOverview: () => request<LearningOverview>("/learning/overview"),
+  learningSuggestions: () => request<LearningSuggestion[]>("/learning/suggestions"),
+  updateLearningSuggestion: (suggestionId: string, suggestion: Partial<LearningSuggestion>) =>
+    request<LearningSuggestion>(`/learning/suggestions/${suggestionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(suggestion),
+    }),
+  knowledgeBase: () => request<KnowledgeBaseItem[]>("/learning/knowledge"),
+  learningExperiments: () => request<LearningExperiment[]>("/learning/experiments"),
+  voiceOverview: () => request<VoiceOverview>("/voice/overview"),
+  voiceProfiles: () => request<VoiceProfile[]>("/voice/profiles"),
+  createVoiceProfile: (profile: Omit<VoiceProfile, "id" | "createdAt" | "updatedAt">) =>
+    request<VoiceProfile>("/voice/profiles", {
+      method: "POST",
+      body: JSON.stringify(profile),
+    }),
+  updateVoiceProfile: (profileId: string, profile: Partial<VoiceProfile>) =>
+    request<VoiceProfile>(`/voice/profiles/${profileId}`, {
+      method: "PATCH",
+      body: JSON.stringify(profile),
+    }),
+  voiceTrainingJobs: () => request<VoiceTrainingJob[]>("/voice/training-jobs"),
+  createVoiceTrainingJob: (profileId: string, job: { engine: string; sampleMinutes: number; message?: string }) =>
+    request<VoiceTrainingJob>(`/voice/profiles/${profileId}/training-jobs`, {
+      method: "POST",
+      body: JSON.stringify(job),
+    }),
+  voiceUsageRecords: () => request<VoiceUsageRecord[]>("/voice/usage-records"),
 };

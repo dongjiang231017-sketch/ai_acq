@@ -48,14 +48,23 @@ from app.services.dm_runner import run_dm_task
 router = APIRouter()
 
 PLATFORM_LOGIN_URLS = {
-    "美团": "",
-    "饿了么": "https://open.shop.ele.me/",
-    "抖音": "https://business.douyin.com/",
+    "美团": "https://passport.meituan.com/account/unitivelogin",
+    "饿了么": "https://h5.ele.me/login/",
+    "抖音": "https://www.douyin.com/",
     "视频号": "https://channels.weixin.qq.com/",
 }
 
+DEFAULT_DM_ACCOUNTS = [
+    {"platform": "美团", "account_name": "美团个人号-南昌本地生活", "daily_limit": 200, "min_send_interval_seconds": 45},
+    {"platform": "饿了么", "account_name": "饿了么个人号-餐饮招商", "daily_limit": 150, "min_send_interval_seconds": 45},
+    {"platform": "抖音", "account_name": "抖音个人号-团购拓客", "daily_limit": 120, "min_send_interval_seconds": 60},
+    {"platform": "视频号", "account_name": "视频号个人号-本地生活", "daily_limit": 120, "min_send_interval_seconds": 60},
+]
+
 LEGACY_BUSINESS_BACKEND_URLS = {
     "美团": {"https://e.meituan.com", "https://e.meituan.com/"},
+    "饿了么": {"https://open.shop.ele.me", "https://open.shop.ele.me/"},
+    "抖音": {"https://business.douyin.com", "https://business.douyin.com/"},
 }
 
 
@@ -65,31 +74,47 @@ def _is_legacy_business_backend_url(platform: str, url: str | None) -> bool:
     return url.strip().rstrip("/") in {item.rstrip("/") for item in LEGACY_BUSINESS_BACKEND_URLS.get(platform, set())}
 
 
-def _seed_default_account(db: Session) -> DirectMessageAccount:
-    account = db.scalar(select(DirectMessageAccount).where(DirectMessageAccount.status == "可用").order_by(DirectMessageAccount.created_at.desc()))
-    if account:
-        if account.login_label in {"待绑定真实平台账号", "待绑定商家号"}:
+def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
+    accounts = list(db.scalars(select(DirectMessageAccount).order_by(DirectMessageAccount.created_at.desc())).all())
+    existing_platforms = {account.platform for account in accounts}
+    changed = False
+    for account in accounts:
+        if account.login_label in {"待绑定真实平台账号", "待绑定商家号", ""} or not account.login_label:
             account.login_label = "待绑定个人号"
-            db.commit()
-            db.refresh(account)
-        return account
+            changed = True
 
-    account = DirectMessageAccount(
-        platform="美团",
-        account_name="南昌本地生活招商号",
-        login_label="待绑定个人号",
-        status="可用",
-        session_status="模拟可用",
-        risk_status="正常",
-        daily_limit=200,
-        min_send_interval_seconds=0,
-    )
-    db.add(account)
-    db.flush()
-    normalize_account_state(account)
-    db.commit()
-    db.refresh(account)
-    return account
+    for account_config in DEFAULT_DM_ACCOUNTS:
+        if account_config["platform"] in existing_platforms:
+            continue
+        account = DirectMessageAccount(
+            platform=str(account_config["platform"]),
+            account_name=str(account_config["account_name"]),
+            login_label="待绑定个人号",
+            status="可用",
+            session_status="模拟可用",
+            risk_status="正常",
+            daily_limit=int(account_config["daily_limit"]),
+            min_send_interval_seconds=int(account_config["min_send_interval_seconds"]),
+        )
+        db.add(account)
+        db.flush()
+        normalize_account_state(account)
+        accounts.append(account)
+        changed = True
+
+    if changed:
+        db.commit()
+        for account in accounts:
+            db.refresh(account)
+    return accounts
+
+
+def _seed_default_account(db: Session) -> DirectMessageAccount:
+    accounts = _seed_default_accounts(db)
+    available_account = next((account for account in accounts if account.status == "可用"), None)
+    if available_account:
+        return available_account
+    return accounts[0]
 
 
 def _seed_default_template(db: Session) -> DirectMessageTemplate:
@@ -113,17 +138,16 @@ def _seed_default_template(db: Session) -> DirectMessageTemplate:
 
 def _seed_default_platform_configs(db: Session) -> list[DirectMessagePlatformConfig]:
     configs = list(db.scalars(select(DirectMessagePlatformConfig).order_by(DirectMessagePlatformConfig.created_at.desc())).all())
-    if configs:
-        return configs
+    existing_platforms = {config.platform for config in configs}
+    for platform_name in PLATFORM_LOGIN_URLS:
+        if platform_name in existing_platforms:
+            continue
+        config = DirectMessagePlatformConfig(platform=platform_name, home_url="", inbox_url="", enabled=False)
+        db.add(config)
+        configs.append(config)
 
-    defaults = [
-        DirectMessagePlatformConfig(platform="美团", home_url="", inbox_url="", enabled=False),
-        DirectMessagePlatformConfig(platform="饿了么", home_url="https://open.shop.ele.me/", inbox_url="", enabled=False),
-        DirectMessagePlatformConfig(platform="抖音", home_url="https://business.douyin.com/", inbox_url="", enabled=False),
-    ]
-    db.add_all(defaults)
     db.commit()
-    return defaults
+    return configs
 
 
 def _platform_config(db: Session, platform: str) -> DirectMessagePlatformConfig | None:
@@ -225,7 +249,7 @@ def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[
     normalize_account_state(account)
     login_url = _login_url_for_account(db, account)
     if not login_url:
-        raise HTTPException(status_code=400, detail=f"请先配置{account.platform}个人号登录 URL")
+        raise HTTPException(status_code=400, detail=f"暂不支持{account.platform}内置登录入口，请在高级配置里填写网页登录入口")
 
     account.last_login_check_at = datetime.utcnow()
     if account.session_status not in {"已登录", "模拟可用"}:
@@ -296,7 +320,7 @@ def dm_config() -> dict[str, object]:
 
 @router.get("/accounts", response_model=list[DmAccountRead])
 def list_dm_accounts(db: Session = Depends(get_db)) -> list[DirectMessageAccount]:
-    _seed_default_account(db)
+    _seed_default_accounts(db)
     accounts = list(db.scalars(select(DirectMessageAccount).order_by(DirectMessageAccount.created_at.desc())).all())
     for account in accounts:
         normalize_account_state(account)

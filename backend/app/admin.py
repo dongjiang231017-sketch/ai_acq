@@ -7,6 +7,17 @@ from starlette.responses import RedirectResponse
 
 from app.core.config import settings
 from app.db.session import engine
+from app.models.growth import (
+    FollowUpWorkOrder,
+    IntentCustomer,
+    IntentEvent,
+    KnowledgeBaseItem,
+    LearningExperiment,
+    LearningSuggestion,
+    VoiceProfile,
+    VoiceTrainingJob,
+    VoiceUsageRecord,
+)
 from app.models.lead import MerchantLead
 from app.models.task import (
     CallRecord,
@@ -358,6 +369,281 @@ class DirectMessageAdmin(ModelView, model=DirectMessage):
     }
 
 
+class IntentCustomerAdmin(ModelView, model=IntentCustomer):
+    name = "意向客户"
+    name_plural = "意向客户池"
+    icon = "fa-solid fa-user-check"
+
+    column_list = [
+        IntentCustomer.merchant_name,
+        IntentCustomer.platform,
+        IntentCustomer.city,
+        IntentCustomer.intent_level,
+        IntentCustomer.intent_score,
+        IntentCustomer.owner_name,
+        IntentCustomer.follow_status,
+        IntentCustomer.need_handoff,
+        IntentCustomer.dnc_status,
+        IntentCustomer.updated_at,
+    ]
+    column_searchable_list = [IntentCustomer.merchant_name, IntentCustomer.phone, IntentCustomer.owner_name]
+    column_sortable_list = [IntentCustomer.intent_score, IntentCustomer.updated_at]
+    column_default_sort = [(IntentCustomer.updated_at, True)]
+    column_labels = {
+        IntentCustomer.merchant_name: "商家",
+        IntentCustomer.platform: "平台",
+        IntentCustomer.city: "城市",
+        IntentCustomer.category: "品类",
+        IntentCustomer.contact_name: "联系人",
+        IntentCustomer.phone: "电话",
+        IntentCustomer.intent_level: "意向等级",
+        IntentCustomer.intent_score: "意向分",
+        IntentCustomer.source_channels: "来源渠道",
+        IntentCustomer.latest_signal: "最近信号",
+        IntentCustomer.evidence_summary: "证据摘要",
+        IntentCustomer.owner_name: "负责人",
+        IntentCustomer.follow_status: "跟进状态",
+        IntentCustomer.next_follow_at: "下次跟进",
+        IntentCustomer.need_handoff: "需人工接管",
+        IntentCustomer.dnc_status: "勿扰",
+        IntentCustomer.created_at: "创建时间",
+        IntentCustomer.updated_at: "更新时间",
+    }
+
+
+class IntentEventAdmin(ModelView, model=IntentEvent):
+    name = "意向事件"
+    name_plural = "意向证据事件"
+    icon = "fa-solid fa-timeline"
+
+    column_list = [
+        IntentEvent.channel,
+        IntentEvent.source_type,
+        IntentEvent.intent_level,
+        IntentEvent.summary,
+        IntentEvent.need_handoff,
+        IntentEvent.created_at,
+    ]
+    column_searchable_list = [IntentEvent.channel, IntentEvent.source_type, IntentEvent.summary, IntentEvent.evidence_text]
+    column_sortable_list = [IntentEvent.created_at]
+    column_default_sort = [(IntentEvent.created_at, True)]
+    column_labels = {
+        IntentEvent.customer_id: "客户ID",
+        IntentEvent.lead_id: "线索ID",
+        IntentEvent.source_type: "来源类型",
+        IntentEvent.source_record_id: "来源记录ID",
+        IntentEvent.channel: "渠道",
+        IntentEvent.intent_level: "意向等级",
+        IntentEvent.summary: "摘要",
+        IntentEvent.evidence_text: "证据内容",
+        IntentEvent.need_handoff: "需人工接管",
+        IntentEvent.created_at: "创建时间",
+    }
+
+
+class FollowUpWorkOrderAdmin(ModelView, model=FollowUpWorkOrder):
+    name = "跟进工单"
+    name_plural = "跟进工单"
+    icon = "fa-solid fa-list-check"
+
+    column_list = [
+        FollowUpWorkOrder.title,
+        FollowUpWorkOrder.owner_name,
+        FollowUpWorkOrder.status,
+        FollowUpWorkOrder.priority,
+        FollowUpWorkOrder.sla_due_at,
+        FollowUpWorkOrder.created_at,
+    ]
+    column_searchable_list = [FollowUpWorkOrder.title, FollowUpWorkOrder.owner_name, FollowUpWorkOrder.status]
+    column_sortable_list = [FollowUpWorkOrder.created_at, FollowUpWorkOrder.sla_due_at]
+    column_labels = {
+        FollowUpWorkOrder.customer_id: "客户ID",
+        FollowUpWorkOrder.title: "工单标题",
+        FollowUpWorkOrder.owner_name: "负责人",
+        FollowUpWorkOrder.status: "状态",
+        FollowUpWorkOrder.priority: "优先级",
+        FollowUpWorkOrder.sla_due_at: "SLA截止",
+        FollowUpWorkOrder.last_note: "最近记录",
+        FollowUpWorkOrder.closed_reason: "关闭原因",
+        FollowUpWorkOrder.created_at: "创建时间",
+        FollowUpWorkOrder.updated_at: "更新时间",
+    }
+
+
+class LearningSuggestionAdmin(ModelView, model=LearningSuggestion):
+    name = "AI学习建议"
+    name_plural = "AI学习建议"
+    icon = "fa-solid fa-lightbulb"
+
+    column_list = [
+        LearningSuggestion.title,
+        LearningSuggestion.target_type,
+        LearningSuggestion.status,
+        LearningSuggestion.impact_score,
+        LearningSuggestion.reviewer,
+        LearningSuggestion.created_at,
+    ]
+    column_searchable_list = [LearningSuggestion.title, LearningSuggestion.summary, LearningSuggestion.proposed_content]
+    column_sortable_list = [LearningSuggestion.created_at, LearningSuggestion.impact_score]
+    column_labels = {
+        LearningSuggestion.source_type: "来源类型",
+        LearningSuggestion.source_record_id: "来源记录ID",
+        LearningSuggestion.target_type: "作用对象",
+        LearningSuggestion.title: "标题",
+        LearningSuggestion.summary: "摘要",
+        LearningSuggestion.proposed_content: "建议内容",
+        LearningSuggestion.evidence_text: "证据",
+        LearningSuggestion.status: "状态",
+        LearningSuggestion.reviewer: "审核人",
+        LearningSuggestion.review_note: "审核意见",
+        LearningSuggestion.impact_score: "影响分",
+        LearningSuggestion.rollback_point: "回滚点",
+        LearningSuggestion.created_at: "创建时间",
+        LearningSuggestion.reviewed_at: "审核时间",
+        LearningSuggestion.published_at: "发布时间",
+    }
+
+
+class KnowledgeBaseItemAdmin(ModelView, model=KnowledgeBaseItem):
+    name = "知识库条目"
+    name_plural = "AI知识库"
+    icon = "fa-solid fa-book"
+
+    column_list = [
+        KnowledgeBaseItem.title,
+        KnowledgeBaseItem.category,
+        KnowledgeBaseItem.status,
+        KnowledgeBaseItem.version,
+        KnowledgeBaseItem.updated_at,
+    ]
+    column_searchable_list = [KnowledgeBaseItem.title, KnowledgeBaseItem.category, KnowledgeBaseItem.content]
+    column_sortable_list = [KnowledgeBaseItem.updated_at]
+    column_labels = {
+        KnowledgeBaseItem.title: "标题",
+        KnowledgeBaseItem.category: "分类",
+        KnowledgeBaseItem.content: "内容",
+        KnowledgeBaseItem.status: "状态",
+        KnowledgeBaseItem.version: "版本",
+        KnowledgeBaseItem.source_suggestion_id: "来源建议ID",
+        KnowledgeBaseItem.created_at: "创建时间",
+        KnowledgeBaseItem.updated_at: "更新时间",
+    }
+
+
+class LearningExperimentAdmin(ModelView, model=LearningExperiment):
+    name = "效果实验"
+    name_plural = "学习效果实验"
+    icon = "fa-solid fa-flask"
+
+    column_list = [
+        LearningExperiment.name,
+        LearningExperiment.target_type,
+        LearningExperiment.status,
+        LearningExperiment.sample_size,
+        LearningExperiment.success_metric,
+        LearningExperiment.created_at,
+    ]
+    column_searchable_list = [LearningExperiment.name, LearningExperiment.hypothesis, LearningExperiment.variant]
+    column_sortable_list = [LearningExperiment.created_at, LearningExperiment.sample_size]
+    column_labels = {
+        LearningExperiment.name: "实验名称",
+        LearningExperiment.target_type: "作用对象",
+        LearningExperiment.status: "状态",
+        LearningExperiment.hypothesis: "假设",
+        LearningExperiment.variant: "变量",
+        LearningExperiment.sample_size: "样本量",
+        LearningExperiment.success_metric: "成功指标",
+        LearningExperiment.result_summary: "结果摘要",
+        LearningExperiment.started_at: "开始时间",
+        LearningExperiment.ended_at: "结束时间",
+        LearningExperiment.created_at: "创建时间",
+    }
+
+
+class VoiceProfileAdmin(ModelView, model=VoiceProfile):
+    name = "声音档案"
+    name_plural = "声音档案"
+    icon = "fa-solid fa-microphone-lines"
+
+    column_list = [
+        VoiceProfile.name,
+        VoiceProfile.owner_name,
+        VoiceProfile.scenario,
+        VoiceProfile.status,
+        VoiceProfile.authorization_status,
+        VoiceProfile.sample_count,
+        VoiceProfile.updated_at,
+    ]
+    column_searchable_list = [VoiceProfile.name, VoiceProfile.owner_name, VoiceProfile.scenario]
+    column_sortable_list = [VoiceProfile.updated_at, VoiceProfile.sample_count]
+    column_labels = {
+        VoiceProfile.name: "档案名称",
+        VoiceProfile.owner_name: "授权人",
+        VoiceProfile.scenario: "使用场景",
+        VoiceProfile.status: "状态",
+        VoiceProfile.authorization_status: "授权状态",
+        VoiceProfile.sample_count: "样本数",
+        VoiceProfile.fallback_voice: "回退音色",
+        VoiceProfile.consent_material: "授权材料",
+        VoiceProfile.risk_note: "风险备注",
+        VoiceProfile.created_at: "创建时间",
+        VoiceProfile.updated_at: "更新时间",
+    }
+
+
+class VoiceTrainingJobAdmin(ModelView, model=VoiceTrainingJob):
+    name = "音色训练"
+    name_plural = "音色训练任务"
+    icon = "fa-solid fa-wave-square"
+
+    column_list = [
+        VoiceTrainingJob.profile_id,
+        VoiceTrainingJob.status,
+        VoiceTrainingJob.progress,
+        VoiceTrainingJob.engine,
+        VoiceTrainingJob.sample_minutes,
+        VoiceTrainingJob.created_at,
+    ]
+    column_searchable_list = [VoiceTrainingJob.status, VoiceTrainingJob.engine, VoiceTrainingJob.message]
+    column_sortable_list = [VoiceTrainingJob.created_at, VoiceTrainingJob.progress]
+    column_labels = {
+        VoiceTrainingJob.profile_id: "声音档案ID",
+        VoiceTrainingJob.status: "状态",
+        VoiceTrainingJob.progress: "进度",
+        VoiceTrainingJob.engine: "训练引擎",
+        VoiceTrainingJob.sample_minutes: "样本分钟",
+        VoiceTrainingJob.message: "消息",
+        VoiceTrainingJob.created_at: "创建时间",
+        VoiceTrainingJob.started_at: "开始时间",
+        VoiceTrainingJob.finished_at: "完成时间",
+    }
+
+
+class VoiceUsageRecordAdmin(ModelView, model=VoiceUsageRecord):
+    name = "声音使用记录"
+    name_plural = "声音使用记录"
+    icon = "fa-solid fa-clock"
+
+    column_list = [
+        VoiceUsageRecord.merchant_name,
+        VoiceUsageRecord.scenario,
+        VoiceUsageRecord.result,
+        VoiceUsageRecord.fallback_used,
+        VoiceUsageRecord.created_at,
+    ]
+    column_searchable_list = [VoiceUsageRecord.merchant_name, VoiceUsageRecord.scenario, VoiceUsageRecord.result]
+    column_sortable_list = [VoiceUsageRecord.created_at]
+    column_labels = {
+        VoiceUsageRecord.profile_id: "声音档案ID",
+        VoiceUsageRecord.task_id: "任务ID",
+        VoiceUsageRecord.merchant_name: "商家",
+        VoiceUsageRecord.scenario: "场景",
+        VoiceUsageRecord.result: "结果",
+        VoiceUsageRecord.fallback_used: "使用回退",
+        VoiceUsageRecord.created_at: "创建时间",
+    }
+
+
 def setup_admin(app: FastAPI) -> None:
     authentication_backend = AdminAuth(secret_key=settings.admin_secret_key, same_site="lax")
     admin = Admin(
@@ -377,3 +663,12 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(DirectMessageTemplateAdmin)
     admin.add_view(DirectMessageConversationAdmin)
     admin.add_view(DirectMessageAdmin)
+    admin.add_view(IntentCustomerAdmin)
+    admin.add_view(IntentEventAdmin)
+    admin.add_view(FollowUpWorkOrderAdmin)
+    admin.add_view(LearningSuggestionAdmin)
+    admin.add_view(KnowledgeBaseItemAdmin)
+    admin.add_view(LearningExperimentAdmin)
+    admin.add_view(VoiceProfileAdmin)
+    admin.add_view(VoiceTrainingJobAdmin)
+    admin.add_view(VoiceUsageRecordAdmin)
