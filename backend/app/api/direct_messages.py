@@ -39,9 +39,10 @@ from app.schemas.dm import (
     DmTemplateRead,
 )
 from app.schemas.task import TaskRead
-from app.services.dm_browser_profile import normalize_account_state
+from app.services.dm_browser_profile import normalize_account_state, profile_has_session_artifacts
 from app.services.dm_gateway import BrowserAutomationDmGateway
 from app.services.dm_listener import sync_dm_replies as sync_dm_replies_service
+from app.services.dm_policy import SUPPORTED_DM_PLATFORM_ORDER, SUPPORTED_DM_PLATFORMS, UNSUPPORTED_DM_PLATFORM_REASONS
 from app.services.dm_queue import enqueue_dm_task
 from app.services.dm_runner import run_dm_task
 
@@ -51,14 +52,12 @@ PLATFORM_LOGIN_URLS = {
     "美团": "https://passport.meituan.com/account/unitivelogin",
     "饿了么": "https://h5.ele.me/login/",
     "抖音": "https://www.douyin.com/",
-    "视频号": "https://channels.weixin.qq.com/",
 }
 
 DEFAULT_DM_ACCOUNTS = [
     {"platform": "美团", "account_name": "美团个人号-南昌本地生活", "daily_limit": 200, "min_send_interval_seconds": 45},
     {"platform": "饿了么", "account_name": "饿了么个人号-餐饮招商", "daily_limit": 150, "min_send_interval_seconds": 45},
     {"platform": "抖音", "account_name": "抖音个人号-团购拓客", "daily_limit": 120, "min_send_interval_seconds": 60},
-    {"platform": "视频号", "account_name": "视频号个人号-本地生活", "daily_limit": 120, "min_send_interval_seconds": 60},
 ]
 
 LEGACY_BUSINESS_BACKEND_URLS = {
@@ -74,6 +73,28 @@ def _is_legacy_business_backend_url(platform: str, url: str | None) -> bool:
     return url.strip().rstrip("/") in {item.rstrip("/") for item in LEGACY_BUSINESS_BACKEND_URLS.get(platform, set())}
 
 
+def _unsupported_platform_reason(platform_name: str) -> str:
+    return UNSUPPORTED_DM_PLATFORM_REASONS.get(platform_name, f"{platform_name}暂不支持平台私信")
+
+
+def _apply_dm_account_support_status(account: DirectMessageAccount) -> bool:
+    if account.platform in SUPPORTED_DM_PLATFORMS:
+        return False
+
+    changed = False
+    updates = {
+        "status": "不支持私信",
+        "session_status": "不可用",
+        "risk_status": "不支持",
+        "last_error": _unsupported_platform_reason(account.platform),
+    }
+    for key, value in updates.items():
+        if getattr(account, key) != value:
+            setattr(account, key, value)
+            changed = True
+    return changed
+
+
 def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
     accounts = list(db.scalars(select(DirectMessageAccount).order_by(DirectMessageAccount.created_at.desc())).all())
     existing_platforms = {account.platform for account in accounts}
@@ -81,6 +102,9 @@ def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
     legacy_business_name_tokens = ("招商号", "商家号", "经营宝")
     changed = False
     for account in accounts:
+        if _apply_dm_account_support_status(account):
+            changed = True
+            continue
         if account.login_label in {"待绑定真实平台账号", "待绑定商家号", ""} or not account.login_label:
             account.login_label = "待绑定个人号"
             changed = True
@@ -117,10 +141,16 @@ def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
 
 def _seed_default_account(db: Session) -> DirectMessageAccount:
     accounts = _seed_default_accounts(db)
-    available_account = next((account for account in accounts if account.status == "可用"), None)
+    available_account = next(
+        (account for account in accounts if account.platform in SUPPORTED_DM_PLATFORMS and account.status == "可用"),
+        None,
+    )
     if available_account:
         return available_account
-    return accounts[0]
+    supported_account = next((account for account in accounts if account.platform in SUPPORTED_DM_PLATFORMS), None)
+    if supported_account:
+        return supported_account
+    raise HTTPException(status_code=400, detail="暂无支持平台的私信个人号")
 
 
 def _seed_default_template(db: Session) -> DirectMessageTemplate:
@@ -145,14 +175,22 @@ def _seed_default_template(db: Session) -> DirectMessageTemplate:
 def _seed_default_platform_configs(db: Session) -> list[DirectMessagePlatformConfig]:
     configs = list(db.scalars(select(DirectMessagePlatformConfig).order_by(DirectMessagePlatformConfig.created_at.desc())).all())
     existing_platforms = {config.platform for config in configs}
-    for platform_name in PLATFORM_LOGIN_URLS:
+    changed = False
+    for config in configs:
+        if config.platform not in SUPPORTED_DM_PLATFORMS and config.enabled:
+            config.enabled = False
+            changed = True
+
+    for platform_name in SUPPORTED_DM_PLATFORM_ORDER:
         if platform_name in existing_platforms:
             continue
         config = DirectMessagePlatformConfig(platform=platform_name, home_url="", inbox_url="", enabled=False)
         db.add(config)
         configs.append(config)
+        changed = True
 
-    db.commit()
+    if changed:
+        db.commit()
     return configs
 
 
@@ -165,6 +203,8 @@ def _platform_config(db: Session, platform: str) -> DirectMessagePlatformConfig 
 
 
 def _login_url_for_account(db: Session, account: DirectMessageAccount) -> str:
+    if account.platform not in SUPPORTED_DM_PLATFORMS:
+        return ""
     config = _platform_config(db, account.platform)
     configured_url = (config.home_url if config and config.home_url else "").strip()
     if configured_url and not _is_legacy_business_backend_url(account.platform, configured_url):
@@ -248,11 +288,19 @@ def _launch_isolated_login_window(login_url: str, profile_path: str) -> tuple[bo
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return True, f"已打开独立登录窗口，账号会话目录：{active_profile_path}"
+    return True, "已打开独立登录窗口，请在弹出的页面完成个人号登录，然后回到客户端点击“登录后检测”。"
 
 
 def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[DirectMessageAccount, str]:
     normalize_account_state(account)
+    if account.platform not in SUPPORTED_DM_PLATFORMS:
+        account.status = "不支持私信"
+        account.session_status = "不可用"
+        account.risk_status = "不支持"
+        account.last_error = _unsupported_platform_reason(account.platform)
+        db.commit()
+        raise HTTPException(status_code=400, detail=account.last_error)
+
     login_url = _login_url_for_account(db, account)
     if not login_url:
         raise HTTPException(status_code=400, detail=f"暂不支持{account.platform}内置登录入口，请在高级配置里填写网页登录入口")
@@ -272,9 +320,24 @@ def dm_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     _seed_default_account(db)
     _seed_default_template(db)
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    accounts = db.scalar(select(func.count()).select_from(DirectMessageAccount)) or 0
+    accounts = (
+        db.scalar(
+            select(func.count())
+            .select_from(DirectMessageAccount)
+            .where(DirectMessageAccount.platform.in_(SUPPORTED_DM_PLATFORM_ORDER))
+        )
+        or 0
+    )
     active_accounts = (
-        db.scalar(select(func.count()).select_from(DirectMessageAccount).where(DirectMessageAccount.status == "可用")) or 0
+        db.scalar(
+            select(func.count())
+            .select_from(DirectMessageAccount)
+            .where(
+                DirectMessageAccount.platform.in_(SUPPORTED_DM_PLATFORM_ORDER),
+                DirectMessageAccount.status == "可用",
+            )
+        )
+        or 0
     )
     today_sent = (
         db.scalar(
@@ -336,6 +399,9 @@ def list_dm_accounts(db: Session = Depends(get_db)) -> list[DirectMessageAccount
 
 @router.post("/accounts", response_model=DmAccountRead)
 def create_dm_account(payload: DmAccountCreate, db: Session = Depends(get_db)) -> DirectMessageAccount:
+    if payload.platform not in SUPPORTED_DM_PLATFORMS:
+        raise HTTPException(status_code=400, detail=_unsupported_platform_reason(payload.platform))
+
     account = DirectMessageAccount(**payload.model_dump(by_alias=False))
     db.add(account)
     db.flush()
@@ -354,6 +420,7 @@ def update_dm_account(account_id: str, payload: DmAccountUpdate, db: Session = D
     for key, value in payload.model_dump(by_alias=False, exclude_unset=True).items():
         setattr(account, key, value)
     normalize_account_state(account)
+    _apply_dm_account_support_status(account)
     db.commit()
     db.refresh(account)
     return account
@@ -391,6 +458,12 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
         raise HTTPException(status_code=404, detail="平台个人号不存在")
 
     normalize_account_state(account)
+    if _apply_dm_account_support_status(account):
+        db.commit()
+        db.refresh(account)
+        return account
+
+    previous_login_check_at = account.last_login_check_at
     account.last_login_check_at = datetime.utcnow()
     if settings.dm_gateway_mode == "simulator":
         account.status = "可用"
@@ -404,9 +477,20 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
         account.session_status = result.session_status
         account.risk_status = result.risk_status
         account.last_error = result.last_error
+        if result.session_status != "已登录" and profile_has_session_artifacts(account, previous_login_check_at):
+            account.status = "可用"
+            account.session_status = "已登录"
+            account.risk_status = "正常"
+            account.last_error = None
     elif account.session_status != "已登录":
-        account.status = "待登录"
-        account.last_error = "请先在客户端完成该平台个人号扫码登录"
+        if profile_has_session_artifacts(account, previous_login_check_at):
+            account.status = "可用"
+            account.session_status = "已登录"
+            account.risk_status = "正常"
+            account.last_error = None
+        else:
+            account.status = "待登录"
+            account.last_error = "请先在客户端完成该平台个人号扫码登录"
 
     db.commit()
     db.refresh(account)
@@ -420,6 +504,9 @@ def list_dm_platform_configs(db: Session = Depends(get_db)) -> list[DirectMessag
 
 @router.post("/platform-configs", response_model=DmPlatformConfigRead)
 def create_dm_platform_config(payload: DmPlatformConfigCreate, db: Session = Depends(get_db)) -> DirectMessagePlatformConfig:
+    if payload.platform not in SUPPORTED_DM_PLATFORMS:
+        raise HTTPException(status_code=400, detail=_unsupported_platform_reason(payload.platform))
+
     config = DirectMessagePlatformConfig(**payload.model_dump(by_alias=False))
     db.add(config)
     db.commit()
@@ -436,6 +523,10 @@ def update_dm_platform_config(
     config = db.get(DirectMessagePlatformConfig, config_id)
     if not config:
         raise HTTPException(status_code=404, detail="平台选择器配置不存在")
+
+    next_platform = payload.platform if payload.platform is not None else config.platform
+    if next_platform not in SUPPORTED_DM_PLATFORMS:
+        raise HTTPException(status_code=400, detail=_unsupported_platform_reason(next_platform))
 
     for key, value in payload.model_dump(by_alias=False, exclude_unset=True).items():
         setattr(config, key, value)
@@ -471,11 +562,20 @@ def create_dm_task(payload: DmTaskCreate, db: Session = Depends(get_db)) -> Outr
     if len(leads) != len(unique_lead_ids):
         raise HTTPException(status_code=400, detail="包含不存在的线索")
 
+    sendable_leads = [lead for lead in leads if lead.platform in SUPPORTED_DM_PLATFORMS]
+    if not sendable_leads:
+        raise HTTPException(status_code=400, detail="当前选择的线索没有可私信平台；视频号助手不支持主动私信商家")
+
     account_id = None
     if payload.account_id:
         account = db.get(DirectMessageAccount, payload.account_id)
         if not account:
             raise HTTPException(status_code=400, detail="平台个人号不存在")
+        if account.platform not in SUPPORTED_DM_PLATFORMS:
+            raise HTTPException(status_code=400, detail=_unsupported_platform_reason(account.platform))
+        selected_platforms = {lead.platform for lead in sendable_leads}
+        if selected_platforms != {account.platform}:
+            raise HTTPException(status_code=400, detail=f"指定账号只能发送{account.platform}线索；混合平台任务请使用自动轮换")
         account_id = account.id
     else:
         _seed_default_account(db)

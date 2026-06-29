@@ -12,6 +12,11 @@ AVAILABLE_ACCOUNT_STATUS = {"可用"}
 AVAILABLE_SESSION_STATUS = {"模拟可用", "已登录"}
 BLOCKED_RISK_STATUS = {"需验证", "风控暂停", "封禁", "异常"}
 SENT_CONVERSATION_STATUS = {"已发送", "已回复"}
+SUPPORTED_DM_PLATFORM_ORDER = ("美团", "饿了么", "抖音")
+SUPPORTED_DM_PLATFORMS = set(SUPPORTED_DM_PLATFORM_ORDER)
+UNSUPPORTED_DM_PLATFORM_REASONS = {
+    "视频号": "视频号助手当前不支持主动私信商家，请改用外呼或其他合规触达方式。",
+}
 
 
 @dataclass(frozen=True)
@@ -22,6 +27,8 @@ class AccountCheck:
 
 def account_send_check(account: DirectMessageAccount, at: datetime | None = None) -> AccountCheck:
     now = at or datetime.utcnow()
+    if account.platform not in SUPPORTED_DM_PLATFORMS:
+        return AccountCheck(False, UNSUPPORTED_DM_PLATFORM_REASONS.get(account.platform, f"{account.platform}暂不支持平台私信"))
     if account.status not in AVAILABLE_ACCOUNT_STATUS:
         return AccountCheck(False, f"账号状态为{account.status or '未知'}")
     if (account.session_status or "未登录") not in AVAILABLE_SESSION_STATUS:
@@ -40,22 +47,38 @@ def account_send_check(account: DirectMessageAccount, at: datetime | None = None
     return AccountCheck(True, "可发送")
 
 
-def pick_dm_account(db: Session, task: OutreachTask, at: datetime | None = None) -> tuple[DirectMessageAccount | None, str]:
+def pick_dm_account(
+    db: Session,
+    task: OutreachTask,
+    lead: MerchantLead | None = None,
+    at: datetime | None = None,
+) -> tuple[DirectMessageAccount | None, str]:
     now = at or datetime.utcnow()
+    target_platform = lead.platform if lead else None
+    if target_platform and target_platform not in SUPPORTED_DM_PLATFORMS:
+        return None, UNSUPPORTED_DM_PLATFORM_REASONS.get(target_platform, f"{target_platform}暂不支持平台私信")
+
     if task.dm_account_id:
         account = db.get(DirectMessageAccount, task.dm_account_id)
         if not account:
             return None, "任务指定账号不存在"
+        if target_platform and account.platform != target_platform:
+            return None, f"任务指定的是{account.platform}个人号，不能给{target_platform}商家发送"
         check = account_send_check(account, now)
         return (account, check.reason) if check.ok else (None, check.reason)
 
-    accounts = list(
-        db.scalars(
-            select(DirectMessageAccount)
-            .where(DirectMessageAccount.status == "可用")
-            .order_by(DirectMessageAccount.sent_today.asc(), DirectMessageAccount.created_at.asc())
-        ).all()
+    stmt = (
+        select(DirectMessageAccount)
+        .where(
+            DirectMessageAccount.status == "可用",
+            DirectMessageAccount.platform.in_(SUPPORTED_DM_PLATFORM_ORDER),
+        )
+        .order_by(DirectMessageAccount.sent_today.asc(), DirectMessageAccount.last_sent_at.asc().nullsfirst(), DirectMessageAccount.created_at.asc())
     )
+    if target_platform:
+        stmt = stmt.where(DirectMessageAccount.platform == target_platform)
+
+    accounts = list(db.scalars(stmt).all())
     blocked_reasons: list[str] = []
     for account in accounts:
         check = account_send_check(account, now)
@@ -63,7 +86,9 @@ def pick_dm_account(db: Session, task: OutreachTask, at: datetime | None = None)
             return account, check.reason
         blocked_reasons.append(f"{account.account_name}:{check.reason}")
 
-    return None, "暂无可用账号" if not blocked_reasons else "；".join(blocked_reasons[:3])
+    if target_platform:
+        return None, f"{target_platform}暂无可用个人号" if not blocked_reasons else "；".join(blocked_reasons[:3])
+    return None, "暂无可用个人号" if not blocked_reasons else "；".join(blocked_reasons[:3])
 
 
 def find_existing_dm_conversation(db: Session, lead: MerchantLead) -> DirectMessageConversation | None:

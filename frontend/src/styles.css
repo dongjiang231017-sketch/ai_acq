@@ -892,7 +892,7 @@ button:disabled {
 
 .platform-account-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 14px;
 }
@@ -1045,6 +1045,87 @@ button:disabled {
   font-weight: 900;
 }
 
+.rotation-hint {
+  min-height: 42px;
+  border: 1px solid #d7e7fb;
+  border-radius: 14px;
+  background: #f5faff;
+  color: #526782;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 12px 0;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.45;
+}
+
+.rotation-hint svg {
+  flex: 0 0 auto;
+  color: #2473f6;
+}
+
+.rotation-hint.is-warning {
+  border-color: #ffe0a6;
+  background: #fff9ec;
+  color: #8a620f;
+}
+
+.rotation-hint.is-warning svg {
+  color: #f0a31a;
+}
+
+.rotation-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.rotation-rule-grid div,
+.rotation-pool-row {
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+  background: #fbfdff;
+  padding: 14px;
+}
+
+.rotation-rule-grid span,
+.rotation-pool-row span {
+  color: #71839b;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.rotation-rule-grid strong,
+.rotation-pool-row strong {
+  display: block;
+  margin-top: 5px;
+  color: #18243a;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.rotation-rule-grid p {
+  margin: 8px 0 0;
+  color: #5f7088;
+  line-height: 1.55;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.rotation-pool-list {
+  display: grid;
+  gap: 10px;
+}
+
+.rotation-pool-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(100px, 0.5fr) minmax(100px, 0.5fr) minmax(220px, 1.3fr);
+  gap: 12px;
+  align-items: center;
+}
+
 .account-row {
   min-height: 72px;
   display: grid;
@@ -1089,8 +1170,8 @@ button:disabled {
 
 .login-shell {
   display: grid;
-  grid-template-columns: minmax(220px, 0.32fr) minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
 }
 
 .login-account-rail {
@@ -1101,6 +1182,8 @@ button:disabled {
   display: grid;
   align-content: start;
   gap: 8px;
+  max-height: 720px;
+  overflow: auto;
 }
 
 .login-account-chip {
@@ -1190,17 +1273,17 @@ button:disabled {
 
 .embedded-login-body {
   display: grid;
-  grid-template-columns: minmax(220px, 0.46fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
-  padding: 14px;
+  padding: 16px;
 }
 
 .embedded-login-body.is-open {
-  grid-template-columns: minmax(360px, 1.1fr) minmax(260px, 0.9fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .login-preview {
-  min-height: 236px;
+  min-height: 420px;
   border: 1px dashed #bcd4f5;
   border-radius: 16px;
   background:
@@ -1215,7 +1298,7 @@ button:disabled {
 }
 
 .login-preview.has-webview {
-  min-height: 360px;
+  min-height: 560px;
   border-style: solid;
   padding: 0;
   place-items: stretch;
@@ -1225,15 +1308,15 @@ button:disabled {
 
 .embedded-webview {
   min-width: 0;
-  min-height: 360px;
+  min-height: 560px;
   display: grid;
-  grid-template-rows: minmax(260px, 1fr) auto;
+  grid-template-rows: minmax(460px, 1fr) auto;
   background: #fff;
 }
 
 .embedded-webview iframe {
   width: 100%;
-  min-height: 260px;
+  min-height: 460px;
   border: 0;
   background: #fff;
 }
@@ -1295,6 +1378,7 @@ button:disabled {
 
 .profile-inspector {
   display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1481,6 +1565,8 @@ button:disabled {
   .dm-inbox-grid,
   .account-isolation-summary,
   .platform-account-strip,
+  .rotation-rule-grid,
+  .rotation-pool-row,
   .profile-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1548,7 +1634,10 @@ button:disabled {
   .dm-inbox-grid,
   .account-isolation-summary,
   .platform-account-strip,
+  .rotation-rule-grid,
+  .rotation-pool-row,
   .profile-grid,
+  .profile-inspector,
   .login-account-rail {
     grid-template-columns: 1fr;
   }

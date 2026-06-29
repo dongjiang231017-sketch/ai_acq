@@ -19,6 +19,8 @@ from app.services.dm_policy import (
     mark_account_sent,
     pause_account_for_risk,
     pick_dm_account,
+    SUPPORTED_DM_PLATFORMS,
+    UNSUPPORTED_DM_PLATFORM_REASONS,
 )
 
 
@@ -90,6 +92,24 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
 
     for index, lead in enumerate(leads):
         now = datetime.utcnow()
+        if lead.platform not in SUPPORTED_DM_PLATFORMS:
+            db.add(
+                DirectMessageConversation(
+                    task_id=task.id,
+                    lead_id=lead.id,
+                    account_id=None,
+                    platform=lead.platform,
+                    merchant_name=lead.name,
+                    status="平台不支持",
+                    intent_level="跳过",
+                    last_message=UNSUPPORTED_DM_PLATFORM_REASONS.get(lead.platform, f"{lead.platform}暂不支持平台私信"),
+                    last_message_at=now,
+                    need_handoff=False,
+                )
+            )
+            task.failed_count += 1
+            continue
+
         existing = find_existing_dm_conversation(db, lead)
         if existing:
             db.add(
@@ -108,7 +128,7 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
             )
             continue
 
-        account, account_reason = pick_dm_account(db, task, now)
+        account, account_reason = pick_dm_account(db, task, lead, now)
         if not account:
             db.add(
                 DirectMessageConversation(

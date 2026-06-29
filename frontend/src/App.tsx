@@ -67,7 +67,7 @@ const fallbackModules: ModuleSummary[] = [
   { key: "collector", name: "线索采集", description: "采集任务、来源配置、清洗规则。", pageCount: 5, status: "ready" },
   { key: "leads", name: "商家线索库", description: "商家资料、电话库、主页和去重审核。", pageCount: 5, status: "ready" },
   { key: "outbound", name: "AI外呼系统", description: "外呼任务、话术流程、通话记录。", pageCount: 6, status: "ready" },
-  { key: "dm", name: "平台私信系统", description: "平台个人号、私信任务、模板和会话。", pageCount: 6, status: "ready" },
+  { key: "dm", name: "平台私信系统", description: "平台个人号、私信任务、模板和会话。", pageCount: 7, status: "ready" },
   { key: "intent", name: "意向客户池", description: "客户分级、工单跟进和分配规则。", pageCount: 4, status: "ready" },
   { key: "voice", name: "声音档案", description: "授权、音色训练和使用记录。", pageCount: 4, status: "ready" },
   { key: "reports", name: "数据报表", description: "渠道、绩效和导出中心。", pageCount: 4, status: "ready" },
@@ -248,8 +248,8 @@ const fallbackRules: RecallRule[] = [
 ];
 
 const fallbackDmOverview: DmOverview = {
-  accounts: 4,
-  activeAccounts: 4,
+  accounts: 3,
+  activeAccounts: 3,
   todaySent: 128,
   replies: 32,
   needsHandoff: 9,
@@ -260,7 +260,7 @@ const fallbackDmAccounts: DmAccount[] = [
   {
     id: "dm_account_1",
     platform: "美团",
-    accountName: "南昌本地生活招商号",
+    accountName: "美团个人号-南昌本地生活",
     loginLabel: "已登录",
     status: "可用",
     browserProfileKey: "meituan-nanchang-local",
@@ -317,26 +317,6 @@ const fallbackDmAccounts: DmAccount[] = [
     lastError: null,
     createdAt: new Date().toISOString(),
   },
-  {
-    id: "dm_account_4",
-    platform: "视频号",
-    accountName: "视频号个人号-本地生活",
-    loginLabel: "待绑定个人号",
-    status: "可用",
-    browserProfileKey: "channels-local-life",
-    browserProfilePath: ".dm_browser_profiles/channels-local-life",
-    sessionStatus: "模拟可用",
-    riskStatus: "正常",
-    dailyLimit: 120,
-    sentToday: 0,
-    minSendIntervalSeconds: 60,
-    cooldownUntil: null,
-    lastSentAt: null,
-    lastSyncAt: null,
-    lastLoginCheckAt: null,
-    lastError: null,
-    createdAt: new Date().toISOString(),
-  },
 ];
 
 const createFallbackDmPlatformConfig = (id: string, platform: string): DmPlatformConfig => ({
@@ -364,7 +344,6 @@ const fallbackDmPlatformConfigs: DmPlatformConfig[] = [
   createFallbackDmPlatformConfig("dm_platform_1", "美团"),
   createFallbackDmPlatformConfig("dm_platform_2", "饿了么"),
   createFallbackDmPlatformConfig("dm_platform_3", "抖音"),
-  createFallbackDmPlatformConfig("dm_platform_4", "视频号"),
 ];
 
 const fallbackDmSyncResult: DmSyncResult = {
@@ -377,8 +356,20 @@ const platformLoginUrls: Record<string, string> = {
   美团: "https://passport.meituan.com/account/unitivelogin",
   饿了么: "https://h5.ele.me/login/",
   抖音: "https://www.douyin.com/",
-  视频号: "https://channels.weixin.qq.com/",
 };
+
+const supportedDmPlatforms = ["美团", "饿了么", "抖音"] as const;
+const unsupportedDmPlatformTips: Record<string, string> = {
+  视频号: "视频号助手当前不支持主动私信商家，可改用外呼或其他合规触达方式。",
+};
+
+function isSupportedDmPlatform(platform: string) {
+  return supportedDmPlatforms.includes(platform as (typeof supportedDmPlatforms)[number]);
+}
+
+function isSupportedDmAccount(account: DmAccount) {
+  return isSupportedDmPlatform(account.platform) && account.status !== "不支持私信";
+}
 
 function isLegacyBusinessBackendUrl(platform: string, url?: string | null) {
   const normalized = (url ?? "").trim().replace(/\/+$/, "");
@@ -673,11 +664,11 @@ const fallbackVoiceTrainingJobs: VoiceTrainingJob[] = [];
 const fallbackVoiceUsageRecords: VoiceUsageRecord[] = [
   {
     id: "voice_usage_1",
-    profileId: "voice_1",
+    profileId: null,
     taskId: null,
     merchantName: "模拟商家",
     scenario: "外呼",
-    result: "默认安全音色模拟使用",
+    result: "使用系统内置音色：标准AI音色",
     fallbackUsed: false,
     createdAt: new Date().toISOString(),
   },
@@ -845,7 +836,7 @@ const fallbackSystemSettings: SystemSetting[] = [
 
 const outboundTabs = ["外呼总览", "任务列表", "话术流程", "通话记录", "重拨规则", "实时监听"] as const;
 type OutboundTab = (typeof outboundTabs)[number];
-const dmTabs = ["私信总览", "任务列表", "账号管理", "消息模板", "会话记录", "回复监听"] as const;
+const dmTabs = ["私信总览", "任务列表", "账号管理", "轮换规则", "消息模板", "会话记录", "回复监听"] as const;
 type DmTab = (typeof dmTabs)[number];
 const intentTabs = ["客户池", "跟进工单", "客户详情", "分配规则"] as const;
 type IntentTab = (typeof intentTabs)[number];
@@ -1002,26 +993,31 @@ function App() {
   const outboundTasks = useMemo(() => tasks.filter((task) => task.channel === "call"), [tasks]);
   const dmTasks = useMemo(() => tasks.filter((task) => task.channel === "dm"), [tasks]);
   const callableLeads = useMemo(() => leads.filter((lead) => Boolean(lead.phone)), [leads]);
-  const dmReachableLeads = useMemo(() => leads.filter((lead) => Boolean(lead.platform)), [leads]);
+  const dmReachableLeads = useMemo(() => leads.filter((lead) => isSupportedDmPlatform(lead.platform)), [leads]);
+  const dmUnsupportedLeads = useMemo(
+    () => leads.filter((lead) => Boolean(lead.platform) && !isSupportedDmPlatform(lead.platform)),
+    [leads],
+  );
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
-  const dmAccountPlatforms = ["美团", "饿了么", "抖音", "视频号"];
+  const dmSupportedAccounts = useMemo(() => dmAccounts.filter(isSupportedDmAccount), [dmAccounts]);
+  const dmAccountPlatforms = supportedDmPlatforms;
   const dmAccountCountByPlatform = useMemo(
     () =>
-      dmAccounts.reduce<Record<string, number>>((counts, account) => {
+      dmSupportedAccounts.reduce<Record<string, number>>((counts, account) => {
         counts[account.platform] = (counts[account.platform] ?? 0) + 1;
         return counts;
       }, {}),
-    [dmAccounts],
+    [dmSupportedAccounts],
   );
   const isolatedDmAccountCount = useMemo(
-    () => dmAccounts.filter((account) => Boolean(account.browserProfileKey || account.browserProfilePath)).length,
-    [dmAccounts],
+    () => dmSupportedAccounts.filter((account) => Boolean(account.browserProfileKey || account.browserProfilePath)).length,
+    [dmSupportedAccounts],
   );
   const activeLoginAccount = useMemo(() => {
-    return dmAccounts.find((account) => account.id === dmLoginSession?.accountId) ?? dmAccounts[0];
-  }, [dmAccounts, dmLoginSession]);
+    return dmSupportedAccounts.find((account) => account.id === dmLoginSession?.accountId) ?? dmSupportedAccounts[0];
+  }, [dmSupportedAccounts, dmLoginSession]);
   const activeLoginConfig = useMemo(() => {
     if (!activeLoginAccount) return null;
     return dmPlatformConfigs.find((config) => config.platform === activeLoginAccount.platform) ?? null;
@@ -1038,10 +1034,35 @@ function App() {
         ? "系统内置网页登录入口"
         : "未配置网页登录入口"
     : "选择平台个人号";
-  const activeProfileKey =
-    dmLoginSession?.profileKey || activeLoginAccount?.browserProfileKey || `${activeLoginAccount?.platform ?? "platform"}-account`;
-  const activeProfilePath =
-    dmLoginSession?.profilePath || activeLoginAccount?.browserProfilePath || `.dm_browser_profiles/${activeProfileKey}`;
+  const dmRotationRows = useMemo(
+    () =>
+      dmAccountPlatforms.map((platformName) => {
+        const accountsForPlatform = dmSupportedAccounts
+          .filter((account) => account.platform === platformName)
+          .sort((left, right) => {
+            if (left.sentToday !== right.sentToday) return left.sentToday - right.sentToday;
+            return new Date(left.lastSentAt ?? 0).getTime() - new Date(right.lastSentAt ?? 0).getTime();
+          });
+        const availableAccounts = accountsForPlatform.filter(
+          (account) =>
+            account.status === "可用" &&
+            ["模拟可用", "已登录"].includes(account.sessionStatus ?? "") &&
+            !["需验证", "风控暂停", "封禁", "异常"].includes(account.riskStatus ?? ""),
+        );
+        const totalRemaining = accountsForPlatform.reduce(
+          (sum, account) => sum + Math.max(0, account.dailyLimit - account.sentToday),
+          0,
+        );
+        return {
+          platform: platformName,
+          accounts: accountsForPlatform,
+          availableAccounts,
+          nextAccount: availableAccounts[0],
+          totalRemaining,
+        };
+      }),
+    [dmAccountPlatforms, dmSupportedAccounts],
+  );
   const activeIntentCustomer =
     intentCustomers.find((customer) => customer.id === selectedIntentCustomerId) ?? intentCustomers[0];
   const activeIntentCustomerEvents = activeIntentCustomer
@@ -1117,7 +1138,7 @@ function App() {
       const nextLeads = leadResult.value;
       setLeads(nextLeads);
       setSelectedLeadIds((current) => current.filter((id) => nextLeads.some((lead) => lead.id === id)));
-      setSelectedDmLeadIds((current) => current.filter((id) => nextLeads.some((lead) => lead.id === id)));
+      setSelectedDmLeadIds((current) => current.filter((id) => nextLeads.some((lead) => lead.id === id && isSupportedDmPlatform(lead.platform))));
     }
     if (results[3].status === "fulfilled") setTasks(results[3].value);
     if (results[4].status === "fulfilled") setOverview(results[4].value);
@@ -1132,7 +1153,10 @@ function App() {
       setDmAccounts(nextAccounts);
       setDmForm((current) => ({
         ...current,
-        accountId: current.accountId || nextAccounts[0]?.id || "",
+        accountId:
+          current.accountId && nextAccounts.some((account) => account.id === current.accountId && isSupportedDmAccount(account))
+            ? current.accountId
+            : "",
       }));
     }
     const dmTemplatesResult = results[11];
@@ -1290,7 +1314,9 @@ function App() {
 
   async function submitDmTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const leadIds = selectedDmLeadIds.length > 0 ? selectedDmLeadIds : dmReachableLeads.slice(0, 20).map((lead) => lead.id);
+    const supportedLeadIds = new Set(dmReachableLeads.map((lead) => lead.id));
+    const selectedSupportedLeadIds = selectedDmLeadIds.filter((leadId) => supportedLeadIds.has(leadId));
+    const leadIds = selectedSupportedLeadIds.length > 0 ? selectedSupportedLeadIds : dmReachableLeads.slice(0, 20).map((lead) => lead.id);
     if (!dmForm.name.trim() || leadIds.length === 0) return;
 
     const created = await api.createDmTask({
@@ -1325,7 +1351,7 @@ function App() {
 
   async function submitDmAccount(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!dmAccountForm.accountName.trim()) return;
+    if (!dmAccountForm.accountName.trim() || !isSupportedDmPlatform(dmAccountForm.platform)) return;
 
     const created = await api.createDmAccount({
       ...dmAccountForm,
@@ -1333,7 +1359,7 @@ function App() {
       minSendIntervalSeconds: Number(dmAccountForm.minSendIntervalSeconds),
     });
     setDmAccounts((current) => [created, ...current]);
-    setDmForm((current) => ({ ...current, accountId: created.id }));
+    setDmForm((current) => ({ ...current, accountId: "" }));
     setDmAccountForm({
       platform: "美团",
       accountName: "",
@@ -1348,6 +1374,8 @@ function App() {
   }
 
   function prepareNewDmAccount(platform: string, source?: DmAccount) {
+    if (!isSupportedDmPlatform(platform)) return;
+
     const nextIndex = (dmAccountCountByPlatform[platform] ?? 0) + 1;
     setDmAccountForm({
       platform,
@@ -1415,9 +1443,13 @@ function App() {
   }
 
   async function preflightDmAccount(accountId: string) {
-    const updated = await api.preflightDmAccount(accountId);
-    setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
-    setDmLoginMessage(updated.sessionStatus === "已登录" || updated.sessionStatus === "模拟可用" ? "登录态检测通过" : "还未检测到登录态");
+    try {
+      const updated = await api.preflightDmAccount(accountId);
+      setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
+      setDmLoginMessage(updated.sessionStatus === "已登录" || updated.sessionStatus === "模拟可用" ? "登录态检测通过" : "还未检测到登录态");
+    } catch (error) {
+      setDmLoginMessage(error instanceof Error ? error.message : "登录检测失败");
+    }
   }
 
   async function syncDmReplies() {
@@ -3082,6 +3114,7 @@ function App() {
     const showOverview = activeDmTab === "私信总览";
     const showTasks = showOverview || activeDmTab === "任务列表";
     const showAccounts = showOverview || activeDmTab === "账号管理";
+    const showRotation = showOverview || activeDmTab === "轮换规则";
     const showTemplates = showOverview || activeDmTab === "消息模板";
     const showConversations = showOverview || activeDmTab === "会话记录";
     const showRealtime = showOverview || activeDmTab === "回复监听";
@@ -3172,12 +3205,12 @@ function App() {
                   <input value={dmForm.name} onChange={(event) => setDmForm({ ...dmForm, name: event.target.value })} />
                 </label>
                 <label>
-                  平台个人号
+                  发送账号规则
                   <select value={dmForm.accountId} onChange={(event) => setDmForm({ ...dmForm, accountId: event.target.value })}>
-                    <option value="">个人号池轮转</option>
-                    {dmAccounts.map((account) => (
+                    <option value="">按商家平台自动轮换（推荐）</option>
+                    {dmSupportedAccounts.map((account) => (
                       <option key={account.id} value={account.id}>
-                        {account.platform} · {account.accountName}
+                        指定 {account.platform} · {account.accountName}
                       </option>
                     ))}
                   </select>
@@ -3209,8 +3242,21 @@ function App() {
               <div className="lead-picker">
                 <div className="section-caption">
                   <strong>筛选私信对象</strong>
-                  <small>{selectedDmLeadIds.length} 个已选</small>
+                  <small>{selectedDmLeadIds.filter((leadId) => dmReachableLeads.some((lead) => lead.id === leadId)).length} 个已选</small>
                 </div>
+                <div className="rotation-hint">
+                  <CheckCircle2 size={16} />
+                  <span>按线索平台自动分配同平台个人号：美团商家用美团号池，饿了么商家用饿了么号池，抖音商家用抖音号池。</span>
+                </div>
+                {dmUnsupportedLeads.length > 0 && (
+                  <div className="rotation-hint is-warning">
+                    <ShieldAlert size={16} />
+                    <span>
+                      已排除 {dmUnsupportedLeads.length} 条暂不支持私信的平台线索；
+                      {unsupportedDmPlatformTips[dmUnsupportedLeads[0]?.platform] ?? "可改用外呼或其他触达方式。"}
+                    </span>
+                  </div>
+                )}
                 <LeadTable leads={dmReachableLeads} selectable selectedLeadIds={selectedDmLeadIds} onToggleLead={toggleDmLead} />
               </div>
             </article>
@@ -3240,7 +3286,7 @@ function App() {
               </div>
               <div className="account-isolation-summary">
                 <div>
-                  <strong>{dmAccounts.length}</strong>
+                  <strong>{dmSupportedAccounts.length}</strong>
                   <span>已配置个人号</span>
                 </div>
                 <div>
@@ -3262,10 +3308,9 @@ function App() {
                 <label>
                   平台
                   <select value={dmAccountForm.platform} onChange={(event) => setDmAccountForm({ ...dmAccountForm, platform: event.target.value })}>
-                    <option>美团</option>
-                    <option>饿了么</option>
-                    <option>抖音</option>
-                    <option>视频号</option>
+                    {dmAccountPlatforms.map((platform) => (
+                      <option key={platform}>{platform}</option>
+                    ))}
                   </select>
                 </label>
                 <label>
@@ -3319,7 +3364,7 @@ function App() {
                 <ShieldAlert size={22} />
               </div>
               <div className="account-list">
-                {dmAccounts.map((account) => (
+                {dmSupportedAccounts.map((account) => (
                   <article className="account-row" key={account.id}>
                     <div className="account-row-head">
                       <div>
@@ -3368,7 +3413,8 @@ function App() {
 
               <div className="login-shell">
                 <aside className="login-account-rail">
-                  {dmAccounts.map((account) => (
+                  {dmSupportedAccounts.length === 0 && <div className="empty-state">暂无可登录的平台个人号。</div>}
+                  {dmSupportedAccounts.map((account) => (
                     <button
                       className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
                       disabled={isOpeningDmLogin}
@@ -3387,7 +3433,7 @@ function App() {
                   <div className="embedded-browser-bar">
                     <span className="status-dot" />
                     <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录页` : "选择平台个人号"}</strong>
-                    <em>系统内置登录入口</em>
+                    <em>{activeLoginEntryText}</em>
                   </div>
                   <div className={`embedded-login-body ${dmLoginWindowUrl ? "is-open" : ""}`}>
                     <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
@@ -3433,6 +3479,10 @@ function App() {
                         <span>风险状态</span>
                         <strong>{activeLoginAccount?.riskStatus ?? "正常"}</strong>
                       </div>
+                      <div>
+                        <span>发送规则</span>
+                        <strong>只给同平台商家发送</strong>
+                      </div>
                     </div>
                   </div>
                   <div className="button-row login-actions">
@@ -3459,6 +3509,78 @@ function App() {
               </div>
             </article>
 
+          </section>
+        )}
+
+        {showRotation && (
+          <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Rotation</p>
+                  <h2>个人号轮换规则</h2>
+                </div>
+                <RefreshCw size={22} />
+              </div>
+              <div className="rotation-rule-grid">
+                <div>
+                  <span>规则一</span>
+                  <strong>按商家平台匹配</strong>
+                  <p>美团商家只进入美团个人号池，饿了么和抖音同理，避免跨平台错发。</p>
+                </div>
+                <div>
+                  <span>规则二</span>
+                  <strong>同平台账号轮换</strong>
+                  <p>优先选择同平台里发送量更低、间隔已满足、风险正常的个人号。</p>
+                </div>
+                <div>
+                  <span>规则三</span>
+                  <strong>额度和间隔保护</strong>
+                  <p>每个个人号独立计算日发送上限、今日已发和最小发送间隔。</p>
+                </div>
+                <div>
+                  <span>规则四</span>
+                  <strong>异常账号自动跳过</strong>
+                  <p>未登录、需验证、风控暂停或达到额度的账号不会参与本轮发送。</p>
+                </div>
+              </div>
+              <div className="rotation-hint is-warning">
+                <ShieldAlert size={16} />
+                <span>视频号助手当前不支持主动私信商家，视频号线索会从平台私信任务里排除，可走外呼或其他合规触达方式。</span>
+              </div>
+            </article>
+
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Pools</p>
+                  <h2>各平台账号池状态</h2>
+                </div>
+                <Users size={22} />
+              </div>
+              <div className="rotation-pool-list">
+                {dmRotationRows.map((row) => (
+                  <article className="rotation-pool-row" key={row.platform}>
+                    <div>
+                      <span>{row.platform}</span>
+                      <strong>{row.accounts.length} 个个人号</strong>
+                    </div>
+                    <div>
+                      <span>可用账号</span>
+                      <strong>{row.availableAccounts.length}</strong>
+                    </div>
+                    <div>
+                      <span>剩余额度</span>
+                      <strong>{row.totalRemaining}</strong>
+                    </div>
+                    <div className="wide">
+                      <span>下一轮优先</span>
+                      <strong>{row.nextAccount?.accountName ?? "暂无可用账号"}</strong>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
           </section>
         )}
 
