@@ -27,7 +27,64 @@ export type OutreachTask = {
   channel: "collector" | "call" | "dm";
   status: string;
   targetCount: number;
+  completedCount: number;
+  connectedCount: number;
+  intentCount: number;
+  failedCount: number;
+  concurrency: number;
+  scriptId?: string | null;
   scheduledAt?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+};
+
+export type OutboundOverview = {
+  aiSeats: number;
+  activeCalls: number;
+  needsHandoff: number;
+  silentAlerts: number;
+  todayCalls: number;
+  connectedRate: number;
+  intentCount: number;
+};
+
+export type CallRecord = {
+  id: string;
+  taskId: string;
+  leadId: string;
+  merchantName: string;
+  phone?: string | null;
+  aiSeat: string;
+  durationSeconds: number;
+  intentLevel: string;
+  currentNode: string;
+  outcome: string;
+  transcript: string;
+  needHandoff: boolean;
+  recallAt?: string | null;
+  createdAt: string;
+};
+
+export type CallScript = {
+  id: string;
+  name: string;
+  opening: string;
+  qualification: string;
+  objection: string;
+  closing: string;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type RecallRule = {
+  id: string;
+  name: string;
+  noAnswerIntervalMinutes: number;
+  busyIntervalMinutes: number;
+  maxAttempts: number;
+  quietStart: string;
+  quietEnd: string;
+  enabled: boolean;
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -61,4 +118,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify(task),
     }),
+  outboundOverview: () => request<OutboundOverview>("/outbound/overview"),
+  outboundTasks: () => request<OutreachTask[]>("/outbound/tasks"),
+  createOutboundTask: (task: {
+    name: string;
+    leadIds: string[];
+    concurrency: number;
+    scriptId?: string | null;
+    scheduledAt?: string | null;
+  }) =>
+    request<OutreachTask>("/outbound/tasks", {
+      method: "POST",
+      body: JSON.stringify(task),
+    }),
+  startOutboundTask: (taskId: string) =>
+    request<OutreachTask>(`/outbound/tasks/${taskId}/start`, {
+      method: "POST",
+    }),
+  callRecords: () => request<CallRecord[]>("/outbound/records"),
+  liveCalls: () => request<CallRecord[]>("/outbound/live"),
+  callScripts: () => request<CallScript[]>("/outbound/scripts"),
+  recallRules: () => request<RecallRule[]>("/outbound/recall-rules"),
 };
