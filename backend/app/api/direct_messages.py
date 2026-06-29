@@ -17,6 +17,7 @@ from app.models.task import (
 )
 from app.schemas.dm import (
     DmAccountCreate,
+    DmAccountLoginSession,
     DmAccountRead,
     DmAccountUpdate,
     DmConfigRead,
@@ -39,6 +40,13 @@ from app.services.dm_queue import enqueue_dm_task
 from app.services.dm_runner import run_dm_task
 
 router = APIRouter()
+
+PLATFORM_LOGIN_URLS = {
+    "美团": "https://e.meituan.com/",
+    "饿了么": "https://open.shop.ele.me/",
+    "抖音": "https://business.douyin.com/",
+    "视频号": "https://channels.weixin.qq.com/",
+}
 
 
 def _seed_default_account(db: Session) -> DirectMessageAccount:
@@ -96,6 +104,19 @@ def _seed_default_platform_configs(db: Session) -> list[DirectMessagePlatformCon
     db.add_all(defaults)
     db.commit()
     return defaults
+
+
+def _platform_config(db: Session, platform: str) -> DirectMessagePlatformConfig | None:
+    return db.scalar(
+        select(DirectMessagePlatformConfig)
+        .where(DirectMessagePlatformConfig.platform == platform)
+        .order_by(DirectMessagePlatformConfig.created_at.desc())
+    )
+
+
+def _login_url_for_account(db: Session, account: DirectMessageAccount) -> str:
+    config = _platform_config(db, account.platform)
+    return (config.home_url if config and config.home_url else PLATFORM_LOGIN_URLS.get(account.platform, "")).strip()
 
 
 @router.get("/overview", response_model=DmOverview)
@@ -190,6 +211,38 @@ def update_dm_account(account_id: str, payload: DmAccountUpdate, db: Session = D
     return account
 
 
+@router.post("/accounts/{account_id}/login-session", response_model=DmAccountLoginSession)
+def create_dm_account_login_session(account_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(DirectMessageAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="平台账号不存在")
+
+    normalize_account_state(account)
+    login_url = _login_url_for_account(db, account)
+    if not login_url:
+        raise HTTPException(status_code=400, detail="请先配置该平台的登录首页")
+
+    account.last_login_check_at = datetime.utcnow()
+    if account.session_status not in {"已登录", "模拟可用"}:
+        account.status = "待登录"
+        account.session_status = "未登录"
+        account.last_error = "隔离登录会话已创建，请在客户端内置登录页完成登录后点击检测"
+    db.commit()
+    db.refresh(account)
+    return {
+        "accountId": account.id,
+        "platform": account.platform,
+        "accountName": account.account_name,
+        "loginUrl": login_url,
+        "profileKey": account.browser_profile_key or "",
+        "profilePath": account.browser_profile_path or "",
+        "sessionStatus": account.session_status,
+        "riskStatus": account.risk_status,
+        "embeddedMode": "desktop-isolated-webview",
+        "isolated": True,
+    }
+
+
 @router.post("/accounts/{account_id}/preflight", response_model=DmAccountRead)
 def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = db.get(DirectMessageAccount, account_id)
@@ -204,11 +257,7 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
         account.risk_status = "正常"
         account.last_error = None
     elif settings.dm_gateway_mode == "browser":
-        config = db.scalar(
-            select(DirectMessagePlatformConfig)
-            .where(DirectMessagePlatformConfig.platform == account.platform)
-            .order_by(DirectMessagePlatformConfig.created_at.desc())
-        )
+        config = _platform_config(db, account.platform)
         result = BrowserAutomationDmGateway().preflight_account(account, config)
         account.status = result.account_status
         account.session_status = result.session_status

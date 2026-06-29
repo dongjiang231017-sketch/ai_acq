@@ -8,7 +8,9 @@ import {
   Clock3,
   Code2,
   Database,
+  ExternalLink,
   Headphones,
+  KeyRound,
   MessageSquareText,
   PhoneCall,
   Plus,
@@ -27,6 +29,7 @@ import {
   CallScript,
   DmAccount,
   DmConversation,
+  DmLoginSession,
   DmMessage,
   DmOverview,
   DmPlatformConfig,
@@ -309,6 +312,13 @@ const fallbackDmSyncResult: DmSyncResult = {
   needsHandoff: 0,
 };
 
+const platformLoginUrls: Record<string, string> = {
+  美团: "https://e.meituan.com/",
+  饿了么: "https://open.shop.ele.me/",
+  抖音: "https://business.douyin.com/",
+  视频号: "https://channels.weixin.qq.com/",
+};
+
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
   platform: "美团",
   homeUrl: "https://e.meituan.com/",
@@ -475,6 +485,8 @@ function App() {
     content: "您好，看到{商家名称}适合做视频号本地生活团购曝光，想了解下您是否考虑新增线上获客渠道？",
     isActive: true,
   });
+  const [dmLoginSession, setDmLoginSession] = useState<DmLoginSession | null>(null);
+  const [dmLoginMessage, setDmLoginMessage] = useState("");
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
 
@@ -489,6 +501,19 @@ function App() {
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
+  const activeLoginAccount = useMemo(() => {
+    return dmAccounts.find((account) => account.id === dmLoginSession?.accountId) ?? dmAccounts[0];
+  }, [dmAccounts, dmLoginSession]);
+  const activeLoginConfig = useMemo(() => {
+    if (!activeLoginAccount) return null;
+    return dmPlatformConfigs.find((config) => config.platform === activeLoginAccount.platform) ?? null;
+  }, [activeLoginAccount, dmPlatformConfigs]);
+  const activeLoginUrl =
+    dmLoginSession?.loginUrl || activeLoginConfig?.homeUrl || (activeLoginAccount ? platformLoginUrls[activeLoginAccount.platform] : "") || "";
+  const activeProfileKey =
+    dmLoginSession?.profileKey || activeLoginAccount?.browserProfileKey || `${activeLoginAccount?.platform ?? "platform"}-account`;
+  const activeProfilePath =
+    dmLoginSession?.profilePath || activeLoginAccount?.browserProfilePath || `.dm_browser_profiles/${activeProfileKey}`;
 
   async function loadData() {
     setIsLoading(true);
@@ -697,9 +722,31 @@ function App() {
     setDmForm((current) => ({ ...current, templateId: created.id }));
   }
 
+  async function openDmLoginSession(accountId: string) {
+    const session = await api.createDmLoginSession(accountId);
+    setDmLoginSession(session);
+    setDmLoginMessage("已进入该账号的隔离登录会话");
+    setDmAccounts((current) =>
+      current.map((account) =>
+        account.id === accountId
+          ? {
+              ...account,
+              status: account.sessionStatus === "已登录" || account.sessionStatus === "模拟可用" ? account.status : "待登录",
+              sessionStatus: session.sessionStatus,
+              riskStatus: session.riskStatus,
+              browserProfileKey: session.profileKey,
+              browserProfilePath: session.profilePath,
+              lastError: account.sessionStatus === "已登录" || account.sessionStatus === "模拟可用" ? account.lastError : "等待在内置登录页完成登录",
+            }
+          : account,
+      ),
+    );
+  }
+
   async function preflightDmAccount(accountId: string) {
     const updated = await api.preflightDmAccount(accountId);
     setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
+    setDmLoginMessage(updated.sessionStatus === "已登录" || updated.sessionStatus === "模拟可用" ? "登录态检测通过" : "还未检测到登录态");
   }
 
   async function syncDmReplies() {
@@ -1431,20 +1478,29 @@ function App() {
               <div className="account-list">
                 {dmAccounts.map((account) => (
                   <article className="account-row" key={account.id}>
-                    <div>
-                      <strong>{account.accountName}</strong>
-                      <small>{account.platform} · {account.loginLabel ?? "未绑定"} · {account.browserProfileKey ?? "未生成Profile"}</small>
-                      {account.lastError && <small className="error-text">{account.lastError}</small>}
+                    <div className="account-row-head">
+                      <div>
+                        <strong>{account.accountName}</strong>
+                        <small>{account.platform} · {account.loginLabel ?? "未绑定"} · {account.browserProfileKey ?? "未生成Profile"}</small>
+                        {account.lastError && <small className="error-text">{account.lastError}</small>}
+                      </div>
+                      <em>
+                        {account.sentToday}/{account.dailyLimit} · {account.minSendIntervalSeconds ?? 0}s
+                      </em>
                     </div>
-                    <span>{account.status}</span>
-                    <span>{account.sessionStatus ?? "未登录"}</span>
-                    <span>{account.riskStatus ?? "正常"}</span>
-                    <em>
-                      {account.sentToday}/{account.dailyLimit} · {account.minSendIntervalSeconds ?? 0}s
-                    </em>
-                    <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
-                      检测
-                    </button>
+                    <div className="account-row-meta">
+                      <span>{account.status}</span>
+                      <span>{account.sessionStatus ?? "未登录"}</span>
+                      <span>{account.riskStatus ?? "正常"}</span>
+                    </div>
+                    <div className="account-row-actions">
+                      <button className="row-action is-primary" onClick={() => openDmLoginSession(account.id)} type="button">
+                        登录
+                      </button>
+                      <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
+                        检测
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -1463,6 +1519,95 @@ function App() {
                     </button>
                   </article>
                 ))}
+              </div>
+            </article>
+
+            <article className="panel span-2 login-workbench">
+              <div className="panel-title">
+                <div>
+                  <p>Login</p>
+                  <h2>客户端内置登录工作台</h2>
+                </div>
+                <KeyRound size={22} />
+              </div>
+
+              <div className="login-shell">
+                <aside className="login-account-rail">
+                  {dmAccounts.map((account) => (
+                    <button
+                      className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
+                      key={account.id}
+                      onClick={() => openDmLoginSession(account.id)}
+                      type="button"
+                    >
+                      <span>{account.platform}</span>
+                      <strong>{account.accountName}</strong>
+                      <small>{account.browserProfileKey ?? "独立 Profile 待生成"}</small>
+                    </button>
+                  ))}
+                </aside>
+
+                <section className="embedded-login-frame">
+                  <div className="embedded-browser-bar">
+                    <span className="status-dot" />
+                    <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 登录页` : "选择平台账号"}</strong>
+                    <em>{activeLoginUrl || "请先配置平台首页"}</em>
+                  </div>
+                  <div className="embedded-login-body">
+                    <div className="login-preview">
+                      <div className="login-qr-mark">
+                        <KeyRound size={34} />
+                      </div>
+                      <strong>{activeLoginAccount ? activeLoginAccount.accountName : "暂无账号"}</strong>
+                      <span>{activeLoginAccount?.sessionStatus ?? "未登录"}</span>
+                      <p>{dmLoginMessage || "点击登录后，在该账号自己的隔离页面完成扫码或账号登录。"}</p>
+                    </div>
+                    <div className="profile-inspector">
+                      <div>
+                        <span>平台</span>
+                        <strong>{activeLoginAccount?.platform ?? "-"}</strong>
+                      </div>
+                      <div>
+                        <span>隔离 Profile</span>
+                        <strong>{activeProfileKey}</strong>
+                      </div>
+                      <div>
+                        <span>会话目录</span>
+                        <strong>{activeProfilePath}</strong>
+                      </div>
+                      <div>
+                        <span>风险状态</span>
+                        <strong>{activeLoginAccount?.riskStatus ?? "正常"}</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="button-row login-actions">
+                    <button
+                      className="primary-button"
+                      disabled={!activeLoginAccount}
+                      onClick={() => activeLoginAccount && openDmLoginSession(activeLoginAccount.id)}
+                      type="button"
+                    >
+                      <KeyRound size={16} />
+                      打开内置登录页
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={!activeLoginAccount}
+                      onClick={() => activeLoginAccount && preflightDmAccount(activeLoginAccount.id)}
+                      type="button"
+                    >
+                      <RefreshCw size={16} />
+                      登录后检测
+                    </button>
+                    {activeLoginUrl && (
+                      <a className="secondary-link-button" href={activeLoginUrl} rel="noreferrer" target="_blank">
+                        <ExternalLink size={16} />
+                        备用打开
+                      </a>
+                    )}
+                  </div>
+                </section>
               </div>
             </article>
 

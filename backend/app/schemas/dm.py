@@ -32,6 +32,21 @@ class DmAccountRead(DmAccountCreate):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
+class DmAccountLoginSession(BaseModel):
+    account_id: Annotated[str, Field(alias="accountId")]
+    platform: str
+    account_name: Annotated[str, Field(alias="accountName")]
+    login_url: Annotated[str, Field(alias="loginUrl")]
+    profile_key: Annotated[str, Field(alias="profileKey")]
+    profile_path: Annotated[str, Field(alias="profilePath")]
+    session_status: Annotated[str | None, Field(alias="sessionStatus")]
+    risk_status: Annotated[str | None, Field(alias="riskStatus")]
+    embedded_mode: Annotated[str, Field(alias="embeddedMode")]
+    isolated: bool = True
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DmAccountUpdate(BaseModel):
     account_name: Annotated[str | None, Field(alias="accountName", min_length=1, max_length=120)] = None
     login_label: Annotated[str | None, Field(alias="loginLabel")] = None

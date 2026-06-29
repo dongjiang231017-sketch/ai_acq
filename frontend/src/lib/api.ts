@@ -134,6 +134,19 @@ export type DmAccount = {
   createdAt: string;
 };
 
+export type DmLoginSession = {
+  accountId: string;
+  platform: string;
+  accountName: string;
+  loginUrl: string;
+  profileKey: string;
+  profilePath: string;
+  sessionStatus?: string | null;
+  riskStatus?: string | null;
+  embeddedMode: string;
+  isolated: boolean;
+};
+
 export type DmTemplate = {
   id: string;
   name: string;
@@ -285,6 +298,10 @@ export const api = {
     }),
   preflightDmAccount: (accountId: string) =>
     request<DmAccount>(`/direct-messages/accounts/${accountId}/preflight`, {
+      method: "POST",
+    }),
+  createDmLoginSession: (accountId: string) =>
+    request<DmLoginSession>(`/direct-messages/accounts/${accountId}/login-session`, {
       method: "POST",
     }),
   dmPlatformConfigs: () => request<DmPlatformConfig[]>("/direct-messages/platform-configs"),
