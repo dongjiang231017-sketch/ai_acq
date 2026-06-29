@@ -796,6 +796,89 @@ button:disabled {
   gap: 10px;
 }
 
+.account-isolation-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(96px, 0.5fr)) minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #dbe8fb;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f7fbff 0%, #eef6ff 100%);
+}
+
+.account-isolation-summary div {
+  display: grid;
+  gap: 3px;
+}
+
+.account-isolation-summary strong {
+  color: #13233d;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.account-isolation-summary span,
+.account-isolation-summary p {
+  margin: 0;
+  color: #60728b;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.45;
+}
+
+.platform-account-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.platform-account-strip button {
+  min-width: 0;
+  border: 1px solid #dce9fb;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+}
+
+.platform-account-strip button:hover {
+  border-color: #9dc4ff;
+  box-shadow: 0 10px 24px rgba(34, 111, 246, 0.12);
+  transform: translateY(-1px);
+}
+
+.platform-account-strip span,
+.platform-account-strip strong,
+.platform-account-strip small {
+  display: block;
+}
+
+.platform-account-strip span {
+  color: #6d7d93;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.platform-account-strip strong {
+  margin-top: 4px;
+  color: #14233c;
+  font-size: 16px;
+}
+
+.platform-account-strip small {
+  margin-top: 4px;
+  color: #2877f8;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .dm-conversation,
 .message-bubble,
 .account-row,
@@ -1333,6 +1416,8 @@ button:disabled {
   .rule-detail-grid,
   .record-grid,
   .dm-inbox-grid,
+  .account-isolation-summary,
+  .platform-account-strip,
   .profile-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1398,6 +1483,8 @@ button:disabled {
   .rule-detail-grid,
   .record-grid,
   .dm-inbox-grid,
+  .account-isolation-summary,
+  .platform-account-strip,
   .profile-grid,
   .login-account-rail {
     grid-template-columns: 1fr;

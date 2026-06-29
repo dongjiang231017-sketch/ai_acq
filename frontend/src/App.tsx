@@ -869,6 +869,19 @@ function App() {
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
+  const dmAccountPlatforms = ["美团", "饿了么", "抖音", "视频号"];
+  const dmAccountCountByPlatform = useMemo(
+    () =>
+      dmAccounts.reduce<Record<string, number>>((counts, account) => {
+        counts[account.platform] = (counts[account.platform] ?? 0) + 1;
+        return counts;
+      }, {}),
+    [dmAccounts],
+  );
+  const isolatedDmAccountCount = useMemo(
+    () => dmAccounts.filter((account) => Boolean(account.browserProfileKey || account.browserProfilePath)).length,
+    [dmAccounts],
+  );
   const activeLoginAccount = useMemo(() => {
     return dmAccounts.find((account) => account.id === dmLoginSession?.accountId) ?? dmAccounts[0];
   }, [dmAccounts, dmLoginSession]);
@@ -1139,6 +1152,24 @@ function App() {
       dailyLimit: 200,
       minSendIntervalSeconds: 45,
     });
+  }
+
+  function prepareNewDmAccount(platform: string, source?: DmAccount) {
+    const nextIndex = (dmAccountCountByPlatform[platform] ?? 0) + 1;
+    setDmAccountForm({
+      platform,
+      accountName: source ? `${source.platform}个人号-${nextIndex}` : `${platform}个人号-${nextIndex}`,
+      loginLabel: "待绑定个人号",
+      status: "待登录",
+      browserProfileKey: "",
+      sessionStatus: "未登录",
+      riskStatus: "正常",
+      dailyLimit: source?.dailyLimit ?? 200,
+      minSendIntervalSeconds: source?.minSendIntervalSeconds ?? 45,
+    });
+    window.setTimeout(() => {
+      document.querySelector<HTMLInputElement>('[data-dm-account-name="true"]')?.focus();
+    }, 80);
   }
 
   async function submitDmTemplate(event: React.FormEvent<HTMLFormElement>) {
@@ -2576,6 +2607,26 @@ function App() {
                 </div>
                 <Users size={22} />
               </div>
+              <div className="account-isolation-summary">
+                <div>
+                  <strong>{dmAccounts.length}</strong>
+                  <span>已配置个人号</span>
+                </div>
+                <div>
+                  <strong>{isolatedDmAccountCount}</strong>
+                  <span>独立 Profile</span>
+                </div>
+                <p>每个个人号单独生成浏览器 Profile 和会话目录，登录态、风控状态、发送额度互不影响。</p>
+              </div>
+              <div className="platform-account-strip" aria-label="按平台添加个人号">
+                {dmAccountPlatforms.map((platform) => (
+                  <button key={platform} onClick={() => prepareNewDmAccount(platform)} type="button">
+                    <span>{platform}</span>
+                    <strong>{dmAccountCountByPlatform[platform] ?? 0} 个号</strong>
+                    <small>添加个人号</small>
+                  </button>
+                ))}
+              </div>
               <form className="form-grid" onSubmit={submitDmAccount}>
                 <label>
                   平台
@@ -2589,6 +2640,8 @@ function App() {
                 <label>
                   个人号名称
                   <input
+                    data-dm-account-name="true"
+                    placeholder="例如：美团个人号-南昌1号"
                     value={dmAccountForm.accountName}
                     onChange={(event) => setDmAccountForm({ ...dmAccountForm, accountName: event.target.value })}
                   />
@@ -2603,6 +2656,7 @@ function App() {
                 <label>
                   Profile 标识
                   <input
+                    placeholder="不填则自动生成独立 Profile"
                     value={dmAccountForm.browserProfileKey}
                     onChange={(event) => setDmAccountForm({ ...dmAccountForm, browserProfileKey: event.target.value })}
                   />
@@ -2671,6 +2725,7 @@ function App() {
                       <div>
                         <strong>{account.accountName}</strong>
                         <small>{account.platform} · {accountLoginLabel(account)} · {account.browserProfileKey ?? "未生成Profile"}</small>
+                        <small>隔离目录：{account.browserProfilePath ?? `.dm_browser_profiles/${account.browserProfileKey ?? account.id}`}</small>
                         {account.lastError && <small className="error-text">{account.lastError}</small>}
                       </div>
                       <em>
@@ -2693,6 +2748,9 @@ function App() {
                       </button>
                       <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
                         检测
+                      </button>
+                      <button className="row-action" onClick={() => prepareNewDmAccount(account.platform, account)} type="button">
+                        添加同平台号
                       </button>
                     </div>
                   </article>
