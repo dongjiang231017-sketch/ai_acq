@@ -40,11 +40,7 @@ import {
   IntentCustomer,
   IntentEvent,
   IntentOverview,
-  KnowledgeBaseItem,
   Lead,
-  LearningExperiment,
-  LearningOverview,
-  LearningSuggestion,
   ModuleSummary,
   OutboundOverview,
   OutreachTask,
@@ -61,7 +57,9 @@ import {
   api,
 } from "./lib/api";
 
-const icons = [BarChart3, Search, Database, PhoneCall, MessageSquareText, Users, Bot, Headphones, ClipboardList, Settings];
+const icons = [BarChart3, Search, Database, PhoneCall, MessageSquareText, Users, Headphones, ClipboardList, Settings];
+const customerHiddenModuleKeys = new Set(["learning"]);
+const customerVisibleModules = (items: ModuleSummary[]) => items.filter((module) => !customerHiddenModuleKeys.has(module.key));
 
 const fallbackModules: ModuleSummary[] = [
   { key: "dashboard", name: "实时工作台", description: "监控今日获客、外呼、私信和预警。", pageCount: 4, status: "ready" },
@@ -70,7 +68,6 @@ const fallbackModules: ModuleSummary[] = [
   { key: "outbound", name: "AI外呼系统", description: "外呼任务、话术流程、通话记录。", pageCount: 6, status: "ready" },
   { key: "dm", name: "平台私信系统", description: "平台个人号、私信任务、模板和会话。", pageCount: 6, status: "ready" },
   { key: "intent", name: "意向客户池", description: "客户分级、工单跟进和分配规则。", pageCount: 4, status: "ready" },
-  { key: "learning", name: "AI学习中心", description: "建议队列、知识库和实验结果。", pageCount: 5, status: "ready" },
   { key: "voice", name: "声音档案", description: "授权、音色训练和使用记录。", pageCount: 4, status: "ready" },
   { key: "reports", name: "数据报表", description: "渠道、绩效和导出中心。", pageCount: 4, status: "ready" },
   { key: "settings", name: "系统设置", description: "线路、账号和合规保护。", pageCount: 4, status: "ready" },
@@ -606,85 +603,6 @@ const fallbackWorkOrders: FollowUpWorkOrder[] = [
   },
 ];
 
-const fallbackLearningOverview: LearningOverview = {
-  suggestions: 2,
-  pending: 2,
-  approved: 0,
-  published: 0,
-  knowledgeItems: 1,
-  activeExperiments: 1,
-};
-
-const fallbackLearningSuggestions: LearningSuggestion[] = [
-  {
-    id: "learning_1",
-    sourceType: "call_record",
-    sourceRecordId: "call_1",
-    targetType: "外呼话术",
-    title: "补强价格异议后的案例承接",
-    summary: "客户追问费用时，先给低风险试跑路径，再引导人工顾问发送资料。",
-    proposedContent: "遇到价格异议时，先说明可从基础入驻和活动试跑开始，再询问是否愿意接收同城案例。",
-    evidenceText: "商家：怎么收费？AI：可以先给您发基础方案。",
-    status: "待审核",
-    reviewer: null,
-    reviewNote: null,
-    impactScore: 76,
-    rollbackPoint: null,
-    createdAt: new Date().toISOString(),
-    reviewedAt: null,
-    publishedAt: null,
-  },
-  {
-    id: "learning_2",
-    sourceType: "dm_conversation",
-    sourceRecordId: "dm_conv_1",
-    targetType: "私信模板",
-    title: "私信首句增加商家品类和城市上下文",
-    summary: "首轮私信需要减少模板感，优先呈现城市、品类和平台来源。",
-    proposedContent: "您好，看到{城市}{品类}商家{商家名称}适合做视频号团购曝光，想了解下您是否考虑新增线上获客渠道？",
-    evidenceText: "可以，发我入驻资料看看。",
-    status: "待审核",
-    reviewer: null,
-    reviewNote: null,
-    impactScore: 68,
-    rollbackPoint: null,
-    createdAt: new Date().toISOString(),
-    reviewedAt: null,
-    publishedAt: null,
-  },
-];
-
-const fallbackKnowledge: KnowledgeBaseItem[] = [
-  {
-    id: "knowledge_1",
-    title: "视频号团购入驻基础答疑",
-    category: "产品资料",
-    content: "覆盖入驻条件、试跑方式、资料清单、费用说明和人工顾问交接边界。",
-    status: "已发布",
-    version: "v1",
-    sourceSuggestionId: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-];
-
-const fallbackExperiments: LearningExperiment[] = [
-  {
-    id: "experiment_1",
-    name: "价格异议话术灰度实验",
-    targetType: "外呼话术",
-    status: "计划中",
-    hypothesis: "先给基础试跑路径可以降低价格异议流失。",
-    variant: "A: 标准价格解释；B: 基础试跑加同城案例。",
-    sampleSize: 0,
-    successMetric: "A/B 级意向率",
-    resultSummary: "等待人工审核建议后开始灰度。",
-    startedAt: null,
-    endedAt: null,
-    createdAt: new Date().toISOString(),
-  },
-];
-
 const fallbackVoiceOverview: VoiceOverview = {
   profiles: 2,
   usableProfiles: 1,
@@ -906,8 +824,6 @@ const dmTabs = ["私信总览", "任务列表", "账号管理", "消息模板", 
 type DmTab = (typeof dmTabs)[number];
 const intentTabs = ["客户池", "跟进工单", "客户详情", "分配规则"] as const;
 type IntentTab = (typeof intentTabs)[number];
-const learningTabs = ["学习总览", "建议队列", "话术版本", "知识库", "效果实验"] as const;
-type LearningTab = (typeof learningTabs)[number];
 const voiceTabs = ["声音档案", "授权审核", "音色训练", "使用记录"] as const;
 type VoiceTab = (typeof voiceTabs)[number];
 const reportsTabs = ["报表总览", "渠道分析", "销售绩效", "导出中心"] as const;
@@ -960,10 +876,6 @@ function App() {
   const [intentCustomers, setIntentCustomers] = useState<IntentCustomer[]>(fallbackIntentCustomers);
   const [intentEvents, setIntentEvents] = useState<IntentEvent[]>(fallbackIntentEvents);
   const [followUpWorkOrders, setFollowUpWorkOrders] = useState<FollowUpWorkOrder[]>(fallbackWorkOrders);
-  const [learningOverview, setLearningOverview] = useState<LearningOverview>(fallbackLearningOverview);
-  const [learningSuggestions, setLearningSuggestions] = useState<LearningSuggestion[]>(fallbackLearningSuggestions);
-  const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBaseItem[]>(fallbackKnowledge);
-  const [learningExperiments, setLearningExperiments] = useState<LearningExperiment[]>(fallbackExperiments);
   const [voiceOverview, setVoiceOverview] = useState<VoiceOverview>(fallbackVoiceOverview);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>(fallbackVoiceProfiles);
   const [voiceTrainingJobs, setVoiceTrainingJobs] = useState<VoiceTrainingJob[]>(fallbackVoiceTrainingJobs);
@@ -980,12 +892,10 @@ function App() {
   const [activeOutboundTab, setActiveOutboundTab] = useState<OutboundTab>("实时监听");
   const [activeDmTab, setActiveDmTab] = useState<DmTab>("回复监听");
   const [activeIntentTab, setActiveIntentTab] = useState<IntentTab>("客户池");
-  const [activeLearningTab, setActiveLearningTab] = useState<LearningTab>("学习总览");
   const [activeVoiceTab, setActiveVoiceTab] = useState<VoiceTab>("声音档案");
   const [activeReportsTab, setActiveReportsTab] = useState<ReportsTab>("报表总览");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("设置总览");
   const [selectedIntentCustomerId, setSelectedIntentCustomerId] = useState<string>(fallbackIntentCustomers[0]?.id ?? "");
-  const [selectedLearningSuggestionId, setSelectedLearningSuggestionId] = useState<string>(fallbackLearningSuggestions[0]?.id ?? "");
   const [selectedVoiceProfileId, setSelectedVoiceProfileId] = useState<string>(fallbackVoiceProfiles[0]?.id ?? "");
   const [selectedChannelReportId, setSelectedChannelReportId] = useState<string>(fallbackChannelReports[0]?.id ?? "");
   const [selectedSalesReportId, setSelectedSalesReportId] = useState<string>(fallbackSalesReports[0]?.id ?? "");
@@ -1108,8 +1018,6 @@ function App() {
   const activeIntentCustomerEvents = activeIntentCustomer
     ? intentEvents.filter((event) => event.customerId === activeIntentCustomer.id)
     : [];
-  const activeLearningSuggestion =
-    learningSuggestions.find((suggestion) => suggestion.id === selectedLearningSuggestionId) ?? learningSuggestions[0];
   const activeVoiceProfile = voiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? voiceProfiles[0];
   const activeChannelReport = channelReports.find((channel) => channel.id === selectedChannelReportId) ?? channelReports[0];
   const activeSalesReport = salesReports.find((report) => report.id === selectedSalesReportId) ?? salesReports[0];
@@ -1145,10 +1053,6 @@ function App() {
       api.intentCustomers(),
       api.intentEvents(),
       api.followUpWorkOrders(),
-      api.learningOverview(),
-      api.learningSuggestions(),
-      api.knowledgeBase(),
-      api.learningExperiments(),
       api.voiceOverview(),
       api.voiceProfiles(),
       api.voiceTrainingJobs(),
@@ -1166,7 +1070,7 @@ function App() {
     } else {
       setApiStatus("使用前端示例数据");
     }
-    if (results[1].status === "fulfilled") setModules(results[1].value);
+    if (results[1].status === "fulfilled") setModules(customerVisibleModules(results[1].value));
     const leadResult = results[2];
     if (leadResult.status === "fulfilled") {
       const nextLeads = leadResult.value;
@@ -1212,49 +1116,39 @@ function App() {
     }
     if (results[17].status === "fulfilled") setIntentEvents(results[17].value);
     if (results[18].status === "fulfilled") setFollowUpWorkOrders(results[18].value);
-    if (results[19].status === "fulfilled") setLearningOverview(results[19].value);
+    if (results[19].status === "fulfilled") setVoiceOverview(results[19].value);
     if (results[20].status === "fulfilled") {
-      const nextSuggestions = results[20].value;
-      setLearningSuggestions(nextSuggestions);
-      setSelectedLearningSuggestionId((current) =>
-        nextSuggestions.some((suggestion) => suggestion.id === current) ? current : nextSuggestions[0]?.id ?? "",
-      );
-    }
-    if (results[21].status === "fulfilled") setKnowledgeBase(results[21].value);
-    if (results[22].status === "fulfilled") setLearningExperiments(results[22].value);
-    if (results[23].status === "fulfilled") setVoiceOverview(results[23].value);
-    if (results[24].status === "fulfilled") {
-      const nextProfiles = results[24].value;
+      const nextProfiles = results[20].value;
       setVoiceProfiles(nextProfiles);
       setSelectedVoiceProfileId((current) =>
         nextProfiles.some((profile) => profile.id === current) ? current : nextProfiles[0]?.id ?? "",
       );
     }
-    if (results[25].status === "fulfilled") setVoiceTrainingJobs(results[25].value);
-    if (results[26].status === "fulfilled") setVoiceUsageRecords(results[26].value);
-    if (results[27].status === "fulfilled") setReportOverview(results[27].value);
-    if (results[28].status === "fulfilled") {
-      const nextChannels = results[28].value;
+    if (results[21].status === "fulfilled") setVoiceTrainingJobs(results[21].value);
+    if (results[22].status === "fulfilled") setVoiceUsageRecords(results[22].value);
+    if (results[23].status === "fulfilled") setReportOverview(results[23].value);
+    if (results[24].status === "fulfilled") {
+      const nextChannels = results[24].value;
       setChannelReports(nextChannels);
       setSelectedChannelReportId((current) =>
         nextChannels.some((channel) => channel.id === current) ? current : nextChannels[0]?.id ?? "",
       );
     }
-    if (results[29].status === "fulfilled") {
-      const nextSalesReports = results[29].value;
+    if (results[25].status === "fulfilled") {
+      const nextSalesReports = results[25].value;
       setSalesReports(nextSalesReports);
       setSelectedSalesReportId((current) =>
         nextSalesReports.some((report) => report.id === current) ? current : nextSalesReports[0]?.id ?? "",
       );
     }
-    if (results[30].status === "fulfilled") {
-      const nextExports = results[30].value;
+    if (results[26].status === "fulfilled") {
+      const nextExports = results[26].value;
       setReportExports(nextExports);
       setSelectedReportExportId((current) => (nextExports.some((job) => job.id === current) ? current : nextExports[0]?.id ?? ""));
     }
-    if (results[31].status === "fulfilled") setSettingsOverview(results[31].value);
-    if (results[32].status === "fulfilled") {
-      const nextSettings = results[32].value;
+    if (results[27].status === "fulfilled") setSettingsOverview(results[27].value);
+    if (results[28].status === "fulfilled") {
+      const nextSettings = results[28].value;
       setSystemSettings(nextSettings);
       setSelectedSystemSettingId((current) => {
         const nextId = nextSettings.some((setting) => setting.id === current) ? current : nextSettings[0]?.id ?? "";
@@ -1525,17 +1419,6 @@ function App() {
       messageTextSelector: config.messageTextSelector,
       enabled: config.enabled,
     });
-  }
-
-  async function reviewLearningSuggestion(suggestionId: string, status: string) {
-    const updated = await api.updateLearningSuggestion(suggestionId, {
-      status,
-      reviewer: "运营审核",
-      reviewNote: status === "已通过" ? "通过后先生成草稿版本，不直接影响线上任务。" : "暂不采纳，保留证据。",
-    });
-    setLearningSuggestions((current) => current.map((suggestion) => (suggestion.id === updated.id ? updated : suggestion)));
-    const overviewData = await api.learningOverview();
-    setLearningOverview(overviewData);
   }
 
   async function submitVoiceProfile(event: React.FormEvent<HTMLFormElement>) {
@@ -2384,192 +2267,6 @@ function App() {
                   <strong>勿扰保护</strong>
                   <span>拒绝、投诉、无效号码或撤回授权后阻断后续触达。</span>
                 </div>
-              </div>
-            </article>
-          </section>
-        )}
-      </>
-    );
-  }
-
-  function renderLearningWorkspace() {
-    const showOverview = activeLearningTab === "学习总览";
-    const showSuggestions = showOverview || activeLearningTab === "建议队列";
-    const showVersions = showOverview || activeLearningTab === "话术版本";
-    const showKnowledge = showOverview || activeLearningTab === "知识库";
-    const showExperiments = showOverview || activeLearningTab === "效果实验";
-
-    return (
-      <>
-        <section className="outbound-tabs" aria-label="AI学习模块页面">
-          {learningTabs.map((tab) => (
-            <button
-              className={tab === activeLearningTab ? "is-active" : ""}
-              key={tab}
-              onClick={() => setActiveLearningTab(tab)}
-              type="button"
-            >
-              {tab}
-            </button>
-          ))}
-        </section>
-
-        <section className="metrics outbound-metrics">
-          <MetricCard icon={<Bot size={20} />} label="学习建议" value={learningOverview.suggestions} detail="需人审" tone="blue" />
-          <MetricCard icon={<Clock3 size={20} />} label="待审核" value={learningOverview.pending} detail="不自动发布" tone="amber" />
-          <MetricCard icon={<CheckCircle2 size={20} />} label="已通过" value={learningOverview.approved} detail="可生成草稿" tone="green" />
-          <MetricCard icon={<BarChart3 size={20} />} label="实验" value={learningOverview.activeExperiments} detail="灰度验证" tone="rose" />
-        </section>
-
-        {showSuggestions && (
-          <section className="content-grid lower">
-            <article className="panel span-2">
-              <div className="panel-title">
-                <div>
-                  <p>Review Queue</p>
-                  <h2>学习建议审核队列</h2>
-                </div>
-                <Bot size={22} />
-              </div>
-              <div className="record-grid">
-                {learningSuggestions.map((suggestion) => (
-                  <article
-                    className={suggestion.id === activeLearningSuggestion?.id ? "record-card clickable-card is-selected" : "record-card clickable-card"}
-                    key={suggestion.id}
-                    onClick={() => setSelectedLearningSuggestionId(suggestion.id)}
-                  >
-                    <div>
-                      <strong>{suggestion.title}</strong>
-                      <span>{suggestion.status}</span>
-                    </div>
-                    <p>{suggestion.summary}</p>
-                    <small>
-                      {suggestion.targetType} · 影响分 {suggestion.impactScore} · 来源 {suggestion.sourceType}
-                    </small>
-                    <div className="button-row card-actions">
-                      <button
-                        className="row-action is-primary"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void reviewLearningSuggestion(suggestion.id, "已通过");
-                        }}
-                        type="button"
-                      >
-                        通过
-                      </button>
-                      <button
-                        className="row-action"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void reviewLearningSuggestion(suggestion.id, "已拒绝");
-                        }}
-                        type="button"
-                      >
-                        拒绝
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </article>
-          </section>
-        )}
-
-        {showVersions && (
-          <section className="content-grid lower">
-            <article className="panel">
-              <div className="panel-title">
-                <div>
-                  <p>Script Versions</p>
-                  <h2>外呼话术版本</h2>
-                </div>
-                <PhoneCall size={22} />
-              </div>
-              <div className="template-list">
-                {scripts.map((script) => (
-                  <article className="template-card" key={script.id}>
-                    <div>
-                      <strong>{script.name}</strong>
-                      <span>{script.isActive ? "线上" : "草稿"}</span>
-                    </div>
-                    <p>{script.opening}</p>
-                    <small>发布需人工审核和回滚点</small>
-                  </article>
-                ))}
-              </div>
-            </article>
-
-            <article className="panel">
-              <div className="panel-title">
-                <div>
-                  <p>Template Versions</p>
-                  <h2>私信模板版本</h2>
-                </div>
-                <MessageSquareText size={22} />
-              </div>
-              <div className="template-list">
-                {dmTemplates.map((template) => (
-                  <article className="template-card" key={template.id}>
-                    <div>
-                      <strong>{template.name}</strong>
-                      <span>{template.isActive ? "线上" : "草稿"}</span>
-                    </div>
-                    <p>{template.content}</p>
-                    <small>{template.platform} · 建议通过后只生成草稿版本</small>
-                  </article>
-                ))}
-              </div>
-            </article>
-          </section>
-        )}
-
-        {showKnowledge && (
-          <section className="content-grid lower">
-            <article className="panel span-2">
-              <div className="panel-title">
-                <div>
-                  <p>Knowledge Base</p>
-                  <h2>知识库</h2>
-                </div>
-                <Database size={22} />
-              </div>
-              <div className="record-grid">
-                {knowledgeBase.map((item) => (
-                  <article className="record-card" key={item.id}>
-                    <div>
-                      <strong>{item.title}</strong>
-                      <span>{item.version}</span>
-                    </div>
-                    <p>{item.content}</p>
-                    <small>
-                      {item.category} · {item.status}
-                    </small>
-                  </article>
-                ))}
-              </div>
-            </article>
-          </section>
-        )}
-
-        {showExperiments && (
-          <section className="content-grid lower">
-            <article className="panel span-2">
-              <div className="panel-title">
-                <div>
-                  <p>Experiments</p>
-                  <h2>效果实验</h2>
-                </div>
-                <BarChart3 size={22} />
-              </div>
-              <div className="rule-detail-grid">
-                {learningExperiments.map((experiment) => (
-                  <div key={experiment.id}>
-                    <strong>{experiment.name}</strong>
-                    <span>
-                      {experiment.status} · {experiment.successMetric} · 样本 {experiment.sampleSize}
-                    </span>
-                  </div>
-                ))}
               </div>
             </article>
           </section>
@@ -3766,17 +3463,15 @@ function App() {
   const primaryActionLabel =
     activeModule === "intent"
       ? "分配销售"
-      : activeModule === "learning"
-        ? "审核建议"
-        : activeModule === "voice"
-          ? "新增档案"
-          : activeModule === "dm"
-            ? "新建私信"
-            : activeModule === "reports"
-              ? "导出数据"
-              : activeModule === "settings"
-                ? "保存配置"
-                : "新建任务";
+      : activeModule === "voice"
+        ? "新增档案"
+        : activeModule === "dm"
+          ? "新建私信"
+          : activeModule === "reports"
+            ? "导出数据"
+            : activeModule === "settings"
+              ? "保存配置"
+              : "新建任务";
 
   function runPrimaryAction() {
     if (activeModule === "dm") {
@@ -3785,10 +3480,6 @@ function App() {
     }
     if (activeModule === "intent") {
       setActiveIntentTab("跟进工单");
-      return;
-    }
-    if (activeModule === "learning") {
-      setActiveLearningTab("建议队列");
       return;
     }
     if (activeModule === "voice") {
@@ -3872,8 +3563,6 @@ function App() {
           renderDmWorkspace()
         ) : activeModule === "intent" ? (
           renderIntentWorkspace()
-        ) : activeModule === "learning" ? (
-          renderLearningWorkspace()
         ) : activeModule === "voice" ? (
           renderVoiceWorkspace()
         ) : activeModule === "reports" ? (
