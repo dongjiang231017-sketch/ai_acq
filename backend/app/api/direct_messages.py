@@ -22,6 +22,7 @@ from app.models.task import (
 )
 from app.schemas.dm import (
     DmAccountCreate,
+    DmAccountInlineLogin,
     DmAccountLoginSession,
     DmAccountLoginWindow,
     DmAccountRead,
@@ -81,7 +82,6 @@ def _apply_dm_account_support_status(account: DirectMessageAccount) -> bool:
     if account.platform in SUPPORTED_DM_PLATFORMS:
         return False
 
-    changed = False
     updates = {
         "status": "不支持私信",
         "session_status": "不可用",
@@ -91,8 +91,7 @@ def _apply_dm_account_support_status(account: DirectMessageAccount) -> bool:
     for key, value in updates.items():
         if getattr(account, key) != value:
             setattr(account, key, value)
-            changed = True
-    return changed
+    return True
 
 
 def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
@@ -451,6 +450,38 @@ def open_dm_account_login_window(account_id: str, db: Session = Depends(get_db))
     }
 
 
+@router.post("/accounts/{account_id}/inline-login", response_model=DmAccountRead)
+def complete_dm_account_inline_login(
+    account_id: str,
+    payload: DmAccountInlineLogin,
+    db: Session = Depends(get_db),
+) -> DirectMessageAccount:
+    account = db.get(DirectMessageAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="平台个人号不存在")
+    if not payload.agreement_accepted:
+        raise HTTPException(status_code=400, detail="请先勾选同意协议")
+
+    normalize_account_state(account)
+    if _apply_dm_account_support_status(account):
+        db.commit()
+        db.refresh(account)
+        raise HTTPException(status_code=400, detail=_unsupported_platform_reason(account.platform))
+
+    digits = "".join(char for char in payload.phone_number if char.isdigit())
+    account.status = "可用"
+    account.session_status = "已登录"
+    account.risk_status = "正常"
+    account.last_error = None
+    account.last_login_check_at = datetime.utcnow()
+    if len(digits) >= 4:
+        account.login_label = f"个人号尾号{digits[-4:]}"
+
+    db.commit()
+    db.refresh(account)
+    return account
+
+
 @router.post("/accounts/{account_id}/preflight", response_model=DmAccountRead)
 def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = db.get(DirectMessageAccount, account_id)
@@ -468,7 +499,7 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
     has_profile_session = profile_has_session_artifacts(account, previous_login_check_at, include_existing=True)
     if settings.dm_gateway_mode == "simulator":
         account.status = "可用"
-        account.session_status = "已登录" if has_profile_session else "模拟可用"
+        account.session_status = "已登录" if account.session_status == "已登录" or has_profile_session else "模拟可用"
         account.risk_status = "正常"
         account.last_error = None
     elif settings.dm_gateway_mode == "browser":

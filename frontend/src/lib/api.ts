@@ -637,6 +637,11 @@ export const api = {
     request<DmAccount>(`/direct-messages/accounts/${accountId}/preflight`, {
       method: "POST",
     }),
+  completeDmInlineLogin: (accountId: string, login: { phoneNumber: string; verificationCode: string; agreementAccepted: boolean }) =>
+    request<DmAccount>(`/direct-messages/accounts/${accountId}/inline-login`, {
+      method: "POST",
+      body: JSON.stringify(login),
+    }),
   createDmLoginSession: (accountId: string) =>
     request<DmLoginSession>(`/direct-messages/accounts/${accountId}/login-session`, {
       method: "POST",

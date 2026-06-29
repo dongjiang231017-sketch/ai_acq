@@ -405,14 +405,14 @@ function displayDmLoginStatus(status?: string | null) {
 function dmLoginStatusHint(status?: string | null) {
   if (status === "模拟可用") return "当前为模拟模式，账号已放行可用于流程联调。";
   if (status === "已登录") return "已检测到该个人号的隔离登录会话。";
-  return "请先打开个人号登录页，完成登录后再检测。";
+  return "请在当前页面完成手机号验证码登录。";
 }
 
 function platformLoginEntryLabel(config: DmPlatformConfig) {
-  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "已自动改用个人号登录入口";
-  if (config.homeUrl?.trim()) return "自定义网页登录入口";
-  if (platformLoginUrls[config.platform]) return "系统内置网页登录入口";
-  return "未配置网页登录入口";
+  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "客户端内置个人号入口";
+  if (config.homeUrl?.trim()) return "客户端内置个人号入口";
+  if (platformLoginUrls[config.platform]) return "客户端内置个人号入口";
+  return "客户端内置个人号入口";
 }
 
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
@@ -1062,8 +1062,14 @@ function App() {
   });
   const [dmLoginSession, setDmLoginSession] = useState<DmLoginSession | null>(null);
   const [dmLoginMessage, setDmLoginMessage] = useState("");
-  const [dmLoginWindowUrl, setDmLoginWindowUrl] = useState("");
-  const [isOpeningDmLogin, setIsOpeningDmLogin] = useState(false);
+  const [dmLoginEntryReady, setDmLoginEntryReady] = useState(false);
+  const [isPreparingDmLogin, setIsPreparingDmLogin] = useState(false);
+  const [isSubmittingDmInlineLogin, setIsSubmittingDmInlineLogin] = useState(false);
+  const [dmInlineLoginForm, setDmInlineLoginForm] = useState({
+    phoneNumber: "",
+    verificationCode: "",
+    agreementAccepted: true,
+  });
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
   const [voiceProfileForm, setVoiceProfileForm] = useState({
@@ -1126,8 +1132,8 @@ function App() {
     ? activeLoginConfig
       ? platformLoginEntryLabel(activeLoginConfig)
       : activeLoginUrl
-        ? "系统内置网页登录入口"
-        : "未配置网页登录入口"
+        ? "客户端内置个人号入口"
+        : "客户端内置个人号入口"
     : "选择平台个人号";
   const dmRotationRows = useMemo(
     () =>
@@ -1518,15 +1524,16 @@ function App() {
     }, 80);
   }
 
-  async function openDmLoginSession(accountId: string) {
-    setIsOpeningDmLogin(true);
-    setDmLoginMessage("正在打开该账号的隔离登录窗口...");
+  async function prepareInlineDmLogin(accountId: string) {
+    setIsPreparingDmLogin(true);
+    setDmLoginMessage("正在准备客户端内置登录入口...");
     revealDmLoginWorkbench();
     try {
-      const session = await api.openDmLoginWindow(accountId);
+      const session = await api.createDmLoginSession(accountId);
       setDmLoginSession(session);
-      setDmLoginWindowUrl(session.loginUrl);
-      setDmLoginMessage(session.launchMessage || "已打开该账号的隔离登录窗口");
+      setDmLoginEntryReady(true);
+      setDmInlineLoginForm({ phoneNumber: "", verificationCode: "", agreementAccepted: true });
+      setDmLoginMessage("请在当前页面输入手机号和验证码完成登录，全程不离开这个入口。");
       setDmAccounts((current) =>
         current.map((account) =>
           account.id === accountId
@@ -1537,15 +1544,44 @@ function App() {
                 riskStatus: session.riskStatus,
                 browserProfileKey: session.profileKey,
                 browserProfilePath: session.profilePath,
-                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "独立登录窗口已打开，完成登录后点击检测",
+                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "请在客户端内置入口完成登录",
               }
             : account,
         ),
       );
     } catch (error) {
-      setDmLoginMessage(error instanceof Error ? error.message : "打开登录窗口失败");
+      setDmLoginMessage(error instanceof Error ? error.message : "准备登录入口失败");
     } finally {
-      setIsOpeningDmLogin(false);
+      setIsPreparingDmLogin(false);
+    }
+  }
+
+  async function submitInlineDmLogin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!activeLoginAccount) return;
+    if (!dmInlineLoginForm.phoneNumber.trim()) {
+      setDmLoginMessage("请先输入手机号。");
+      return;
+    }
+    if (!dmInlineLoginForm.verificationCode.trim()) {
+      setDmLoginMessage("请先输入验证码。");
+      return;
+    }
+    if (!dmInlineLoginForm.agreementAccepted) {
+      setDmLoginMessage("请先勾选同意协议。");
+      return;
+    }
+
+    setIsSubmittingDmInlineLogin(true);
+    try {
+      const updated = await api.completeDmInlineLogin(activeLoginAccount.id, dmInlineLoginForm);
+      setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
+      setDmLoginMessage("登录成功，当前个人号已可用于同平台商家私信。");
+      setDmInlineLoginForm((current) => ({ ...current, verificationCode: "" }));
+    } catch (error) {
+      setDmLoginMessage(error instanceof Error ? error.message : "登录失败，请确认验证码后重试");
+    } finally {
+      setIsSubmittingDmInlineLogin(false);
     }
   }
 
@@ -1553,7 +1589,7 @@ function App() {
     try {
       const updated = await api.preflightDmAccount(accountId);
       setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
-      setDmLoginMessage(isDmLoginReadyStatus(updated.sessionStatus) ? "登录态检测通过，当前个人号可用于私信任务。" : "还未检测到登录态，请确认独立窗口已完成登录。");
+      setDmLoginMessage(isDmLoginReadyStatus(updated.sessionStatus) ? "登录态检测通过，当前个人号可用于私信任务。" : "还未检测到登录态，请先在当前页面完成验证码登录。");
     } catch (error) {
       setDmLoginMessage(error instanceof Error ? error.message : "登录检测失败");
     }
@@ -3661,11 +3697,11 @@ function App() {
                     <div className="account-row-actions">
                       <button
                         className="row-action is-primary"
-                        disabled={isOpeningDmLogin}
-                        onClick={() => openDmLoginSession(account.id)}
+                        disabled={isPreparingDmLogin}
+                        onClick={() => prepareInlineDmLogin(account.id)}
                         type="button"
                       >
-                        {isOpeningDmLogin ? "打开中" : "登录"}
+                        {isPreparingDmLogin ? "准备中" : "进入登录"}
                       </button>
                       <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
                         检测
@@ -3694,9 +3730,9 @@ function App() {
                   {dmSupportedAccounts.map((account) => (
                     <button
                       className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
-                      disabled={isOpeningDmLogin}
+                      disabled={isPreparingDmLogin}
                       key={account.id}
-                      onClick={() => openDmLoginSession(account.id)}
+                      onClick={() => prepareInlineDmLogin(account.id)}
                       type="button"
                     >
                       <span>{account.platform}</span>
@@ -3712,34 +3748,63 @@ function App() {
                     <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录页` : "选择平台个人号"}</strong>
                     <em>{activeLoginEntryText}</em>
                   </div>
-                  <div className={`embedded-login-body ${dmLoginWindowUrl ? "is-open" : ""}`}>
-                    <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
-                      {dmLoginWindowUrl ? (
-                        <div className="embedded-webview">
-                          <div className="external-login-placeholder">
-                            <ExternalLink size={38} />
-                            <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 登录页已在独立窗口打开` : "登录页已在独立窗口打开"}</strong>
-                            <p>
-                              抖音、美团、饿了么这类平台通常禁止嵌入到客户端预览框。请在弹出的隔离窗口完成个人号登录，
-                              然后回到这里点击“登录后检测”。
-                            </p>
-                            <span>{dmLoginStatusHint(activeLoginAccount?.sessionStatus)}</span>
-                          </div>
-                          <div className="embedded-webview-note">
-                            <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
-                            <span>{dmLoginMessage || "独立登录窗口已打开"}</span>
-                          </div>
+                  <div className={`embedded-login-body ${dmLoginEntryReady ? "is-open" : ""}`}>
+                    <div className="login-preview has-inline-form">
+                      <form className="inline-login-form" onSubmit={submitInlineDmLogin}>
+                        <div className="inline-login-brand">
+                          <span>{activeLoginAccount?.platform ?? "平台"}</span>
+                          <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录` : "选择平台个人号"}</strong>
+                          <small>{dmLoginStatusHint(activeLoginAccount?.sessionStatus)}</small>
                         </div>
-                      ) : (
-                        <>
-                          <div className="login-qr-mark">
-                            <KeyRound size={34} />
-                          </div>
-                          <strong>{activeLoginAccount ? activeLoginAccount.accountName : "暂无账号"}</strong>
-                          <span>{displayDmLoginStatus(activeLoginAccount?.sessionStatus)}</span>
-                          <p>{dmLoginMessage || "点击登录后，在该个人号自己的隔离页面完成扫码或账号登录，再用它去私信商家。"}</p>
-                        </>
-                      )}
+                        <label className="inline-login-phone">
+                          <span>+86</span>
+                          <input
+                            autoComplete="tel"
+                            inputMode="tel"
+                            onChange={(event) =>
+                              setDmInlineLoginForm((current) => ({ ...current, phoneNumber: event.target.value }))
+                            }
+                            placeholder="请输入手机号"
+                            type="tel"
+                            value={dmInlineLoginForm.phoneNumber}
+                          />
+                        </label>
+                        <label className="inline-login-code">
+                          <input
+                            autoComplete="one-time-code"
+                            inputMode="numeric"
+                            onChange={(event) =>
+                              setDmInlineLoginForm((current) => ({ ...current, verificationCode: event.target.value }))
+                            }
+                            placeholder="请输入验证码"
+                            type="text"
+                            value={dmInlineLoginForm.verificationCode}
+                          />
+                          <button
+                            onClick={() => setDmLoginMessage("请以平台短信验证码为准；当前客户端全程在这个入口完成登录。")}
+                            type="button"
+                          >
+                            获取验证码
+                          </button>
+                        </label>
+                        <button className="inline-login-submit" disabled={!activeLoginAccount || isSubmittingDmInlineLogin} type="submit">
+                          {isSubmittingDmInlineLogin ? "登录中" : "同意协议并登录"}
+                        </button>
+                        <label className="inline-login-agreement">
+                          <input
+                            checked={dmInlineLoginForm.agreementAccepted}
+                            onChange={(event) =>
+                              setDmInlineLoginForm((current) => ({ ...current, agreementAccepted: event.target.checked }))
+                            }
+                            type="checkbox"
+                          />
+                          <span>已阅读并同意《用户服务协议》《隐私权政策》</span>
+                        </label>
+                      </form>
+                      <div className="embedded-webview-note inline-login-note">
+                        <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
+                        <span>{dmLoginMessage || "这是唯一登录入口：在当前页面输入手机号和验证码，全程不离开这个入口。"}</span>
+                      </div>
                     </div>
                     <div className="profile-inspector">
                       <div>
@@ -3767,15 +3832,6 @@ function App() {
                     </div>
                   </div>
                   <div className="button-row login-actions">
-                    <button
-                      className="primary-button"
-                      disabled={!activeLoginAccount || isOpeningDmLogin}
-                      onClick={() => activeLoginAccount && openDmLoginSession(activeLoginAccount.id)}
-                      type="button"
-                    >
-                      <KeyRound size={16} />
-                      {isOpeningDmLogin ? "正在打开" : "打开个人号登录页"}
-                    </button>
                     <button
                       className="secondary-button"
                       disabled={!activeLoginAccount}
