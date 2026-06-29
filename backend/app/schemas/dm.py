@@ -47,6 +47,13 @@ class DmAccountLoginSession(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DmAccountLoginWindow(DmAccountLoginSession):
+    launched: bool
+    launch_message: Annotated[str, Field(alias="launchMessage")]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DmAccountUpdate(BaseModel):
     account_name: Annotated[str | None, Field(alias="accountName", min_length=1, max_length=120)] = None
     login_label: Annotated[str | None, Field(alias="loginLabel")] = None

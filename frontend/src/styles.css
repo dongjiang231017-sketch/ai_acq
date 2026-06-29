@@ -1033,6 +1033,10 @@ button:disabled {
   padding: 14px;
 }
 
+.embedded-login-body.is-open {
+  grid-template-columns: minmax(360px, 1.1fr) minmax(260px, 0.9fr);
+}
+
 .login-preview {
   min-height: 236px;
   border: 1px dashed #bcd4f5;
@@ -1046,6 +1050,51 @@ button:disabled {
   gap: 9px;
   padding: 18px;
   text-align: center;
+}
+
+.login-preview.has-webview {
+  min-height: 360px;
+  border-style: solid;
+  padding: 0;
+  place-items: stretch;
+  align-content: stretch;
+  overflow: hidden;
+}
+
+.embedded-webview {
+  min-width: 0;
+  min-height: 360px;
+  display: grid;
+  grid-template-rows: minmax(260px, 1fr) auto;
+  background: #fff;
+}
+
+.embedded-webview iframe {
+  width: 100%;
+  min-height: 260px;
+  border: 0;
+  background: #fff;
+}
+
+.embedded-webview-note {
+  border-top: 1px solid #dfeaf7;
+  background: #f8fbff;
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  text-align: left;
+}
+
+.embedded-webview-note strong {
+  color: #25344d;
+  font-size: 13px;
+}
+
+.embedded-webview-note span {
+  color: #62738c;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.45;
 }
 
 .login-qr-mark {

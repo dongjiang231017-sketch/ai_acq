@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BarChart3,
@@ -487,8 +487,11 @@ function App() {
   });
   const [dmLoginSession, setDmLoginSession] = useState<DmLoginSession | null>(null);
   const [dmLoginMessage, setDmLoginMessage] = useState("");
+  const [dmLoginWindowUrl, setDmLoginWindowUrl] = useState("");
+  const [isOpeningDmLogin, setIsOpeningDmLogin] = useState(false);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
+  const loginWorkbenchRef = useRef<HTMLElement | null>(null);
 
   const active = useMemo(
     () => modules.find((module) => module.key === activeModule) ?? modules[0],
@@ -722,25 +725,44 @@ function App() {
     setDmForm((current) => ({ ...current, templateId: created.id }));
   }
 
+  function revealDmLoginWorkbench() {
+    window.setTimeout(() => {
+      loginWorkbenchRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  }
+
   async function openDmLoginSession(accountId: string) {
-    const session = await api.createDmLoginSession(accountId);
-    setDmLoginSession(session);
-    setDmLoginMessage("已进入该账号的隔离登录会话");
-    setDmAccounts((current) =>
-      current.map((account) =>
-        account.id === accountId
-          ? {
-              ...account,
-              status: account.sessionStatus === "已登录" || account.sessionStatus === "模拟可用" ? account.status : "待登录",
-              sessionStatus: session.sessionStatus,
-              riskStatus: session.riskStatus,
-              browserProfileKey: session.profileKey,
-              browserProfilePath: session.profilePath,
-              lastError: account.sessionStatus === "已登录" || account.sessionStatus === "模拟可用" ? account.lastError : "等待在内置登录页完成登录",
-            }
-          : account,
-      ),
-    );
+    setIsOpeningDmLogin(true);
+    setDmLoginMessage("正在打开该账号的隔离登录窗口...");
+    revealDmLoginWorkbench();
+    try {
+      const session = await api.openDmLoginWindow(accountId);
+      setDmLoginSession(session);
+      setDmLoginWindowUrl(session.loginUrl);
+      setDmLoginMessage(session.launchMessage || "已打开该账号的隔离登录窗口");
+      setDmAccounts((current) =>
+        current.map((account) =>
+          account.id === accountId
+            ? {
+                ...account,
+                status: session.sessionStatus === "已登录" || session.sessionStatus === "模拟可用" ? account.status : "待登录",
+                sessionStatus: session.sessionStatus,
+                riskStatus: session.riskStatus,
+                browserProfileKey: session.profileKey,
+                browserProfilePath: session.profilePath,
+                lastError:
+                  session.sessionStatus === "已登录" || session.sessionStatus === "模拟可用"
+                    ? account.lastError
+                    : "独立登录窗口已打开，完成登录后点击检测",
+              }
+            : account,
+        ),
+      );
+    } catch (error) {
+      setDmLoginMessage(error instanceof Error ? error.message : "打开登录窗口失败");
+    } finally {
+      setIsOpeningDmLogin(false);
+    }
   }
 
   async function preflightDmAccount(accountId: string) {
@@ -1494,8 +1516,13 @@ function App() {
                       <span>{account.riskStatus ?? "正常"}</span>
                     </div>
                     <div className="account-row-actions">
-                      <button className="row-action is-primary" onClick={() => openDmLoginSession(account.id)} type="button">
-                        登录
+                      <button
+                        className="row-action is-primary"
+                        disabled={isOpeningDmLogin}
+                        onClick={() => openDmLoginSession(account.id)}
+                        type="button"
+                      >
+                        {isOpeningDmLogin ? "打开中" : "登录"}
                       </button>
                       <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
                         检测
@@ -1522,7 +1549,7 @@ function App() {
               </div>
             </article>
 
-            <article className="panel span-2 login-workbench">
+            <article className="panel span-2 login-workbench" ref={loginWorkbenchRef}>
               <div className="panel-title">
                 <div>
                   <p>Login</p>
@@ -1536,6 +1563,7 @@ function App() {
                   {dmAccounts.map((account) => (
                     <button
                       className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
+                      disabled={isOpeningDmLogin}
                       key={account.id}
                       onClick={() => openDmLoginSession(account.id)}
                       type="button"
@@ -1553,14 +1581,30 @@ function App() {
                     <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 登录页` : "选择平台账号"}</strong>
                     <em>{activeLoginUrl || "请先配置平台首页"}</em>
                   </div>
-                  <div className="embedded-login-body">
-                    <div className="login-preview">
-                      <div className="login-qr-mark">
-                        <KeyRound size={34} />
-                      </div>
-                      <strong>{activeLoginAccount ? activeLoginAccount.accountName : "暂无账号"}</strong>
-                      <span>{activeLoginAccount?.sessionStatus ?? "未登录"}</span>
-                      <p>{dmLoginMessage || "点击登录后，在该账号自己的隔离页面完成扫码或账号登录。"}</p>
+                  <div className={`embedded-login-body ${dmLoginWindowUrl ? "is-open" : ""}`}>
+                    <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
+                      {dmLoginWindowUrl ? (
+                        <div className="embedded-webview">
+                          <iframe
+                            referrerPolicy="no-referrer"
+                            src={dmLoginWindowUrl}
+                            title={`${activeLoginAccount?.platform ?? "平台"}隔离登录页`}
+                          />
+                          <div className="embedded-webview-note">
+                            <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台账号"}</strong>
+                            <span>{dmLoginMessage || "独立登录窗口已打开"}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="login-qr-mark">
+                            <KeyRound size={34} />
+                          </div>
+                          <strong>{activeLoginAccount ? activeLoginAccount.accountName : "暂无账号"}</strong>
+                          <span>{activeLoginAccount?.sessionStatus ?? "未登录"}</span>
+                          <p>{dmLoginMessage || "点击登录后，在该账号自己的隔离页面完成扫码或账号登录。"}</p>
+                        </>
+                      )}
                     </div>
                     <div className="profile-inspector">
                       <div>
@@ -1584,12 +1628,12 @@ function App() {
                   <div className="button-row login-actions">
                     <button
                       className="primary-button"
-                      disabled={!activeLoginAccount}
+                      disabled={!activeLoginAccount || isOpeningDmLogin}
                       onClick={() => activeLoginAccount && openDmLoginSession(activeLoginAccount.id)}
                       type="button"
                     >
                       <KeyRound size={16} />
-                      打开内置登录页
+                      {isOpeningDmLogin ? "正在打开" : "打开内置登录页"}
                     </button>
                     <button
                       className="secondary-button"

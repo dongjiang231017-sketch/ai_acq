@@ -147,6 +147,11 @@ export type DmLoginSession = {
   isolated: boolean;
 };
 
+export type DmLoginWindow = DmLoginSession & {
+  launched: boolean;
+  launchMessage: string;
+};
+
 export type DmTemplate = {
   id: string;
   name: string;
@@ -302,6 +307,10 @@ export const api = {
     }),
   createDmLoginSession: (accountId: string) =>
     request<DmLoginSession>(`/direct-messages/accounts/${accountId}/login-session`, {
+      method: "POST",
+    }),
+  openDmLoginWindow: (accountId: string) =>
+    request<DmLoginWindow>(`/direct-messages/accounts/${accountId}/login-window`, {
       method: "POST",
     }),
   dmPlatformConfigs: () => request<DmPlatformConfig[]>("/direct-messages/platform-configs"),

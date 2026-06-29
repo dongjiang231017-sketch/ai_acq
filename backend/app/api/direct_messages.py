@@ -1,4 +1,9 @@
+import platform
+import shutil
+import subprocess
+import webbrowser
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -18,6 +23,7 @@ from app.models.task import (
 from app.schemas.dm import (
     DmAccountCreate,
     DmAccountLoginSession,
+    DmAccountLoginWindow,
     DmAccountRead,
     DmAccountUpdate,
     DmConfigRead,
@@ -119,6 +125,101 @@ def _login_url_for_account(db: Session, account: DirectMessageAccount) -> str:
     return (config.home_url if config and config.home_url else PLATFORM_LOGIN_URLS.get(account.platform, "")).strip()
 
 
+def _login_session_payload(account: DirectMessageAccount, login_url: str) -> dict[str, object]:
+    return {
+        "accountId": account.id,
+        "platform": account.platform,
+        "accountName": account.account_name,
+        "loginUrl": login_url,
+        "profileKey": account.browser_profile_key or "",
+        "profilePath": account.browser_profile_path or "",
+        "sessionStatus": account.session_status,
+        "riskStatus": account.risk_status,
+        "embeddedMode": "desktop-isolated-webview",
+        "isolated": True,
+    }
+
+
+def _chrome_executable() -> str | None:
+    system = platform.system()
+    candidates: list[str] = []
+    if system == "Darwin":
+        candidates.extend(
+            [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            ]
+        )
+    elif system == "Windows":
+        local_app_data = Path.home() / "AppData/Local"
+        program_files = Path("C:/Program Files")
+        program_files_x86 = Path("C:/Program Files (x86)")
+        candidates.extend(
+            [
+                str(program_files / "Google/Chrome/Application/chrome.exe"),
+                str(program_files_x86 / "Google/Chrome/Application/chrome.exe"),
+                str(local_app_data / "Google/Chrome/Application/chrome.exe"),
+                str(program_files / "Microsoft/Edge/Application/msedge.exe"),
+                str(program_files_x86 / "Microsoft/Edge/Application/msedge.exe"),
+            ]
+        )
+    else:
+        candidates.extend(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"])
+
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def _launch_isolated_login_window(login_url: str, profile_path: str) -> tuple[bool, str]:
+    active_profile_path = Path(profile_path or ".dm_browser_profiles/dm-account").expanduser()
+    if not active_profile_path.is_absolute():
+        active_profile_path = (Path.cwd() / active_profile_path).resolve()
+    active_profile_path.mkdir(parents=True, exist_ok=True)
+
+    executable = _chrome_executable()
+    if not executable:
+        webbrowser.open(login_url)
+        return False, "未找到 Chrome/Edge，已用系统默认浏览器打开；默认浏览器可能无法保证账号隔离"
+
+    subprocess.Popen(
+        [
+            executable,
+            f"--user-data-dir={active_profile_path}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--new-window",
+            login_url,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True, f"已打开独立登录窗口，账号会话目录：{active_profile_path}"
+
+
+def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[DirectMessageAccount, str]:
+    normalize_account_state(account)
+    login_url = _login_url_for_account(db, account)
+    if not login_url:
+        raise HTTPException(status_code=400, detail="请先配置该平台的登录首页")
+
+    account.last_login_check_at = datetime.utcnow()
+    if account.session_status not in {"已登录", "模拟可用"}:
+        account.status = "待登录"
+        account.session_status = "未登录"
+        account.last_error = "隔离登录会话已创建，请在客户端内置登录页完成登录后点击检测"
+    db.commit()
+    db.refresh(account)
+    return account, login_url
+
+
 @router.get("/overview", response_model=DmOverview)
 def dm_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     _seed_default_account(db)
@@ -217,29 +318,22 @@ def create_dm_account_login_session(account_id: str, db: Session = Depends(get_d
     if not account:
         raise HTTPException(status_code=404, detail="平台账号不存在")
 
-    normalize_account_state(account)
-    login_url = _login_url_for_account(db, account)
-    if not login_url:
-        raise HTTPException(status_code=400, detail="请先配置该平台的登录首页")
+    account, login_url = _prepare_login_session(db, account)
+    return _login_session_payload(account, login_url)
 
-    account.last_login_check_at = datetime.utcnow()
-    if account.session_status not in {"已登录", "模拟可用"}:
-        account.status = "待登录"
-        account.session_status = "未登录"
-        account.last_error = "隔离登录会话已创建，请在客户端内置登录页完成登录后点击检测"
-    db.commit()
-    db.refresh(account)
+
+@router.post("/accounts/{account_id}/login-window", response_model=DmAccountLoginWindow)
+def open_dm_account_login_window(account_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(DirectMessageAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="平台账号不存在")
+
+    account, login_url = _prepare_login_session(db, account)
+    launched, launch_message = _launch_isolated_login_window(login_url, account.browser_profile_path or "")
     return {
-        "accountId": account.id,
-        "platform": account.platform,
-        "accountName": account.account_name,
-        "loginUrl": login_url,
-        "profileKey": account.browser_profile_key or "",
-        "profilePath": account.browser_profile_path or "",
-        "sessionStatus": account.session_status,
-        "riskStatus": account.risk_status,
-        "embeddedMode": "desktop-isolated-webview",
-        "isolated": True,
+        **_login_session_payload(account, login_url),
+        "launched": launched,
+        "launchMessage": launch_message,
     }
 
 
