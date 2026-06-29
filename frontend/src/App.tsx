@@ -1054,6 +1054,8 @@ function App() {
     dailyLimit: 200,
     minSendIntervalSeconds: 45,
   });
+  const [dmRuleDrafts, setDmRuleDrafts] = useState<Record<string, { dailyLimit: number; minSendIntervalSeconds: number }>>({});
+  const [dmRotationMessage, setDmRotationMessage] = useState("");
   const [dmTemplateForm, setDmTemplateForm] = useState({
     name: "视频号团购邀约私信",
     platform: "通用",
@@ -1103,6 +1105,20 @@ function App() {
   const activeRule = recallRules[0];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
   const dmSupportedAccounts = useMemo(() => dmAccounts.filter(isSupportedDmAccount), [dmAccounts]);
+  const dmLoggedInAccounts = useMemo(
+    () =>
+      dmSupportedAccounts.filter(
+        (account) =>
+          account.status === "可用" &&
+          isDmLoginReadyStatus(account.sessionStatus) &&
+          !["需验证", "风控暂停", "封禁", "异常"].includes(account.riskStatus ?? ""),
+      ),
+    [dmSupportedAccounts],
+  );
+  const dmLoggedInRemainingQuota = useMemo(
+    () => dmLoggedInAccounts.reduce((sum, account) => sum + Math.max(0, account.dailyLimit - account.sentToday), 0),
+    [dmLoggedInAccounts],
+  );
   const dmAccountPlatforms = supportedDmPlatforms;
   const dmAccountCountByPlatform = useMemo(
     () =>
@@ -1507,6 +1523,42 @@ function App() {
     window.setTimeout(() => {
       document.querySelector<HTMLInputElement>('[data-dm-account-name="true"]')?.focus();
     }, 80);
+  }
+
+  function dmRuleDraft(account: DmAccount) {
+    return (
+      dmRuleDrafts[account.id] ?? {
+        dailyLimit: account.dailyLimit,
+        minSendIntervalSeconds: account.minSendIntervalSeconds ?? 0,
+      }
+    );
+  }
+
+  function updateDmRuleDraft(account: DmAccount, patch: Partial<{ dailyLimit: number; minSendIntervalSeconds: number }>) {
+    setDmRuleDrafts((current) => ({
+      ...current,
+      [account.id]: {
+        ...dmRuleDraft(account),
+        ...patch,
+      },
+    }));
+  }
+
+  async function saveDmAccountRule(account: DmAccount) {
+    const draft = dmRuleDraft(account);
+    const updated = await api.updateDmAccount(account.id, {
+      dailyLimit: Math.max(1, Number(draft.dailyLimit) || account.dailyLimit),
+      minSendIntervalSeconds: Math.max(0, Number(draft.minSendIntervalSeconds) || 0),
+    });
+    setDmAccounts((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    setDmRuleDrafts((current) => ({
+      ...current,
+      [updated.id]: {
+        dailyLimit: updated.dailyLimit,
+        minSendIntervalSeconds: updated.minSendIntervalSeconds ?? 0,
+      },
+    }));
+    setDmRotationMessage(`${updated.accountName} 的轮换规则已保存。`);
   }
 
   async function submitDmTemplate(event: React.FormEvent<HTMLFormElement>) {
@@ -3617,6 +3669,30 @@ function App() {
                   </button>
                 ))}
               </div>
+              <div className="logged-account-board">
+                <div className="section-caption">
+                  <strong>已登录个人号</strong>
+                  <small>{dmLoggedInAccounts.length} 个可参与轮换 · 剩余额度 {dmLoggedInRemainingQuota}</small>
+                </div>
+                {dmLoggedInAccounts.length === 0 ? (
+                  <div className="empty-state compact">暂无已登录账号。先在下方登录工作台完成个人号登录，再回到这里查看。</div>
+                ) : (
+                  <div className="logged-account-grid">
+                    {dmLoggedInAccounts.map((account) => (
+                      <article className="logged-account-card" key={account.id}>
+                        <div>
+                          <span>{account.platform}</span>
+                          <strong>{account.accountName}</strong>
+                          <small>{accountLoginLabel(account)}</small>
+                        </div>
+                        <em>
+                          {Math.max(0, account.dailyLimit - account.sentToday)} 条可发 · {account.minSendIntervalSeconds ?? 0} 秒/条
+                        </em>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
               <form className="form-grid" onSubmit={submitDmAccount}>
                 <label>
                   平台
@@ -3884,6 +3960,76 @@ function App() {
               <div className="rotation-hint is-warning">
                 <ShieldAlert size={16} />
                 <span>视频号助手当前不支持主动私信商家，视频号线索会从平台私信任务里排除，可走外呼或其他合规触达方式。</span>
+              </div>
+            </article>
+
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Pools</p>
+                  <h2>轮换参数设置</h2>
+                </div>
+                <Settings size={22} />
+              </div>
+              <div className="rotation-hint">
+                <CheckCircle2 size={16} />
+                <span>这里设置每个个人号每天最多发多少条、多久发一次。创建私信任务时选择“按商家平台自动轮换”，系统就会按这些规则分配账号。</span>
+              </div>
+              {dmRotationMessage && <div className="form-result">{dmRotationMessage}</div>}
+              <div className="rotation-settings-list">
+                {dmSupportedAccounts.length === 0 && <div className="empty-state">暂无可配置账号，请先添加平台个人号。</div>}
+                {dmAccountPlatforms.map((platformName) => {
+                  const accountsForPlatform = dmSupportedAccounts.filter((account) => account.platform === platformName);
+                  return (
+                    <section className="rotation-platform-group" key={platformName}>
+                      <div className="section-caption">
+                        <strong>{platformName}账号池</strong>
+                        <small>{accountsForPlatform.length} 个号</small>
+                      </div>
+                      {accountsForPlatform.length === 0 ? (
+                        <div className="empty-state compact">暂无 {platformName} 个人号。</div>
+                      ) : (
+                        accountsForPlatform.map((account) => {
+                          const draft = dmRuleDraft(account);
+                          return (
+                            <article className="rotation-setting-row" key={account.id}>
+                              <div className="rotation-setting-account">
+                                <span>{displayDmLoginStatus(account.sessionStatus)}</span>
+                                <strong>{account.accountName}</strong>
+                                <small>
+                                  今日已发 {account.sentToday} 条 · 风险 {account.riskStatus ?? "正常"}
+                                </small>
+                              </div>
+                              <label>
+                                每天最多发送
+                                <input
+                                  min={1}
+                                  type="number"
+                                  value={draft.dailyLimit}
+                                  onChange={(event) => updateDmRuleDraft(account, { dailyLimit: Number(event.target.value) })}
+                                />
+                              </label>
+                              <label>
+                                每条间隔秒
+                                <input
+                                  min={0}
+                                  type="number"
+                                  value={draft.minSendIntervalSeconds}
+                                  onChange={(event) =>
+                                    updateDmRuleDraft(account, { minSendIntervalSeconds: Number(event.target.value) })
+                                  }
+                                />
+                              </label>
+                              <button className="row-action is-primary" onClick={() => saveDmAccountRule(account)} type="button">
+                                保存规则
+                              </button>
+                            </article>
+                          );
+                        })
+                      )}
+                    </section>
+                  );
+                })}
               </div>
             </article>
 

@@ -942,6 +942,65 @@ button:disabled {
   font-weight: 900;
 }
 
+.logged-account-board {
+  margin: 0 0 14px;
+  border: 1px solid #dbe8fb;
+  border-radius: 14px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.logged-account-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.logged-account-card {
+  min-width: 0;
+  border: 1px solid #e2ebf6;
+  border-radius: 12px;
+  background: #f7fbff;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.logged-account-card div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.logged-account-card span {
+  width: fit-content;
+  border-radius: 999px;
+  background: #e6f8f1;
+  color: #0f9f70;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.logged-account-card strong,
+.logged-account-card small,
+.logged-account-card em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.logged-account-card strong {
+  color: #17233a;
+}
+
+.logged-account-card small,
+.logged-account-card em {
+  color: #6d7d93;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+}
+
 .dm-conversation,
 .message-bubble,
 .account-row,
@@ -1117,6 +1176,79 @@ button:disabled {
 .rotation-pool-list {
   display: grid;
   gap: 10px;
+}
+
+.rotation-settings-list {
+  display: grid;
+  gap: 14px;
+}
+
+.rotation-platform-group {
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.rotation-setting-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(120px, 0.45fr) minmax(120px, 0.45fr) auto;
+  align-items: end;
+  gap: 12px;
+  min-width: 0;
+  border-top: 1px solid #e9f0fa;
+  padding: 12px 0 0;
+  margin-top: 10px;
+}
+
+.rotation-setting-account {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.rotation-setting-account span {
+  width: fit-content;
+  border-radius: 999px;
+  background: #e9f2ff;
+  color: #2473f6;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.rotation-setting-account strong,
+.rotation-setting-account small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rotation-setting-account strong {
+  color: #18243a;
+}
+
+.rotation-setting-account small {
+  color: #728199;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.rotation-setting-row label {
+  color: #6c7b91;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.rotation-setting-row input {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 6px;
+  border: 1px solid #d9e6f7;
+  border-radius: 10px;
+  padding: 0 12px;
+  color: #18243a;
+  font: inherit;
+  font-weight: 900;
 }
 
 .rotation-pool-row {
@@ -1702,8 +1834,10 @@ button:disabled {
   .dm-inbox-grid,
   .account-isolation-summary,
   .platform-account-strip,
+  .logged-account-grid,
   .rotation-rule-grid,
   .rotation-pool-row,
+  .rotation-setting-row,
   .profile-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1771,8 +1905,10 @@ button:disabled {
   .dm-inbox-grid,
   .account-isolation-summary,
   .platform-account-strip,
+  .logged-account-grid,
   .rotation-rule-grid,
   .rotation-pool-row,
+  .rotation-setting-row,
   .profile-grid,
   .profile-inspector,
   .login-account-rail {
