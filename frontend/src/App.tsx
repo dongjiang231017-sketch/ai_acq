@@ -48,6 +48,7 @@ import {
   ReportExport,
   ReportOverview,
   SalesPerformanceReport,
+  SystemVoice,
   VoiceOverview,
   VoiceProfile,
   VoiceTrainingJob,
@@ -604,32 +605,56 @@ const fallbackWorkOrders: FollowUpWorkOrder[] = [
 ];
 
 const fallbackVoiceOverview: VoiceOverview = {
-  profiles: 2,
-  usableProfiles: 1,
+  profiles: 1,
+  usableProfiles: 0,
   pendingAuthorization: 1,
   trainingJobs: 0,
   usageRecords: 1,
   fallbackUsage: 0,
+  systemVoices: 3,
+  defaultVoice: "标准AI音色",
 };
+
+const fallbackSystemVoices: SystemVoice[] = [
+  {
+    id: "system_standard_warm",
+    name: "标准AI音色",
+    provider: "模型内置TTS",
+    gender: "通用",
+    style: "稳重清晰",
+    scenario: "默认外呼",
+    status: "可用",
+    isDefault: true,
+    sampleText: "您好，我是本地生活服务顾问，想和您确认一下是否方便了解视频号团购获客。",
+  },
+  {
+    id: "system_female_service",
+    name: "温和女声",
+    provider: "模型内置TTS",
+    gender: "女声",
+    style: "亲和客服",
+    scenario: "首次触达、回访",
+    status: "可用",
+    isDefault: false,
+    sampleText: "您好，看到您店铺适合做本地生活曝光，我先简单介绍一下合作方式。",
+  },
+  {
+    id: "system_male_business",
+    name: "商务男声",
+    provider: "模型内置TTS",
+    gender: "男声",
+    style: "商务简洁",
+    scenario: "方案说明、资料跟进",
+    status: "可用",
+    isDefault: false,
+    sampleText: "我们可以先从基础方案试跑，再根据实际咨询量决定是否加大投放。",
+  },
+];
 
 const fallbackVoiceProfiles: VoiceProfile[] = [
   {
-    id: "voice_1",
-    name: "标准AI音色",
-    ownerName: "系统",
-    scenario: "外呼",
-    status: "可用",
-    authorizationStatus: "系统内置",
-    sampleCount: 0,
-    fallbackVoice: "标准AI音色",
-    consentMaterial: "系统内置安全音色，无真人克隆样本。",
-    riskNote: "可作为所有未授权音色的回退。",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
     id: "voice_2",
-    name: "招商顾问授权音色",
+    name: "招商顾问克隆音色",
     ownerName: "待授权顾问",
     scenario: "外呼",
     status: "待授权",
@@ -877,6 +902,7 @@ function App() {
   const [intentEvents, setIntentEvents] = useState<IntentEvent[]>(fallbackIntentEvents);
   const [followUpWorkOrders, setFollowUpWorkOrders] = useState<FollowUpWorkOrder[]>(fallbackWorkOrders);
   const [voiceOverview, setVoiceOverview] = useState<VoiceOverview>(fallbackVoiceOverview);
+  const [systemVoices, setSystemVoices] = useState<SystemVoice[]>(fallbackSystemVoices);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>(fallbackVoiceProfiles);
   const [voiceTrainingJobs, setVoiceTrainingJobs] = useState<VoiceTrainingJob[]>(fallbackVoiceTrainingJobs);
   const [voiceUsageRecords, setVoiceUsageRecords] = useState<VoiceUsageRecord[]>(fallbackVoiceUsageRecords);
@@ -896,6 +922,9 @@ function App() {
   const [activeReportsTab, setActiveReportsTab] = useState<ReportsTab>("报表总览");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("设置总览");
   const [selectedIntentCustomerId, setSelectedIntentCustomerId] = useState<string>(fallbackIntentCustomers[0]?.id ?? "");
+  const [selectedSystemVoiceId, setSelectedSystemVoiceId] = useState<string>(
+    fallbackSystemVoices.find((voice) => voice.isDefault)?.id ?? fallbackSystemVoices[0]?.id ?? "",
+  );
   const [selectedVoiceProfileId, setSelectedVoiceProfileId] = useState<string>(fallbackVoiceProfiles[0]?.id ?? "");
   const [selectedChannelReportId, setSelectedChannelReportId] = useState<string>(fallbackChannelReports[0]?.id ?? "");
   const [selectedSalesReportId, setSelectedSalesReportId] = useState<string>(fallbackSalesReports[0]?.id ?? "");
@@ -1018,7 +1047,18 @@ function App() {
   const activeIntentCustomerEvents = activeIntentCustomer
     ? intentEvents.filter((event) => event.customerId === activeIntentCustomer.id)
     : [];
-  const activeVoiceProfile = voiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? voiceProfiles[0];
+  const defaultSystemVoice = systemVoices.find((voice) => voice.isDefault) ?? systemVoices[0];
+  const activeSystemVoice = systemVoices.find((voice) => voice.id === selectedSystemVoiceId) ?? defaultSystemVoice;
+  const customerVoiceProfiles = useMemo(
+    () => voiceProfiles.filter((profile) => profile.authorizationStatus !== "系统内置" && profile.ownerName !== "系统"),
+    [voiceProfiles],
+  );
+  const customerVoiceProfileIds = useMemo(() => new Set(customerVoiceProfiles.map((profile) => profile.id)), [customerVoiceProfiles]);
+  const customerVoiceTrainingJobs = useMemo(
+    () => voiceTrainingJobs.filter((job) => customerVoiceProfileIds.has(job.profileId)),
+    [customerVoiceProfileIds, voiceTrainingJobs],
+  );
+  const activeVoiceProfile = customerVoiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? customerVoiceProfiles[0];
   const activeChannelReport = channelReports.find((channel) => channel.id === selectedChannelReportId) ?? channelReports[0];
   const activeSalesReport = salesReports.find((report) => report.id === selectedSalesReportId) ?? salesReports[0];
   const activeReportExport = reportExports.find((exportJob) => exportJob.id === selectedReportExportId) ?? reportExports[0];
@@ -1054,6 +1094,7 @@ function App() {
       api.intentEvents(),
       api.followUpWorkOrders(),
       api.voiceOverview(),
+      api.systemVoices(),
       api.voiceProfiles(),
       api.voiceTrainingJobs(),
       api.voiceUsageRecords(),
@@ -1118,37 +1159,49 @@ function App() {
     if (results[18].status === "fulfilled") setFollowUpWorkOrders(results[18].value);
     if (results[19].status === "fulfilled") setVoiceOverview(results[19].value);
     if (results[20].status === "fulfilled") {
-      const nextProfiles = results[20].value;
+      const nextSystemVoices = results[20].value;
+      setSystemVoices(nextSystemVoices);
+      setSelectedSystemVoiceId((current) =>
+        nextSystemVoices.some((voice) => voice.id === current)
+          ? current
+          : nextSystemVoices.find((voice) => voice.isDefault)?.id ?? nextSystemVoices[0]?.id ?? "",
+      );
+      const defaultVoiceName = nextSystemVoices.find((voice) => voice.isDefault)?.name ?? nextSystemVoices[0]?.name ?? "标准AI音色";
+      setVoiceProfileForm((current) => ({ ...current, fallbackVoice: current.fallbackVoice || defaultVoiceName }));
+    }
+    if (results[21].status === "fulfilled") {
+      const nextProfiles = results[21].value;
+      const nextCustomerProfiles = nextProfiles.filter((profile) => profile.authorizationStatus !== "系统内置" && profile.ownerName !== "系统");
       setVoiceProfiles(nextProfiles);
       setSelectedVoiceProfileId((current) =>
-        nextProfiles.some((profile) => profile.id === current) ? current : nextProfiles[0]?.id ?? "",
+        nextCustomerProfiles.some((profile) => profile.id === current) ? current : nextCustomerProfiles[0]?.id ?? "",
       );
     }
-    if (results[21].status === "fulfilled") setVoiceTrainingJobs(results[21].value);
-    if (results[22].status === "fulfilled") setVoiceUsageRecords(results[22].value);
-    if (results[23].status === "fulfilled") setReportOverview(results[23].value);
-    if (results[24].status === "fulfilled") {
-      const nextChannels = results[24].value;
+    if (results[22].status === "fulfilled") setVoiceTrainingJobs(results[22].value);
+    if (results[23].status === "fulfilled") setVoiceUsageRecords(results[23].value);
+    if (results[24].status === "fulfilled") setReportOverview(results[24].value);
+    if (results[25].status === "fulfilled") {
+      const nextChannels = results[25].value;
       setChannelReports(nextChannels);
       setSelectedChannelReportId((current) =>
         nextChannels.some((channel) => channel.id === current) ? current : nextChannels[0]?.id ?? "",
       );
     }
-    if (results[25].status === "fulfilled") {
-      const nextSalesReports = results[25].value;
+    if (results[26].status === "fulfilled") {
+      const nextSalesReports = results[26].value;
       setSalesReports(nextSalesReports);
       setSelectedSalesReportId((current) =>
         nextSalesReports.some((report) => report.id === current) ? current : nextSalesReports[0]?.id ?? "",
       );
     }
-    if (results[26].status === "fulfilled") {
-      const nextExports = results[26].value;
+    if (results[27].status === "fulfilled") {
+      const nextExports = results[27].value;
       setReportExports(nextExports);
       setSelectedReportExportId((current) => (nextExports.some((job) => job.id === current) ? current : nextExports[0]?.id ?? ""));
     }
-    if (results[27].status === "fulfilled") setSettingsOverview(results[27].value);
-    if (results[28].status === "fulfilled") {
-      const nextSettings = results[28].value;
+    if (results[28].status === "fulfilled") setSettingsOverview(results[28].value);
+    if (results[29].status === "fulfilled") {
+      const nextSettings = results[29].value;
       setSystemSettings(nextSettings);
       setSelectedSystemSettingId((current) => {
         const nextId = nextSettings.some((setting) => setting.id === current) ? current : nextSettings[0]?.id ?? "";
@@ -1421,6 +1474,17 @@ function App() {
     });
   }
 
+  function selectSystemVoice(voice: SystemVoice) {
+    setSelectedSystemVoiceId(voice.id);
+    setVoiceProfileForm((current) => ({ ...current, fallbackVoice: voice.name }));
+  }
+
+  function voiceLabelForUsage(profileId?: string | null) {
+    const profile = voiceProfiles.find((item) => item.id === profileId);
+    if (profile && profile.authorizationStatus !== "系统内置" && profile.ownerName !== "系统") return profile.name;
+    return activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "系统内置音色";
+  }
+
   async function submitVoiceProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!voiceProfileForm.name.trim() || !voiceProfileForm.ownerName.trim()) return;
@@ -1429,8 +1493,10 @@ function App() {
       ...voiceProfileForm,
       status: "待授权",
       sampleCount: Number(voiceProfileForm.sampleCount),
+      fallbackVoice: voiceProfileForm.fallbackVoice || activeSystemVoice?.name || defaultSystemVoice?.name || "标准AI音色",
     });
     setVoiceProfiles((current) => [created, ...current]);
+    setSelectedVoiceProfileId(created.id);
     const overviewData = await api.voiceOverview();
     setVoiceOverview(overviewData);
     setVoiceProfileForm({
@@ -1439,7 +1505,7 @@ function App() {
       scenario: "外呼",
       authorizationStatus: "待提交",
       sampleCount: 0,
-      fallbackVoice: "标准AI音色",
+      fallbackVoice: activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "标准AI音色",
       consentMaterial: "",
       riskNote: "未授权前不可训练、不可被任务选择。",
     });
@@ -2292,19 +2358,59 @@ function App() {
         </section>
 
         <section className="metrics outbound-metrics">
-          <MetricCard icon={<Headphones size={20} />} label="声音档案" value={voiceOverview.profiles} detail="授权资产" tone="blue" />
-          <MetricCard icon={<CheckCircle2 size={20} />} label="可用音色" value={voiceOverview.usableProfiles} detail="可被任务选择" tone="green" />
+          <MetricCard icon={<Headphones size={20} />} label="克隆档案" value={voiceOverview.profiles} detail="客户/员工授权" tone="blue" />
+          <MetricCard icon={<Radio size={20} />} label="系统音色" value={systemVoices.length || voiceOverview.systemVoices} detail={activeSystemVoice?.name ?? voiceOverview.defaultVoice} tone="green" />
           <MetricCard icon={<ShieldAlert size={20} />} label="待授权" value={voiceOverview.pendingAuthorization} detail="不可训练" tone="amber" />
           <MetricCard icon={<Activity size={20} />} label="使用记录" value={voiceOverview.usageRecords} detail="审计留痕" tone="rose" />
         </section>
 
         {showProfiles && (
           <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Built-in Voices</p>
+                  <h2>系统内置音色 / 默认音色</h2>
+                </div>
+                <Radio size={22} />
+              </div>
+              <div className="record-grid">
+                {systemVoices.map((voice) => (
+                  <article
+                    className={voice.id === activeSystemVoice?.id ? "record-card clickable-card is-selected" : "record-card clickable-card"}
+                    key={voice.id}
+                    onClick={() => selectSystemVoice(voice)}
+                  >
+                    <div>
+                      <strong>{voice.name}</strong>
+                      <span>{voice.id === activeSystemVoice?.id ? "当前默认" : voice.status}</span>
+                    </div>
+                    <p>{voice.sampleText}</p>
+                    <small>
+                      {voice.provider} · {voice.gender} · {voice.style} · {voice.scenario}
+                    </small>
+                    <div className="button-row card-actions">
+                      <button
+                        className={voice.id === activeSystemVoice?.id ? "row-action is-primary" : "row-action"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          selectSystemVoice(voice);
+                        }}
+                        type="button"
+                      >
+                        {voice.id === activeSystemVoice?.id ? "默认音色" : "设为默认"}
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
+
             <article className="panel">
               <div className="panel-title">
                 <div>
-                  <p>Profile Form</p>
-                  <h2>新增声音档案</h2>
+                  <p>Clone Profile</p>
+                  <h2>新增授权克隆档案</h2>
                 </div>
                 <Headphones size={22} />
               </div>
@@ -2329,7 +2435,17 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  样本数量
+                  回退系统音色
+                  <select value={voiceProfileForm.fallbackVoice} onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, fallbackVoice: event.target.value })}>
+                    {systemVoices.map((voice) => (
+                      <option key={voice.id} value={voice.name}>
+                        {voice.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  声音样本数量
                   <input
                     min={0}
                     type="number"
@@ -2338,7 +2454,7 @@ function App() {
                   />
                 </label>
                 <label className="wide">
-                  授权材料
+                  授权材料 / 样本记录
                   <textarea
                     value={voiceProfileForm.consentMaterial}
                     onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, consentMaterial: event.target.value })}
@@ -2346,7 +2462,7 @@ function App() {
                 </label>
                 <button className="primary-button" type="submit">
                   <Plus size={16} />
-                  新增声音档案
+                  新增克隆档案
                 </button>
               </form>
             </article>
@@ -2354,13 +2470,14 @@ function App() {
             <article className="panel">
               <div className="panel-title">
                 <div>
-                  <p>Profiles</p>
-                  <h2>档案状态</h2>
+                  <p>Clone Assets</p>
+                  <h2>授权克隆档案</h2>
                 </div>
                 <ClipboardList size={22} />
               </div>
               <div className="account-list">
-                {voiceProfiles.map((profile) => (
+                {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无客户或员工授权克隆档案。</div>}
+                {customerVoiceProfiles.map((profile) => (
                   <article
                     className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
                     key={profile.id}
@@ -2399,7 +2516,8 @@ function App() {
                 <ShieldAlert size={22} />
               </div>
               <div className="record-grid">
-                {voiceProfiles.map((profile) => (
+                {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无待审核的授权克隆档案。</div>}
+                {customerVoiceProfiles.map((profile) => (
                   <article
                     className={profile.id === activeVoiceProfile?.id ? "record-card clickable-card is-selected" : "record-card clickable-card"}
                     key={profile.id}
@@ -2451,7 +2569,8 @@ function App() {
                 <Activity size={22} />
               </div>
               <div className="account-list">
-                {voiceProfiles.map((profile) => (
+                {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无可训练的授权克隆档案。</div>}
+                {customerVoiceProfiles.map((profile) => (
                   <article
                     className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
                     key={profile.id}
@@ -2464,7 +2583,7 @@ function App() {
                       </div>
                       <button
                         className="row-action is-primary"
-                        disabled={!["授权通过", "系统内置"].includes(profile.authorizationStatus)}
+                        disabled={profile.authorizationStatus !== "授权通过"}
                         onClick={(event) => {
                           event.stopPropagation();
                           void createVoiceTrainingJob(profile);
@@ -2488,12 +2607,12 @@ function App() {
                 <Clock3 size={22} />
               </div>
               <div className="task-list">
-                {voiceTrainingJobs.length === 0 && <div className="empty-state">暂无训练任务。</div>}
-                {voiceTrainingJobs.map((job) => (
+                {customerVoiceTrainingJobs.length === 0 && <div className="empty-state">暂无克隆训练任务。</div>}
+                {customerVoiceTrainingJobs.map((job) => (
                   <div className="task-row" key={job.id}>
                     <span>{job.progress}%</span>
                     <div>
-                      <strong>{voiceProfiles.find((profile) => profile.id === job.profileId)?.name ?? "声音档案"}</strong>
+                      <strong>{customerVoiceProfiles.find((profile) => profile.id === job.profileId)?.name ?? "授权克隆档案"}</strong>
                       <small>{job.engine} · {job.message}</small>
                     </div>
                     <em>{job.status}</em>
@@ -2529,7 +2648,7 @@ function App() {
                   <tbody>
                     {voiceUsageRecords.map((record) => (
                       <tr key={record.id}>
-                        <td>{voiceProfiles.find((profile) => profile.id === record.profileId)?.name ?? "标准音色"}</td>
+                        <td>{voiceLabelForUsage(record.profileId)}</td>
                         <td>{record.merchantName}</td>
                         <td>{record.scenario}</td>
                         <td>{record.result}</td>

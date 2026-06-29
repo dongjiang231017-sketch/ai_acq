@@ -346,6 +346,20 @@ export type VoiceOverview = {
   trainingJobs: number;
   usageRecords: number;
   fallbackUsage: number;
+  systemVoices: number;
+  defaultVoice: string;
+};
+
+export type SystemVoice = {
+  id: string;
+  name: string;
+  provider: string;
+  gender: string;
+  style: string;
+  scenario: string;
+  status: string;
+  isDefault: boolean;
+  sampleText: string;
 };
 
 export type VoiceProfile = {
@@ -665,6 +679,7 @@ export const api = {
   knowledgeBase: () => request<KnowledgeBaseItem[]>("/learning/knowledge"),
   learningExperiments: () => request<LearningExperiment[]>("/learning/experiments"),
   voiceOverview: () => request<VoiceOverview>("/voice/overview"),
+  systemVoices: () => request<SystemVoice[]>("/voice/system-voices"),
   voiceProfiles: () => request<VoiceProfile[]>("/voice/profiles"),
   createVoiceProfile: (profile: Omit<VoiceProfile, "id" | "createdAt" | "updatedAt">) =>
     request<VoiceProfile>("/voice/profiles", {

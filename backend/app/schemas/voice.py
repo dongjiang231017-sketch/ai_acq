@@ -11,6 +11,22 @@ class VoiceOverview(BaseModel):
     training_jobs: Annotated[int, Field(alias="trainingJobs")]
     usage_records: Annotated[int, Field(alias="usageRecords")]
     fallback_usage: Annotated[int, Field(alias="fallbackUsage")]
+    system_voices: Annotated[int, Field(alias="systemVoices")] = 0
+    default_voice: Annotated[str, Field(alias="defaultVoice")] = "标准AI音色"
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SystemVoiceRead(BaseModel):
+    id: str
+    name: str
+    provider: str
+    gender: str
+    style: str
+    scenario: str
+    status: str
+    is_default: Annotated[bool, Field(alias="isDefault")]
+    sample_text: Annotated[str, Field(alias="sampleText")]
 
     model_config = ConfigDict(populate_by_name=True)
 
