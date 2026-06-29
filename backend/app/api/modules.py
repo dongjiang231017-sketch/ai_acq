@@ -12,7 +12,7 @@ MODULES = [
     {"key": "learning", "name": "AI学习中心", "description": "建议队列、知识库和实验结果。", "pageCount": 5, "status": "ready"},
     {"key": "voice", "name": "声音档案", "description": "授权、音色训练和使用记录。", "pageCount": 4, "status": "ready"},
     {"key": "reports", "name": "数据报表", "description": "渠道、绩效和导出中心。", "pageCount": 4, "status": "ready"},
-    {"key": "settings", "name": "系统设置", "description": "线路、账号、模型 API、权限和审计。", "pageCount": 6, "status": "ready"},
+    {"key": "settings", "name": "系统设置", "description": "线路、账号和合规保护。", "pageCount": 4, "status": "ready"},
 ]
 
 

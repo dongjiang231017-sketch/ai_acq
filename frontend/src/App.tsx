@@ -57,7 +57,6 @@ import {
   VoiceTrainingJob,
   VoiceUsageRecord,
   SettingsOverview,
-  SystemAuditLog,
   SystemSetting,
   api,
 } from "./lib/api";
@@ -74,7 +73,7 @@ const fallbackModules: ModuleSummary[] = [
   { key: "learning", name: "AI学习中心", description: "建议队列、知识库和实验结果。", pageCount: 5, status: "ready" },
   { key: "voice", name: "声音档案", description: "授权、音色训练和使用记录。", pageCount: 4, status: "ready" },
   { key: "reports", name: "数据报表", description: "渠道、绩效和导出中心。", pageCount: 4, status: "ready" },
-  { key: "settings", name: "系统设置", description: "线路、账号、模型 API、权限和审计。", pageCount: 6, status: "ready" },
+  { key: "settings", name: "系统设置", description: "线路、账号和合规保护。", pageCount: 4, status: "ready" },
 ];
 
 const fallbackLeads: Lead[] = [
@@ -901,20 +900,6 @@ const fallbackSystemSettings: SystemSetting[] = [
   },
 ];
 
-const fallbackAuditLogs: SystemAuditLog[] = [
-  {
-    id: "audit_1",
-    actor: "系统",
-    action: "seed",
-    targetType: "system_settings",
-    targetId: null,
-    summary: "初始化系统设置默认项",
-    beforeValue: null,
-    afterValue: "default settings",
-    createdAt: new Date().toISOString(),
-  },
-];
-
 const outboundTabs = ["外呼总览", "任务列表", "话术流程", "通话记录", "重拨规则", "实时监听"] as const;
 type OutboundTab = (typeof outboundTabs)[number];
 const dmTabs = ["私信总览", "任务列表", "账号管理", "消息模板", "会话记录", "回复监听"] as const;
@@ -927,8 +912,23 @@ const voiceTabs = ["声音档案", "授权审核", "音色训练", "使用记录
 type VoiceTab = (typeof voiceTabs)[number];
 const reportsTabs = ["报表总览", "渠道分析", "销售绩效", "导出中心"] as const;
 type ReportsTab = (typeof reportsTabs)[number];
-const settingsTabs = ["设置总览", "电话线路", "平台账号", "模型API", "权限角色", "合规审计"] as const;
+const settingsTabs = ["设置总览", "电话线路", "平台账号", "合规保护"] as const;
 type SettingsTab = (typeof settingsTabs)[number];
+
+const clientSettingGroupLabels: Record<string, SettingsTab> = {
+  telephony: "电话线路",
+  dm: "平台账号",
+  compliance: "合规保护",
+};
+
+function isClientVisibleSetting(setting: SystemSetting) {
+  if (setting.itemKey === "audit_retention_days") return false;
+  return Boolean(clientSettingGroupLabels[setting.groupKey]);
+}
+
+function isClientEnabledSetting(setting: SystemSetting) {
+  return !["待配置", "未启用"].includes(setting.status);
+}
 
 function formatDuration(seconds: number) {
   const minute = Math.floor(seconds / 60)
@@ -974,7 +974,6 @@ function App() {
   const [reportExports, setReportExports] = useState<ReportExport[]>(fallbackReportExports);
   const [settingsOverview, setSettingsOverview] = useState<SettingsOverview>(fallbackSettingsOverview);
   const [systemSettings, setSystemSettings] = useState<SystemSetting[]>(fallbackSystemSettings);
-  const [auditLogs, setAuditLogs] = useState<SystemAuditLog[]>(fallbackAuditLogs);
   const [activeModule, setActiveModule] = useState("outbound");
   const [apiStatus, setApiStatus] = useState("连接中");
   const [isLoading, setIsLoading] = useState(false);
@@ -1115,13 +1114,14 @@ function App() {
   const activeChannelReport = channelReports.find((channel) => channel.id === selectedChannelReportId) ?? channelReports[0];
   const activeSalesReport = salesReports.find((report) => report.id === selectedSalesReportId) ?? salesReports[0];
   const activeReportExport = reportExports.find((exportJob) => exportJob.id === selectedReportExportId) ?? reportExports[0];
-  const activeSystemSetting = systemSettings.find((setting) => setting.id === selectedSystemSettingId) ?? systemSettings[0];
+  const clientSettings = useMemo(() => systemSettings.filter(isClientVisibleSetting), [systemSettings]);
+  const activeSystemSetting = clientSettings.find((setting) => setting.id === selectedSystemSettingId) ?? clientSettings[0];
   const settingGroups = useMemo(() => {
-    return systemSettings.reduce<Record<string, SystemSetting[]>>((groups, setting) => {
+    return clientSettings.reduce<Record<string, SystemSetting[]>>((groups, setting) => {
       groups[setting.groupKey] = [...(groups[setting.groupKey] ?? []), setting];
       return groups;
     }, {});
-  }, [systemSettings]);
+  }, [clientSettings]);
 
   async function loadData() {
     setIsLoading(true);
@@ -1159,7 +1159,6 @@ function App() {
       api.reportExports(),
       api.settingsOverview(),
       api.systemSettings(),
-      api.systemAuditLogs(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -1264,7 +1263,6 @@ function App() {
         return nextId;
       });
     }
-    if (results[33].status === "fulfilled") setAuditLogs(results[33].value);
     setIsLoading(false);
   }
 
@@ -1606,16 +1604,9 @@ function App() {
   }
 
   function selectSystemSetting(setting: SystemSetting) {
-    const tabByGroup: Record<string, SettingsTab> = {
-      telephony: "电话线路",
-      dm: "平台账号",
-      model: "模型API",
-      permissions: "权限角色",
-      compliance: "合规审计",
-    };
     setSelectedSystemSettingId(setting.id);
     setSettingDraft(setting.value);
-    setActiveSettingsTab(tabByGroup[setting.groupKey] ?? "设置总览");
+    setActiveSettingsTab(clientSettingGroupLabels[setting.groupKey] ?? "设置总览");
   }
 
   async function saveSelectedSetting(event?: React.FormEvent<HTMLFormElement>) {
@@ -1628,9 +1619,8 @@ function App() {
     setSystemSettings((current) => current.map((setting) => (setting.id === updated.id ? updated : setting)));
     setSelectedSystemSettingId(updated.id);
     setSettingDraft(updated.value);
-    const [overviewData, auditData] = await Promise.all([api.settingsOverview(), api.systemAuditLogs()]);
+    const overviewData = await api.settingsOverview();
     setSettingsOverview(overviewData);
-    setAuditLogs(auditData);
   }
 
   function toggleLead(leadId: string) {
@@ -1969,7 +1959,7 @@ function App() {
               </div>
               {activeReportExport && (
                 <p className="panel-note">
-                  当前选中：{activeReportExport.reportType} · {activeReportExport.downloadUrl}
+                  当前选中：{activeReportExport.reportType} · {activeReportExport.status} · {activeReportExport.rowCount} 行
                 </p>
               )}
             </article>
@@ -2013,20 +2003,23 @@ function App() {
       设置总览: null,
       电话线路: "telephony",
       平台账号: "dm",
-      模型API: "model",
-      权限角色: "permissions",
-      合规审计: "compliance",
-    };
-    const groupToTab: Record<string, SettingsTab> = {
-      telephony: "电话线路",
-      dm: "平台账号",
-      model: "模型API",
-      permissions: "权限角色",
-      compliance: "合规审计",
+      合规保护: "compliance",
     };
     const activeGroup = tabToGroup[activeSettingsTab];
-    const visibleSettings = activeGroup ? settingGroups[activeGroup] ?? [] : systemSettings;
-    const showAudit = activeSettingsTab === "合规审计" || activeSettingsTab === "设置总览";
+    const visibleSettings = activeGroup ? settingGroups[activeGroup] ?? [] : clientSettings;
+    const clientSettingGroups = Object.entries(clientSettingGroupLabels).map(([groupKey, label]) => {
+      const items = settingGroups[groupKey] ?? [];
+      const enabled = items.filter(isClientEnabledSetting).length;
+      return {
+        groupKey,
+        label,
+        total: items.length,
+        enabled,
+        warning: Math.max(items.length - enabled, 0),
+      };
+    });
+    const enabledSettings = clientSettings.filter(isClientEnabledSetting).length;
+    const warningSettings = Math.max(clientSettings.length - enabledSettings, 0);
 
     return (
       <>
@@ -2039,10 +2032,10 @@ function App() {
         </section>
 
         <section className="metrics outbound-metrics">
-          <MetricCard icon={<Settings size={20} />} label="配置项" value={settingsOverview.totalSettings} detail={`${settingsOverview.enabledSettings} 个已启用/受控`} tone="blue" />
-          <MetricCard icon={<ShieldAlert size={20} />} label="需确认" value={settingsOverview.warningSettings} detail="待配置或未启用" tone="amber" />
-          <MetricCard icon={<KeyRound size={20} />} label="敏感别名" value={settingsOverview.sensitiveSettings} detail="仅保存密钥别名" tone="rose" />
-          <MetricCard icon={<ClipboardList size={20} />} label="审计记录" value={settingsOverview.auditLogs} detail="配置变更可追溯" tone="green" />
+          <MetricCard icon={<Settings size={20} />} label="可见配置" value={clientSettings.length} detail={`${enabledSettings} 个已启用/受控`} tone="blue" />
+          <MetricCard icon={<ShieldAlert size={20} />} label="需确认" value={warningSettings} detail="待配置或未启用" tone="amber" />
+          <MetricCard icon={<PhoneCall size={20} />} label="电话线路" value={settingGroups.telephony?.length ?? 0} detail="外呼相关配置" tone="green" />
+          <MetricCard icon={<MessageSquareText size={20} />} label="平台账号" value={settingGroups.dm?.length ?? 0} detail="私信相关配置" tone="rose" />
         </section>
 
         {activeSettingsTab === "设置总览" && (
@@ -2056,13 +2049,13 @@ function App() {
                 <Settings size={22} />
               </div>
               <div className="record-grid">
-                {settingsOverview.groups.map((group) => (
+                {clientSettingGroups.map((group) => (
                   <button
                     className="record-card clickable-card"
                     key={group.groupKey}
                     onClick={() => {
                       const firstSetting = settingGroups[group.groupKey]?.[0];
-                      setActiveSettingsTab(groupToTab[group.groupKey] ?? "设置总览");
+                      setActiveSettingsTab(clientSettingGroupLabels[group.groupKey] ?? "设置总览");
                       if (firstSetting) selectSystemSetting(firstSetting);
                     }}
                     type="button"
@@ -2089,15 +2082,15 @@ function App() {
               <div className="profile-grid">
                 <div>
                   <span>真实私信发送</span>
-                  <strong>{systemSettings.find((setting) => setting.itemKey === "live_send_enabled")?.value === "true" ? "已开启" : "受控关闭"}</strong>
+                  <strong>{clientSettings.find((setting) => setting.itemKey === "live_send_enabled")?.value === "true" ? "已开启" : "受控关闭"}</strong>
                 </div>
                 <div>
                   <span>勿扰保护</span>
-                  <strong>{systemSettings.find((setting) => setting.itemKey === "dnc_enabled")?.value === "true" ? "已启用" : "未启用"}</strong>
+                  <strong>{clientSettings.find((setting) => setting.itemKey === "dnc_enabled")?.value === "true" ? "已启用" : "未启用"}</strong>
                 </div>
                 <div className="wide">
-                  <span>密钥策略</span>
-                  <strong>系统设置只保存 secret alias，不保存原始 API Key。</strong>
+                  <span>前端边界</span>
+                  <strong>内部技术配置仅保留在后台，不在客户端展示。</strong>
                 </div>
               </div>
             </article>
@@ -2126,7 +2119,7 @@ function App() {
                     <span>{setting.status}</span>
                   </div>
                   <p>{setting.description}</p>
-                  <small>{setting.groupKey}.{setting.itemKey} · {setting.sensitive ? "敏感别名" : setting.value}</small>
+                  <small>{clientSettingGroupLabels[setting.groupKey]} · {setting.value}</small>
                 </button>
               ))}
             </div>
@@ -2169,29 +2162,6 @@ function App() {
           </article>
         </section>
 
-        {showAudit && (
-          <section className="content-grid lower">
-            <article className="panel span-2">
-              <div className="panel-title">
-                <div>
-                  <p>Audit</p>
-                  <h2>合规审计</h2>
-                </div>
-                <ShieldAlert size={22} />
-              </div>
-              <div className="timeline-list">
-                {auditLogs.map((log) => (
-                  <article className="timeline-item" key={log.id}>
-                    <span>{log.actor} · {log.action}</span>
-                    <strong>{log.summary}</strong>
-                    <p>{log.beforeValue ?? "无"} → {log.afterValue ?? "无"}</p>
-                    <small>{new Date(log.createdAt).toLocaleString()}</small>
-                  </article>
-                ))}
-              </div>
-            </article>
-          </section>
-        )}
       </>
     );
   }
