@@ -7,6 +7,16 @@ class Settings(BaseSettings):
     app_name: str = "ai-acq-qian-api"
     api_prefix: str = "/api"
     database_url: str = "sqlite:///./local.db"
+    redis_url: str = "redis://localhost:6379/0"
+    outbound_queue_enabled: bool = False
+    outbound_queue_name: str = "ai_acq:outbound_tasks"
+    telephony_gateway_mode: str = "simulator"
+    asterisk_host: str = "127.0.0.1"
+    asterisk_ami_port: int = 5038
+    asterisk_ami_username: str = ""
+    asterisk_ami_password: str = ""
+    asterisk_originate_context: str = "from-ai-acq"
+    asterisk_trunk_name: str = "uc100"
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"

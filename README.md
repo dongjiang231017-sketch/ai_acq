@@ -17,7 +17,7 @@
 - 数据库：PostgreSQL
 - 可视化数据后台：SQLAdmin
 - 数据库迁移：Alembic
-- 队列/缓存：后续接 Redis
+- 队列/缓存：Redis
 - Docker：暂时不用，等功能稳定后再补
 
 ## 本机 PostgreSQL
@@ -132,6 +132,31 @@ VITE_API_BASE_URL=http://localhost:8001/api
 3. 先实现线索库、导入/采集、外呼任务这 3 条主流程。
 4. 再接平台私信、意向客户池、AI 学习中心。
 5. 最后补声音档案、报表、系统设置、权限和审计。
+
+## UC100 实体卡外呼准备
+
+UC100 未到货前，后端默认使用模拟电话网关，可以先开发任务、队列、记录、重拨和人工接管前置流程。到货后再按 `docs/UC100_OUTBOUND_SETUP.md` 接入 Asterisk/UC100。
+
+模拟模式：
+
+```env
+TELEPHONY_GATEWAY_MODE=simulator
+OUTBOUND_QUEUE_ENABLED=false
+```
+
+Redis worker 测试：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.workers.outbound_worker --once
+```
+
+查看当前电话网关配置：
+
+```text
+GET /api/outbound/telephony/config
+```
 
 ## 数据库迁移
 

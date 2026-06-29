@@ -71,6 +71,9 @@ class CallRecordRead(BaseModel):
     current_node: Annotated[str, Field(alias="currentNode")]
     outcome: str
     transcript: str
+    gateway_call_id: Annotated[str | None, Field(alias="gatewayCallId")]
+    gateway_status: Annotated[str, Field(alias="gatewayStatus")]
+    raw_payload: Annotated[str | None, Field(alias="rawPayload")]
     need_handoff: Annotated[bool, Field(alias="needHandoff")]
     recall_at: Annotated[datetime | None, Field(alias="recallAt")]
     created_at: Annotated[datetime, Field(alias="createdAt")]
@@ -99,3 +102,14 @@ class OutboundOverview(BaseModel):
     today_calls: Annotated[int, Field(alias="todayCalls")]
     connected_rate: Annotated[int, Field(alias="connectedRate")]
     intent_count: Annotated[int, Field(alias="intentCount")]
+
+
+class TelephonyConfigRead(BaseModel):
+    gateway_mode: Annotated[str, Field(alias="gatewayMode")]
+    queue_enabled: Annotated[bool, Field(alias="queueEnabled")]
+    queue_name: Annotated[str, Field(alias="queueName")]
+    redis_url_configured: Annotated[bool, Field(alias="redisUrlConfigured")]
+    asterisk_host: Annotated[str, Field(alias="asteriskHost")]
+    asterisk_ami_port: Annotated[int, Field(alias="asteriskAmiPort")]
+    asterisk_username_configured: Annotated[bool, Field(alias="asteriskUsernameConfigured")]
+    asterisk_trunk_name: Annotated[str, Field(alias="asteriskTrunkName")]

@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.lead import MerchantLead
 from app.models.task import CallRecord, CallScript, OutreachTask, RecallRule
@@ -15,7 +16,10 @@ from app.schemas.task import (
     OutboundTaskCreate,
     RecallRuleRead,
     TaskRead,
+    TelephonyConfigRead,
 )
+from app.services.outbound_queue import enqueue_outbound_task
+from app.services.outbound_runner import run_outbound_task
 
 router = APIRouter()
 
@@ -37,64 +41,6 @@ def _seed_default_script(db: Session) -> CallScript:
     db.commit()
     db.refresh(script)
     return script
-
-
-def _mock_call_result(lead: MerchantLead, index: int) -> dict[str, object]:
-    score = lead.intent_score
-    if not lead.phone:
-        return {
-            "duration_seconds": 0,
-            "intent_level": "无效",
-            "current_node": "号码缺失",
-            "outcome": "失败",
-            "transcript": "系统：该商家没有电话，跳过外呼。",
-            "need_handoff": False,
-            "recall_at": None,
-            "lead_status": "号码缺失",
-        }
-    if score >= 80:
-        return {
-            "duration_seconds": 138 + index * 8,
-            "intent_level": "A",
-            "current_node": "加微信",
-            "outcome": "有意向",
-            "transcript": "商家：可以，先发资料看看。AI：我安排顾问给您发入驻资料。",
-            "need_handoff": True,
-            "recall_at": None,
-            "lead_status": "高意向",
-        }
-    if score >= 65:
-        return {
-            "duration_seconds": 72 + index * 6,
-            "intent_level": "B",
-            "current_node": "价格异议",
-            "outcome": "已接通",
-            "transcript": "商家：费用怎么收？AI：可以先给您发基础方案。",
-            "need_handoff": False,
-            "recall_at": datetime.utcnow() + timedelta(hours=4),
-            "lead_status": "需复拨",
-        }
-    if score >= 50:
-        return {
-            "duration_seconds": 35 + index * 4,
-            "intent_level": "C",
-            "current_node": "老板忙",
-            "outcome": "稍后联系",
-            "transcript": "商家：现在忙，下午再打。AI：好的，我稍后再联系您。",
-            "need_handoff": False,
-            "recall_at": datetime.utcnow() + timedelta(hours=2),
-            "lead_status": "需复拨",
-        }
-    return {
-        "duration_seconds": 0,
-        "intent_level": "D",
-        "current_node": "未接通",
-        "outcome": "未接通",
-        "transcript": "系统：无人接听，进入重拨队列。",
-        "need_handoff": False,
-        "recall_at": datetime.utcnow() + timedelta(hours=6),
-        "lead_status": "未接通",
-    }
 
 
 @router.get("/overview", response_model=OutboundOverview)
@@ -121,6 +67,20 @@ def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "todayCalls": int(today_calls),
         "connectedRate": round((int(connected) / int(today_calls)) * 100) if today_calls else 0,
         "intentCount": int(intent_count),
+    }
+
+
+@router.get("/telephony/config", response_model=TelephonyConfigRead)
+def telephony_config() -> dict[str, object]:
+    return {
+        "gatewayMode": settings.telephony_gateway_mode,
+        "queueEnabled": settings.outbound_queue_enabled,
+        "queueName": settings.outbound_queue_name,
+        "redisUrlConfigured": bool(settings.redis_url),
+        "asteriskHost": settings.asterisk_host,
+        "asteriskAmiPort": settings.asterisk_ami_port,
+        "asteriskUsernameConfigured": bool(settings.asterisk_ami_username),
+        "asteriskTrunkName": settings.asterisk_trunk_name,
     }
 
 
@@ -163,62 +123,19 @@ def start_outbound_task(task_id: str, db: Session = Depends(get_db)) -> Outreach
     if not task or task.channel != "call":
         raise HTTPException(status_code=404, detail="外呼任务不存在")
 
-    target_lead_ids = [lead_id for lead_id in task.target_lead_ids.split(",") if lead_id]
-    if target_lead_ids:
-        target_leads = list(db.scalars(select(MerchantLead).where(MerchantLead.id.in_(target_lead_ids))).all())
-        leads_by_id = {lead.id: lead for lead in target_leads}
-        leads = [leads_by_id[lead_id] for lead_id in target_lead_ids if lead_id in leads_by_id and leads_by_id[lead_id].phone]
-    else:
-        leads = list(
-            db.scalars(
-                select(MerchantLead)
-                .where(MerchantLead.phone.is_not(None))
-                .order_by(MerchantLead.intent_score.desc())
-            ).all()
-        )
-        leads = leads[: task.target_count or len(leads)]
-    if not leads:
-        raise HTTPException(status_code=400, detail="暂无可外呼线索")
+    if settings.outbound_queue_enabled:
+        try:
+            enqueue_outbound_task(task.id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        task.status = "排队中"
+        task.started_at = datetime.utcnow()
+        task.finished_at = None
+        db.commit()
+        db.refresh(task)
+        return task
 
-    db.query(CallRecord).filter(CallRecord.task_id == task.id).delete()
-    task.status = "运行中"
-    task.started_at = datetime.utcnow()
-    task.completed_count = 0
-    task.connected_count = 0
-    task.intent_count = 0
-    task.failed_count = 0
-
-    for index, lead in enumerate(leads):
-        result = _mock_call_result(lead, index)
-        record = CallRecord(
-            task_id=task.id,
-            lead_id=lead.id,
-            merchant_name=lead.name,
-            phone=lead.phone,
-            ai_seat=f"AI-{index % max(task.concurrency, 1) + 1:02d}",
-            duration_seconds=int(result["duration_seconds"]),
-            intent_level=str(result["intent_level"]),
-            current_node=str(result["current_node"]),
-            outcome=str(result["outcome"]),
-            transcript=str(result["transcript"]),
-            need_handoff=bool(result["need_handoff"]),
-            recall_at=result["recall_at"],
-        )
-        db.add(record)
-        lead.status = str(result["lead_status"])
-        if record.outcome in {"有意向", "已接通", "稍后联系"}:
-            task.connected_count += 1
-        if record.intent_level in {"A", "B"}:
-            task.intent_count += 1
-        if record.outcome == "失败":
-            task.failed_count += 1
-
-    task.completed_count = len(leads)
-    task.status = "已完成"
-    task.finished_at = datetime.utcnow()
-    db.commit()
-    db.refresh(task)
-    return task
+    return run_outbound_task(task.id, db)
 
 
 @router.get("/records", response_model=list[CallRecordRead])

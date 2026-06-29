@@ -60,6 +60,9 @@ export type CallRecord = {
   currentNode: string;
   outcome: string;
   transcript: string;
+  gatewayCallId?: string | null;
+  gatewayStatus: string;
+  rawPayload?: string | null;
   needHandoff: boolean;
   recallAt?: string | null;
   createdAt: string;
@@ -85,6 +88,17 @@ export type RecallRule = {
   quietStart: string;
   quietEnd: string;
   enabled: boolean;
+};
+
+export type TelephonyConfig = {
+  gatewayMode: string;
+  queueEnabled: boolean;
+  queueName: string;
+  redisUrlConfigured: boolean;
+  asteriskHost: string;
+  asteriskAmiPort: number;
+  asteriskUsernameConfigured: boolean;
+  asteriskTrunkName: string;
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -139,4 +153,5 @@ export const api = {
   liveCalls: () => request<CallRecord[]>("/outbound/live"),
   callScripts: () => request<CallScript[]>("/outbound/scripts"),
   recallRules: () => request<RecallRule[]>("/outbound/recall-rules"),
+  telephonyConfig: () => request<TelephonyConfig>("/outbound/telephony/config"),
 };
