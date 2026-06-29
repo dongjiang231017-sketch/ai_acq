@@ -465,9 +465,10 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
 
     previous_login_check_at = account.last_login_check_at
     account.last_login_check_at = datetime.utcnow()
+    has_profile_session = profile_has_session_artifacts(account, previous_login_check_at, include_existing=True)
     if settings.dm_gateway_mode == "simulator":
         account.status = "可用"
-        account.session_status = "模拟可用"
+        account.session_status = "已登录" if has_profile_session else "模拟可用"
         account.risk_status = "正常"
         account.last_error = None
     elif settings.dm_gateway_mode == "browser":
@@ -477,13 +478,13 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
         account.session_status = result.session_status
         account.risk_status = result.risk_status
         account.last_error = result.last_error
-        if result.session_status != "已登录" and profile_has_session_artifacts(account, previous_login_check_at):
+        if result.session_status != "已登录" and has_profile_session:
             account.status = "可用"
             account.session_status = "已登录"
             account.risk_status = "正常"
             account.last_error = None
     elif account.session_status != "已登录":
-        if profile_has_session_artifacts(account, previous_login_check_at):
+        if has_profile_session:
             account.status = "可用"
             account.session_status = "已登录"
             account.risk_status = "正常"

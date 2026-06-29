@@ -41,13 +41,19 @@ def normalize_account_state(account: DirectMessageAccount) -> None:
     account.min_send_interval_seconds = account.min_send_interval_seconds or 0
 
 
-def profile_has_session_artifacts(account: DirectMessageAccount, since: datetime | None = None) -> bool:
+def profile_has_session_artifacts(
+    account: DirectMessageAccount,
+    since: datetime | None = None,
+    *,
+    include_existing: bool = False,
+) -> bool:
     """Best-effort local check that a user interacted with the isolated browser profile."""
     profile_path = resolved_profile_path_for_account(account)
     if not profile_path.exists():
         return False
 
     cutoff = (since - timedelta(seconds=5)).timestamp() if since else None
+    has_existing_artifact = False
     artifact_paths = [
         profile_path / "Default" / "Network" / "Cookies",
         profile_path / "Default" / "Cookies",
@@ -65,6 +71,7 @@ def profile_has_session_artifacts(account: DirectMessageAccount, since: datetime
             stat = candidate.stat()
             if stat.st_size <= 0:
                 continue
+            has_existing_artifact = True
             if cutoff is None or stat.st_mtime >= cutoff:
                 return True
-    return False
+    return include_existing and has_existing_artifact

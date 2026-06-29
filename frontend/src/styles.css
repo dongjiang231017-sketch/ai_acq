@@ -1321,6 +1321,50 @@ button:disabled {
   background: #fff;
 }
 
+.external-login-placeholder {
+  min-height: 460px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  padding: 48px;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(36, 115, 246, 0.12), transparent 32%),
+    linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%);
+}
+
+.external-login-placeholder svg {
+  color: #2473f6;
+}
+
+.external-login-placeholder strong {
+  color: #17233a;
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+.external-login-placeholder p {
+  max-width: 620px;
+  margin: 0;
+  color: #5f718d;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.65;
+}
+
+.external-login-placeholder span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border-radius: 999px;
+  padding: 0 16px;
+  background: #e7f1ff;
+  color: #2473f6;
+  font-size: 13px;
+  font-weight: 950;
+}
+
 .embedded-webview-note {
   border-top: 1px solid #dfeaf7;
   background: #f8fbff;

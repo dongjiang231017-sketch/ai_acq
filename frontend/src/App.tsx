@@ -391,8 +391,23 @@ function accountLoginLabel(account: DmAccount) {
   return label;
 }
 
+function isDmLoginReadyStatus(status?: string | null) {
+  return status === "已登录" || status === "模拟可用";
+}
+
+function displayDmLoginStatus(status?: string | null) {
+  if (status === "模拟可用") return "已登录/可用";
+  return status || "未登录";
+}
+
+function dmLoginStatusHint(status?: string | null) {
+  if (status === "模拟可用") return "当前为模拟模式，账号已放行可用于流程联调。";
+  if (status === "已登录") return "已检测到该个人号的隔离登录会话。";
+  return "请先打开个人号登录页，完成登录后再检测。";
+}
+
 function platformLoginEntryLabel(config: DmPlatformConfig) {
-  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "已拦截商家后台入口，改用内置个人号入口";
+  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "已自动改用个人号登录入口";
   if (config.homeUrl?.trim()) return "自定义网页登录入口";
   if (platformLoginUrls[config.platform]) return "系统内置网页登录入口";
   return "未配置网页登录入口";
@@ -761,17 +776,15 @@ const fallbackReportExports: ReportExport[] = [
 ];
 
 const fallbackSettingsOverview: SettingsOverview = {
-  totalSettings: 14,
-  enabledSettings: 10,
-  warningSettings: 4,
-  sensitiveSettings: 2,
+  totalSettings: 8,
+  enabledSettings: 6,
+  warningSettings: 2,
+  sensitiveSettings: 0,
   auditLogs: 1,
   groups: [
     { groupKey: "telephony", label: "电话线路", total: 3, enabled: 2, warning: 1 },
     { groupKey: "dm", label: "平台账号", total: 3, enabled: 2, warning: 1 },
-    { groupKey: "model", label: "模型API", total: 3, enabled: 0, warning: 3 },
-    { groupKey: "permissions", label: "权限角色", total: 2, enabled: 2, warning: 0 },
-    { groupKey: "compliance", label: "合规审计", total: 3, enabled: 3, warning: 0 },
+    { groupKey: "compliance", label: "合规保护", total: 2, enabled: 2, warning: 0 },
   ],
 };
 
@@ -785,6 +798,48 @@ const fallbackSystemSettings: SystemSetting[] = [
     valueType: "select:simulator,asterisk",
     status: "模拟模式",
     description: "控制外呼任务使用模拟网关还是真实 Asterisk/线路网关。",
+    sensitive: false,
+    updatedBy: "系统",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "setting_telephony_queue",
+    groupKey: "telephony",
+    itemKey: "queue_enabled",
+    label: "外呼队列",
+    value: "false",
+    valueType: "boolean",
+    status: "未启用",
+    description: "启用后外呼任务进入队列，由 worker 按节奏执行。",
+    sensitive: false,
+    updatedBy: "系统",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "setting_telephony_trunk",
+    groupKey: "telephony",
+    itemKey: "trunk_name",
+    label: "线路中继名称",
+    value: "",
+    valueType: "text",
+    status: "待配置",
+    description: "真实线路接入后的主线路别名。",
+    sensitive: false,
+    updatedBy: "系统",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "setting_dm_gateway",
+    groupKey: "dm",
+    itemKey: "gateway_mode",
+    label: "私信发送模式",
+    value: "simulator",
+    valueType: "select:simulator,browser",
+    status: "模拟模式",
+    description: "控制平台私信用模拟器还是浏览器助手执行。",
     sensitive: false,
     updatedBy: "系统",
     createdAt: new Date().toISOString(),
@@ -805,15 +860,15 @@ const fallbackSystemSettings: SystemSetting[] = [
     updatedAt: new Date().toISOString(),
   },
   {
-    id: "setting_model_realtime",
-    groupKey: "model",
-    itemKey: "realtime_api_alias",
-    label: "实时语音模型",
-    value: "secret:openai_realtime_api",
-    valueType: "text",
-    status: "待配置",
-    description: "仅保存密钥别名，不在系统设置中保存原始 API Key。",
-    sensitive: true,
+    id: "setting_dm_queue",
+    groupKey: "dm",
+    itemKey: "queue_enabled",
+    label: "私信任务队列",
+    value: "false",
+    valueType: "boolean",
+    status: "未启用",
+    description: "启用后私信任务进入队列，便于限速和隔离执行。",
+    sensitive: false,
     updatedBy: "系统",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -827,6 +882,20 @@ const fallbackSystemSettings: SystemSetting[] = [
     valueType: "boolean",
     status: "已启用",
     description: "客户拒绝触达或进入勿扰名单后阻断后续任务。",
+    sensitive: false,
+    updatedBy: "系统",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "setting_compliance_refusal",
+    groupKey: "compliance",
+    itemKey: "refusal_stop_enabled",
+    label: "拒绝即停",
+    value: "true",
+    valueType: "boolean",
+    status: "已启用",
+    description: "外呼或私信明确拒绝后停止自动追触。",
     sensitive: false,
     updatedBy: "系统",
     createdAt: new Date().toISOString(),
@@ -860,6 +929,21 @@ function isClientVisibleSetting(setting: SystemSetting) {
 
 function isClientEnabledSetting(setting: SystemSetting) {
   return !["待配置", "未启用"].includes(setting.status);
+}
+
+function formatSettingValue(setting: SystemSetting, value = setting.value) {
+  if (setting.valueType === "boolean") return value === "true" ? "开启" : "关闭";
+  if (setting.groupKey === "telephony" && setting.itemKey === "gateway_mode") {
+    return value === "asterisk" ? "真实线路" : "模拟线路";
+  }
+  if (setting.groupKey === "dm" && setting.itemKey === "gateway_mode") {
+    return value === "browser" ? "浏览器助手" : "模拟模式";
+  }
+  return value || "待配置";
+}
+
+function formatSettingOption(setting: SystemSetting, option: string) {
+  return formatSettingValue({ ...setting, value: option }, option);
 }
 
 function formatDuration(seconds: number) {
@@ -1046,7 +1130,7 @@ function App() {
         const availableAccounts = accountsForPlatform.filter(
           (account) =>
             account.status === "可用" &&
-            ["模拟可用", "已登录"].includes(account.sessionStatus ?? "") &&
+            isDmLoginReadyStatus(account.sessionStatus) &&
             !["需验证", "风控暂停", "封禁", "异常"].includes(account.riskStatus ?? ""),
         );
         const totalRemaining = accountsForPlatform.reduce(
@@ -1422,15 +1506,12 @@ function App() {
           account.id === accountId
             ? {
                 ...account,
-                status: session.sessionStatus === "已登录" || session.sessionStatus === "模拟可用" ? account.status : "待登录",
+                status: isDmLoginReadyStatus(session.sessionStatus) ? account.status : "待登录",
                 sessionStatus: session.sessionStatus,
                 riskStatus: session.riskStatus,
                 browserProfileKey: session.profileKey,
                 browserProfilePath: session.profilePath,
-                lastError:
-                  session.sessionStatus === "已登录" || session.sessionStatus === "模拟可用"
-                    ? account.lastError
-                    : "独立登录窗口已打开，完成登录后点击检测",
+                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "独立登录窗口已打开，完成登录后点击检测",
               }
             : account,
         ),
@@ -1446,7 +1527,7 @@ function App() {
     try {
       const updated = await api.preflightDmAccount(accountId);
       setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
-      setDmLoginMessage(updated.sessionStatus === "已登录" || updated.sessionStatus === "模拟可用" ? "登录态检测通过" : "还未检测到登录态");
+      setDmLoginMessage(isDmLoginReadyStatus(updated.sessionStatus) ? "登录态检测通过，当前个人号可用于私信任务。" : "还未检测到登录态，请确认独立窗口已完成登录。");
     } catch (error) {
       setDmLoginMessage(error instanceof Error ? error.message : "登录检测失败");
     }
@@ -1954,8 +2035,8 @@ function App() {
     if (setting.valueType === "boolean") {
       return (
         <select value={settingDraft} onChange={(event) => setSettingDraft(event.target.value)}>
-          <option value="true">true</option>
-          <option value="false">false</option>
+          <option value="true">开启</option>
+          <option value="false">关闭</option>
         </select>
       );
     }
@@ -1967,7 +2048,7 @@ function App() {
             .split(",")
             .map((option) => (
               <option value={option} key={option}>
-                {option}
+                {formatSettingOption(setting, option)}
               </option>
             ))}
         </select>
@@ -1988,6 +2069,11 @@ function App() {
     };
     const activeGroup = tabToGroup[activeSettingsTab];
     const visibleSettings = activeGroup ? settingGroups[activeGroup] ?? [] : clientSettings;
+    const groupDescriptions: Record<string, string> = {
+      telephony: "外呼线路、队列和主备切换",
+      dm: "平台个人号发送模式和安全开关",
+      compliance: "勿扰、拒绝即停和触达保护",
+    };
     const clientSettingGroups = Object.entries(clientSettingGroupLabels).map(([groupKey, label]) => {
       const items = settingGroups[groupKey] ?? [];
       const enabled = items.filter(isClientEnabledSetting).length;
@@ -2013,10 +2099,10 @@ function App() {
         </section>
 
         <section className="metrics outbound-metrics">
-          <MetricCard icon={<Settings size={20} />} label="可见配置" value={clientSettings.length} detail={`${enabledSettings} 个已启用/受控`} tone="blue" />
+          <MetricCard icon={<Settings size={20} />} label="运营配置" value={clientSettings.length} detail={`${enabledSettings} 个已启用/受控`} tone="blue" />
           <MetricCard icon={<ShieldAlert size={20} />} label="需确认" value={warningSettings} detail="待配置或未启用" tone="amber" />
-          <MetricCard icon={<PhoneCall size={20} />} label="电话线路" value={settingGroups.telephony?.length ?? 0} detail="外呼相关配置" tone="green" />
-          <MetricCard icon={<MessageSquareText size={20} />} label="平台账号" value={settingGroups.dm?.length ?? 0} detail="私信相关配置" tone="rose" />
+          <MetricCard icon={<PhoneCall size={20} />} label="电话线路" value={settingGroups.telephony?.length ?? 0} detail="外呼线路和队列" tone="green" />
+          <MetricCard icon={<MessageSquareText size={20} />} label="平台账号" value={settingGroups.dm?.length ?? 0} detail="个人号和发送保护" tone="rose" />
         </section>
 
         {activeSettingsTab === "设置总览" && (
@@ -2045,8 +2131,8 @@ function App() {
                       <strong>{group.label}</strong>
                       <span>{group.enabled}/{group.total}</span>
                     </div>
-                    <p>{group.warning > 0 ? `${group.warning} 个配置需要确认。` : "配置状态正常。"}</p>
-                    <small>点击进入配置组</small>
+                    <p>{groupDescriptions[group.groupKey]}</p>
+                    <small>{group.warning > 0 ? `${group.warning} 个配置需要确认` : "配置状态正常"}</small>
                   </button>
                 ))}
               </div>
@@ -2070,8 +2156,8 @@ function App() {
                   <strong>{clientSettings.find((setting) => setting.itemKey === "dnc_enabled")?.value === "true" ? "已启用" : "未启用"}</strong>
                 </div>
                 <div className="wide">
-                  <span>前端边界</span>
-                  <strong>内部技术配置仅保留在后台，不在客户端展示。</strong>
+                  <span>模型和权限</span>
+                  <strong>后台维护</strong>
                 </div>
               </div>
             </article>
@@ -2082,8 +2168,8 @@ function App() {
           <article className="panel span-2">
             <div className="panel-title">
               <div>
-                <p>Config</p>
-                <h2>{activeSettingsTab === "设置总览" ? "全部配置项" : activeSettingsTab}</h2>
+                <p>Operations</p>
+                <h2>{activeSettingsTab === "设置总览" ? "运营配置项" : activeSettingsTab}</h2>
               </div>
               <Code2 size={22} />
             </div>
@@ -2100,7 +2186,7 @@ function App() {
                     <span>{setting.status}</span>
                   </div>
                   <p>{setting.description}</p>
-                  <small>{clientSettingGroupLabels[setting.groupKey]} · {setting.value}</small>
+                  <small>{clientSettingGroupLabels[setting.groupKey]} · 当前 {formatSettingValue(setting)}</small>
                 </button>
               ))}
             </div>
@@ -2109,8 +2195,8 @@ function App() {
           <article className="panel">
             <div className="panel-title">
               <div>
-                <p>Editor</p>
-                <h2>保存系统配置</h2>
+                <p>Change</p>
+                <h2>调整运营设置</h2>
               </div>
               <CheckCircle2 size={22} />
             </div>
@@ -2121,7 +2207,11 @@ function App() {
                   <input value={activeSystemSetting.label} readOnly />
                 </label>
                 <label>
-                  配置值
+                  当前值
+                  <input value={formatSettingValue(activeSystemSetting)} readOnly />
+                </label>
+                <label>
+                  调整为
                   {renderSettingControl(activeSystemSetting)}
                 </label>
                 <label>
@@ -2134,7 +2224,7 @@ function App() {
                 </label>
                 <button className="primary-button" type="submit">
                   <CheckCircle2 size={16} />
-                  保存配置
+                  保存设置
                 </button>
               </form>
             ) : (
@@ -3378,7 +3468,7 @@ function App() {
                     </div>
                     <div className="account-row-meta">
                       <span>{account.status}</span>
-                      <span>{account.sessionStatus ?? "未登录"}</span>
+                      <span>{displayDmLoginStatus(account.sessionStatus)}</span>
                       <span>{account.riskStatus ?? "正常"}</span>
                     </div>
                     <div className="account-row-actions">
@@ -3424,7 +3514,7 @@ function App() {
                     >
                       <span>{account.platform}</span>
                       <strong>{account.accountName}</strong>
-                      <small>{account.sessionStatus ?? "未登录"} · {account.riskStatus ?? "正常"}</small>
+                      <small>{displayDmLoginStatus(account.sessionStatus)} · {account.riskStatus ?? "正常"}</small>
                     </button>
                   ))}
                 </aside>
@@ -3439,11 +3529,15 @@ function App() {
                     <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
                       {dmLoginWindowUrl ? (
                         <div className="embedded-webview">
-                          <iframe
-                            referrerPolicy="no-referrer"
-                            src={dmLoginWindowUrl}
-                            title={`${activeLoginAccount?.platform ?? "平台"}隔离个人号登录页`}
-                          />
+                          <div className="external-login-placeholder">
+                            <ExternalLink size={38} />
+                            <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 登录页已在独立窗口打开` : "登录页已在独立窗口打开"}</strong>
+                            <p>
+                              抖音、美团、饿了么这类平台通常禁止嵌入到客户端预览框。请在弹出的隔离窗口完成个人号登录，
+                              然后回到这里点击“登录后检测”。
+                            </p>
+                            <span>{dmLoginStatusHint(activeLoginAccount?.sessionStatus)}</span>
+                          </div>
                           <div className="embedded-webview-note">
                             <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
                             <span>{dmLoginMessage || "独立登录窗口已打开"}</span>
@@ -3455,7 +3549,7 @@ function App() {
                             <KeyRound size={34} />
                           </div>
                           <strong>{activeLoginAccount ? activeLoginAccount.accountName : "暂无账号"}</strong>
-                          <span>{activeLoginAccount?.sessionStatus ?? "未登录"}</span>
+                          <span>{displayDmLoginStatus(activeLoginAccount?.sessionStatus)}</span>
                           <p>{dmLoginMessage || "点击登录后，在该个人号自己的隔离页面完成扫码或账号登录，再用它去私信商家。"}</p>
                         </>
                       )}
@@ -3467,7 +3561,7 @@ function App() {
                       </div>
                       <div>
                         <span>登录状态</span>
-                        <strong>{activeLoginAccount?.sessionStatus ?? "未登录"}</strong>
+                        <strong>{displayDmLoginStatus(activeLoginAccount?.sessionStatus)}</strong>
                       </div>
                       <div>
                         <span>今日额度</span>

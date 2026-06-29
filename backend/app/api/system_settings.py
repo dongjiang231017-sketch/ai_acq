@@ -24,6 +24,23 @@ GROUP_LABELS = {
     "compliance": "合规审计",
 }
 
+CLIENT_GROUP_LABELS = {
+    "telephony": "电话线路",
+    "dm": "平台账号",
+    "compliance": "合规保护",
+}
+
+CLIENT_VISIBLE_ITEMS = {
+    ("telephony", "gateway_mode"),
+    ("telephony", "queue_enabled"),
+    ("telephony", "trunk_name"),
+    ("dm", "gateway_mode"),
+    ("dm", "live_send_enabled"),
+    ("dm", "queue_enabled"),
+    ("compliance", "dnc_enabled"),
+    ("compliance", "refusal_stop_enabled"),
+}
+
 
 def _bool_value(value: bool) -> str:
     return "true" if value else "false"
@@ -162,17 +179,36 @@ def _default_settings() -> list[dict[str, object]]:
     ]
 
 
+def _is_valid_setting_value(value: str, value_type: str) -> bool:
+    if value_type == "boolean":
+        return value in {"true", "false"}
+    if value_type == "number":
+        return value.isdigit()
+    if value_type.startswith("select:"):
+        return value in set(value_type.replace("select:", "").split(","))
+    return True
+
+
 def _seed_settings(db: Session) -> None:
-    created = False
+    changed = False
     for item in _default_settings():
         exists = db.scalar(
             select(SystemSetting).where(SystemSetting.group_key == item["group_key"], SystemSetting.item_key == item["item_key"])
         )
         if exists:
+            for field in ("label", "value_type", "description", "sensitive"):
+                next_value = item.get(field)
+                if next_value is not None and getattr(exists, field) != next_value:
+                    setattr(exists, field, next_value)
+                    changed = True
+            if not _is_valid_setting_value(exists.value, str(item["value_type"])):
+                exists.value = str(item["value"])
+                exists.status = str(item["status"])
+                changed = True
             continue
         db.add(SystemSetting(**item))
-        created = True
-    if created:
+        changed = True
+    if changed:
         db.flush()
         db.add(
             SystemAuditLog(
@@ -190,12 +226,17 @@ def _is_enabled(setting: SystemSetting) -> bool:
     return setting.status in {"已启用", "已配置", "受控", "模拟模式"}
 
 
+def _is_client_visible(setting: SystemSetting) -> bool:
+    return (setting.group_key, setting.item_key) in CLIENT_VISIBLE_ITEMS
+
+
 @router.get("/overview", response_model=SettingsOverview)
 def settings_overview(db: Session = Depends(get_db)) -> dict[str, object]:
     _seed_settings(db)
-    items = list(db.scalars(select(SystemSetting)).all())
+    all_items = list(db.scalars(select(SystemSetting)).all())
+    items = [item for item in all_items if _is_client_visible(item)]
     groups = []
-    for group_key, label in GROUP_LABELS.items():
+    for group_key, label in CLIENT_GROUP_LABELS.items():
         group_items = [item for item in items if item.group_key == group_key]
         groups.append(
             {
@@ -220,7 +261,8 @@ def settings_overview(db: Session = Depends(get_db)) -> dict[str, object]:
 @router.get("/items", response_model=list[SystemSettingRead])
 def list_system_settings(db: Session = Depends(get_db)) -> list[SystemSetting]:
     _seed_settings(db)
-    return list(db.scalars(select(SystemSetting).order_by(SystemSetting.group_key, SystemSetting.item_key)).all())
+    items = list(db.scalars(select(SystemSetting).order_by(SystemSetting.group_key, SystemSetting.item_key)).all())
+    return [item for item in items if _is_client_visible(item)]
 
 
 @router.patch("/items/{setting_id}", response_model=SystemSettingRead)
@@ -228,6 +270,8 @@ def update_system_setting(setting_id: str, payload: SystemSettingUpdate, db: Ses
     _seed_settings(db)
     setting = db.get(SystemSetting, setting_id)
     if not setting:
+        raise HTTPException(status_code=404, detail="系统设置不存在")
+    if not _is_client_visible(setting):
         raise HTTPException(status_code=404, detail="系统设置不存在")
     before = "[masked]" if setting.sensitive else setting.value
     values = payload.model_dump(exclude={"actor"}, exclude_unset=True)
