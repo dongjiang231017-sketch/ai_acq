@@ -474,6 +474,22 @@ td {
   color: #33445f;
 }
 
+.clickable-row,
+.clickable-card {
+  cursor: pointer;
+}
+
+.clickable-row:hover td,
+.clickable-card:hover {
+  background: #f5f9ff;
+}
+
+.clickable-row.is-selected td,
+.clickable-card.is-selected {
+  background: #edf5ff;
+  box-shadow: inset 0 0 0 1px rgba(36, 115, 246, 0.18);
+}
+
 td strong,
 td small {
   display: block;

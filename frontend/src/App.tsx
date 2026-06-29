@@ -791,6 +791,9 @@ function App() {
   const [activeIntentTab, setActiveIntentTab] = useState<IntentTab>("客户池");
   const [activeLearningTab, setActiveLearningTab] = useState<LearningTab>("学习总览");
   const [activeVoiceTab, setActiveVoiceTab] = useState<VoiceTab>("声音档案");
+  const [selectedIntentCustomerId, setSelectedIntentCustomerId] = useState<string>(fallbackIntentCustomers[0]?.id ?? "");
+  const [selectedLearningSuggestionId, setSelectedLearningSuggestionId] = useState<string>(fallbackLearningSuggestions[0]?.id ?? "");
+  const [selectedVoiceProfileId, setSelectedVoiceProfileId] = useState<string>(fallbackVoiceProfiles[0]?.id ?? "");
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [selectedDmLeadIds, setSelectedDmLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [leadForm, setLeadForm] = useState({
@@ -889,10 +892,14 @@ function App() {
     dmLoginSession?.profileKey || activeLoginAccount?.browserProfileKey || `${activeLoginAccount?.platform ?? "platform"}-account`;
   const activeProfilePath =
     dmLoginSession?.profilePath || activeLoginAccount?.browserProfilePath || `.dm_browser_profiles/${activeProfileKey}`;
-  const activeIntentCustomer = intentCustomers[0];
+  const activeIntentCustomer =
+    intentCustomers.find((customer) => customer.id === selectedIntentCustomerId) ?? intentCustomers[0];
   const activeIntentCustomerEvents = activeIntentCustomer
     ? intentEvents.filter((event) => event.customerId === activeIntentCustomer.id)
     : [];
+  const activeLearningSuggestion =
+    learningSuggestions.find((suggestion) => suggestion.id === selectedLearningSuggestionId) ?? learningSuggestions[0];
+  const activeVoiceProfile = voiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? voiceProfiles[0];
 
   async function loadData() {
     setIsLoading(true);
@@ -968,15 +975,33 @@ function App() {
     if (results[13].status === "fulfilled") setDmMessages(results[13].value);
     if (results[14].status === "fulfilled") setDmPlatformConfigs(results[14].value);
     if (results[15].status === "fulfilled") setIntentOverview(results[15].value);
-    if (results[16].status === "fulfilled") setIntentCustomers(results[16].value);
+    if (results[16].status === "fulfilled") {
+      const nextCustomers = results[16].value;
+      setIntentCustomers(nextCustomers);
+      setSelectedIntentCustomerId((current) =>
+        nextCustomers.some((customer) => customer.id === current) ? current : nextCustomers[0]?.id ?? "",
+      );
+    }
     if (results[17].status === "fulfilled") setIntentEvents(results[17].value);
     if (results[18].status === "fulfilled") setFollowUpWorkOrders(results[18].value);
     if (results[19].status === "fulfilled") setLearningOverview(results[19].value);
-    if (results[20].status === "fulfilled") setLearningSuggestions(results[20].value);
+    if (results[20].status === "fulfilled") {
+      const nextSuggestions = results[20].value;
+      setLearningSuggestions(nextSuggestions);
+      setSelectedLearningSuggestionId((current) =>
+        nextSuggestions.some((suggestion) => suggestion.id === current) ? current : nextSuggestions[0]?.id ?? "",
+      );
+    }
     if (results[21].status === "fulfilled") setKnowledgeBase(results[21].value);
     if (results[22].status === "fulfilled") setLearningExperiments(results[22].value);
     if (results[23].status === "fulfilled") setVoiceOverview(results[23].value);
-    if (results[24].status === "fulfilled") setVoiceProfiles(results[24].value);
+    if (results[24].status === "fulfilled") {
+      const nextProfiles = results[24].value;
+      setVoiceProfiles(nextProfiles);
+      setSelectedVoiceProfileId((current) =>
+        nextProfiles.some((profile) => profile.id === current) ? current : nextProfiles[0]?.id ?? "",
+      );
+    }
     if (results[25].status === "fulfilled") setVoiceTrainingJobs(results[25].value);
     if (results[26].status === "fulfilled") setVoiceUsageRecords(results[26].value);
     setIsLoading(false);
@@ -1349,7 +1374,14 @@ function App() {
                       </tr>
                     )}
                     {intentCustomers.map((customer) => (
-                      <tr key={customer.id}>
+                      <tr
+                        className={customer.id === activeIntentCustomer?.id ? "clickable-row is-selected" : "clickable-row"}
+                        key={customer.id}
+                        onClick={() => {
+                          setSelectedIntentCustomerId(customer.id);
+                          setActiveIntentTab("客户详情");
+                        }}
+                      >
                         <td>
                           <strong>{customer.merchantName}</strong>
                           <small>
@@ -1389,7 +1421,14 @@ function App() {
                 {followUpWorkOrders.map((order) => {
                   const customer = intentCustomers.find((item) => item.id === order.customerId);
                   return (
-                    <article className="record-card" key={order.id}>
+                    <article
+                      className="record-card clickable-card"
+                      key={order.id}
+                      onClick={() => {
+                        if (customer) setSelectedIntentCustomerId(customer.id);
+                        setActiveIntentTab("客户详情");
+                      }}
+                    >
                       <div>
                         <strong>{order.title}</strong>
                         <span>{order.priority}</span>
@@ -1414,7 +1453,10 @@ function App() {
                   <p>Customer Detail</p>
                   <h2>{activeIntentCustomer?.merchantName ?? "客户详情"}</h2>
                 </div>
-                <Activity size={22} />
+                <button className="secondary-button" onClick={() => setActiveIntentTab("客户池")} type="button">
+                  <Users size={16} />
+                  返回客户池
+                </button>
               </div>
               {activeIntentCustomer ? (
                 <div className="profile-grid">
@@ -1545,7 +1587,11 @@ function App() {
               </div>
               <div className="record-grid">
                 {learningSuggestions.map((suggestion) => (
-                  <article className="record-card" key={suggestion.id}>
+                  <article
+                    className={suggestion.id === activeLearningSuggestion?.id ? "record-card clickable-card is-selected" : "record-card clickable-card"}
+                    key={suggestion.id}
+                    onClick={() => setSelectedLearningSuggestionId(suggestion.id)}
+                  >
                     <div>
                       <strong>{suggestion.title}</strong>
                       <span>{suggestion.status}</span>
@@ -1555,10 +1601,24 @@ function App() {
                       {suggestion.targetType} · 影响分 {suggestion.impactScore} · 来源 {suggestion.sourceType}
                     </small>
                     <div className="button-row card-actions">
-                      <button className="row-action is-primary" onClick={() => reviewLearningSuggestion(suggestion.id, "已通过")} type="button">
+                      <button
+                        className="row-action is-primary"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void reviewLearningSuggestion(suggestion.id, "已通过");
+                        }}
+                        type="button"
+                      >
                         通过
                       </button>
-                      <button className="row-action" onClick={() => reviewLearningSuggestion(suggestion.id, "已拒绝")} type="button">
+                      <button
+                        className="row-action"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void reviewLearningSuggestion(suggestion.id, "已拒绝");
+                        }}
+                        type="button"
+                      >
                         拒绝
                       </button>
                     </div>
@@ -1758,7 +1818,14 @@ function App() {
               </div>
               <div className="account-list">
                 {voiceProfiles.map((profile) => (
-                  <article className="account-row" key={profile.id}>
+                  <article
+                    className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
+                    key={profile.id}
+                    onClick={() => {
+                      setSelectedVoiceProfileId(profile.id);
+                      setActiveVoiceTab("授权审核");
+                    }}
+                  >
                     <div className="account-row-head">
                       <div>
                         <strong>{profile.name}</strong>
@@ -1790,7 +1857,11 @@ function App() {
               </div>
               <div className="record-grid">
                 {voiceProfiles.map((profile) => (
-                  <article className="record-card" key={profile.id}>
+                  <article
+                    className={profile.id === activeVoiceProfile?.id ? "record-card clickable-card is-selected" : "record-card clickable-card"}
+                    key={profile.id}
+                    onClick={() => setSelectedVoiceProfileId(profile.id)}
+                  >
                     <div>
                       <strong>{profile.name}</strong>
                       <span>{profile.authorizationStatus}</span>
@@ -1798,10 +1869,24 @@ function App() {
                     <p>{profile.consentMaterial || "等待授权材料。"}</p>
                     <small>{profile.riskNote}</small>
                     <div className="button-row card-actions">
-                      <button className="row-action is-primary" onClick={() => updateVoiceAuthorization(profile, "授权通过")} type="button">
+                      <button
+                        className="row-action is-primary"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void updateVoiceAuthorization(profile, "授权通过");
+                        }}
+                        type="button"
+                      >
                         通过授权
                       </button>
-                      <button className="row-action" onClick={() => updateVoiceAuthorization(profile, "授权撤回")} type="button">
+                      <button
+                        className="row-action"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void updateVoiceAuthorization(profile, "授权撤回");
+                        }}
+                        type="button"
+                      >
                         撤回授权
                       </button>
                     </div>
@@ -1824,7 +1909,11 @@ function App() {
               </div>
               <div className="account-list">
                 {voiceProfiles.map((profile) => (
-                  <article className="account-row" key={profile.id}>
+                  <article
+                    className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
+                    key={profile.id}
+                    onClick={() => setSelectedVoiceProfileId(profile.id)}
+                  >
                     <div className="account-row-head">
                       <div>
                         <strong>{profile.name}</strong>
@@ -1833,7 +1922,10 @@ function App() {
                       <button
                         className="row-action is-primary"
                         disabled={!["授权通过", "系统内置"].includes(profile.authorizationStatus)}
-                        onClick={() => createVoiceTrainingJob(profile)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void createVoiceTrainingJob(profile);
+                        }}
                         type="button"
                       >
                         创建训练
