@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.admin import setup_admin
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.errors import setup_exception_handlers
 
 
 def create_app() -> FastAPI:
@@ -18,6 +19,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router, prefix=settings.api_prefix)
+    setup_exception_handlers(app)
     setup_admin(app)
     return app
 

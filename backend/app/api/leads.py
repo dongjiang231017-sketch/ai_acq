@@ -23,9 +23,19 @@ def create_lead(payload: LeadCreate, db: Session = Depends(get_db)) -> MerchantL
         category=payload.category,
         phone=payload.phone,
         contact_name=payload.contact_name,
+        contact_title=payload.contact_title,
+        wechat_id=payload.wechat_id,
+        platform_homepage_url=payload.platform_homepage_url,
+        province=payload.province,
+        district=payload.district,
+        address=payload.address,
         source=payload.source,
-        intent_score=60,
-        status="待外呼",
+        intent_score=payload.intent_score,
+        status=payload.status,
+        follow_up_status=payload.follow_up_status,
+        remark=payload.remark,
+        owner_user_id=payload.owner_user_id,
+        created_by_user_id=payload.created_by_user_id,
     )
     db.add(lead)
     db.commit()
