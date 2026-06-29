@@ -3459,9 +3459,9 @@ function App() {
                 </div>
                 <div>
                   <strong>{isolatedDmAccountCount}</strong>
-                  <span>独立 Profile</span>
+                  <span>独立登录环境</span>
                 </div>
-                <p>每个个人号单独生成浏览器 Profile 和会话目录，登录态、风控状态、发送额度互不影响。</p>
+                <p>每个个人号独立登录、独立额度、独立风控状态，可按平台添加多个账号轮流触达。</p>
               </div>
               <div className="platform-account-strip" aria-label="按平台添加个人号">
                 {dmAccountPlatforms.map((platform) => (
@@ -3492,43 +3492,12 @@ function App() {
                   />
                 </label>
                 <label>
-                  个人号标识
+                  账号备注
                   <input
+                    placeholder="例如：南昌本地生活一组"
                     value={dmAccountForm.loginLabel}
                     onChange={(event) => setDmAccountForm({ ...dmAccountForm, loginLabel: event.target.value })}
                   />
-                </label>
-                <label>
-                  Profile 标识
-                  <input
-                    placeholder="不填则自动生成独立 Profile"
-                    value={dmAccountForm.browserProfileKey}
-                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, browserProfileKey: event.target.value })}
-                  />
-                </label>
-                <label>
-                  登录态
-                  <select
-                    value={dmAccountForm.sessionStatus}
-                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, sessionStatus: event.target.value })}
-                  >
-                    <option>未登录</option>
-                    <option>已登录</option>
-                    <option>模拟可用</option>
-                    <option>需扫码</option>
-                  </select>
-                </label>
-                <label>
-                  风险状态
-                  <select
-                    value={dmAccountForm.riskStatus}
-                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, riskStatus: event.target.value })}
-                  >
-                    <option>正常</option>
-                    <option>需验证</option>
-                    <option>风控暂停</option>
-                    <option>异常</option>
-                  </select>
                 </label>
                 <label>
                   日发送上限
@@ -3569,8 +3538,7 @@ function App() {
                     <div className="account-row-head">
                       <div>
                         <strong>{account.accountName}</strong>
-                        <small>{account.platform} · {accountLoginLabel(account)} · {account.browserProfileKey ?? "未生成Profile"}</small>
-                        <small>隔离目录：{account.browserProfilePath ?? `.dm_browser_profiles/${account.browserProfileKey ?? account.id}`}</small>
+                        <small>{account.platform} · {accountLoginLabel(account)} · 独立登录环境</small>
                         {account.lastError && <small className="error-text">{account.lastError}</small>}
                       </div>
                       <em>
@@ -3601,22 +3569,6 @@ function App() {
                   </article>
                 ))}
               </div>
-              <div className="platform-config-list">
-                <div className="section-caption">
-                  <strong>个人号网页登录入口</strong>
-                  <small>{dmPlatformConfigs.length} 个平台</small>
-                </div>
-                {dmPlatformConfigs.map((config) => (
-                  <article className="platform-config-row" key={config.id}>
-                    <strong>{config.platform}</strong>
-                    <span>{config.enabled ? "已启用" : "待配置"}</span>
-                    <small>{platformLoginEntryLabel(config)}</small>
-                    <button className="row-action" onClick={() => editDmPlatformConfig(config)} type="button">
-                      编辑
-                    </button>
-                  </article>
-                ))}
-              </div>
             </article>
 
             <article className="panel span-2 login-workbench" ref={loginWorkbenchRef}>
@@ -3640,7 +3592,7 @@ function App() {
                     >
                       <span>{account.platform}</span>
                       <strong>{account.accountName}</strong>
-                      <small>{account.browserProfileKey ?? "独立 Profile 待生成"}</small>
+                      <small>{account.sessionStatus ?? "未登录"} · {account.riskStatus ?? "正常"}</small>
                     </button>
                   ))}
                 </aside>
@@ -3649,7 +3601,7 @@ function App() {
                   <div className="embedded-browser-bar">
                     <span className="status-dot" />
                     <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录页` : "选择平台个人号"}</strong>
-                    <em>{activeLoginEntryText}</em>
+                    <em>系统内置登录入口</em>
                   </div>
                   <div className={`embedded-login-body ${dmLoginWindowUrl ? "is-open" : ""}`}>
                     <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
@@ -3682,12 +3634,14 @@ function App() {
                         <strong>{activeLoginAccount?.platform ?? "-"}</strong>
                       </div>
                       <div>
-                        <span>隔离 Profile</span>
-                        <strong>{activeProfileKey}</strong>
+                        <span>登录状态</span>
+                        <strong>{activeLoginAccount?.sessionStatus ?? "未登录"}</strong>
                       </div>
                       <div>
-                        <span>会话目录</span>
-                        <strong>{activeProfilePath}</strong>
+                        <span>今日额度</span>
+                        <strong>
+                          {activeLoginAccount ? `${activeLoginAccount.sentToday}/${activeLoginAccount.dailyLimit}` : "-"}
+                        </strong>
                       </div>
                       <div>
                         <span>风险状态</span>
@@ -3714,166 +3668,11 @@ function App() {
                       <RefreshCw size={16} />
                       登录后检测
                     </button>
-                    {activeLoginUrl && (
-                      <a className="secondary-link-button" href={activeLoginUrl} rel="noreferrer" target="_blank">
-                        <ExternalLink size={16} />
-                        备用打开
-                      </a>
-                    )}
                   </div>
                 </section>
               </div>
             </article>
 
-            <article className="panel span-2">
-              <div className="panel-title">
-                <div>
-                  <p>Adapter</p>
-                  <h2>真实平台适配器配置</h2>
-                </div>
-                <Code2 size={22} />
-              </div>
-              <form className="form-grid adapter-form" onSubmit={submitDmPlatformConfig}>
-                <label>
-                  平台
-                  <select
-                    value={dmPlatformForm.platform}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, platform: event.target.value })}
-                  >
-                    <option>美团</option>
-                    <option>饿了么</option>
-                    <option>抖音</option>
-                    <option>视频号</option>
-                  </select>
-                </label>
-                <label>
-                  启用状态
-                  <select
-                    value={dmPlatformForm.enabled ? "enabled" : "disabled"}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, enabled: event.target.value === "enabled" })}
-                  >
-                    <option value="disabled">待配置</option>
-                    <option value="enabled">已启用</option>
-                  </select>
-                </label>
-                <label>
-                  网页登录入口
-                  <input
-                    placeholder="默认使用系统内置入口，一般不用填"
-                    value={dmPlatformForm.homeUrl}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, homeUrl: event.target.value })}
-                  />
-                </label>
-                <label>
-                  收件箱 URL
-                  <input
-                    value={dmPlatformForm.inboxUrl}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, inboxUrl: event.target.value })}
-                  />
-                </label>
-                <label className="wide">
-                  商家搜索 URL 模板
-                  <input
-                    placeholder="支持 {商家名称}、{城市}、{品类}、{平台}"
-                    value={dmPlatformForm.merchantSearchUrl}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, merchantSearchUrl: event.target.value })}
-                  />
-                </label>
-                <label>
-                  登录态选择器
-                  <input
-                    value={dmPlatformForm.loginCheckSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, loginCheckSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  风控选择器
-                  <input
-                    value={dmPlatformForm.riskCheckSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, riskCheckSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  商家结果选择器
-                  <input
-                    value={dmPlatformForm.merchantLinkSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, merchantLinkSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  私信按钮选择器
-                  <input
-                    value={dmPlatformForm.messageButtonSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, messageButtonSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  输入框选择器
-                  <input
-                    value={dmPlatformForm.inputSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, inputSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  发送按钮选择器
-                  <input
-                    value={dmPlatformForm.sendButtonSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, sendButtonSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  发送成功选择器
-                  <input
-                    value={dmPlatformForm.sentSuccessSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, sentSuccessSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  未读消息选择器
-                  <input
-                    value={dmPlatformForm.unreadSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, unreadSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  会话条目选择器
-                  <input
-                    value={dmPlatformForm.conversationItemSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, conversationItemSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  会话标题选择器
-                  <input
-                    value={dmPlatformForm.conversationTitleSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, conversationTitleSelector: event.target.value })}
-                  />
-                </label>
-                <label>
-                  消息文本选择器
-                  <input
-                    value={dmPlatformForm.messageTextSelector}
-                    onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, messageTextSelector: event.target.value })}
-                  />
-                </label>
-                <div className="button-row wide">
-                  <button className="primary-button" type="submit">
-                    <CheckCircle2 size={16} />
-                    {editingDmPlatformConfigId ? "保存配置" : "新增配置"}
-                  </button>
-                  <button
-                    className="secondary-button"
-                    onClick={() => {
-                      setEditingDmPlatformConfigId(null);
-                      setDmPlatformForm(defaultDmPlatformForm);
-                    }}
-                    type="button"
-                  >
-                    重置
-                  </button>
-                </div>
-              </form>
-            </article>
           </section>
         )}
 
