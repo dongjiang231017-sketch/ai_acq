@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -172,6 +172,44 @@ class VoiceTrainingJob(Base):
 
     def __repr__(self) -> str:
         return f"{self.profile_id} {self.status}"
+
+
+class VoiceSample(Base):
+    __tablename__ = "voice_samples"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    profile_id: Mapped[str] = mapped_column(String(32), ForeignKey("voice_profiles.id"), index=True)
+    file_name: Mapped[str] = mapped_column(String(240))
+    content_type: Mapped[str] = mapped_column(String(120), default="audio/wav")
+    storage_path: Mapped[str] = mapped_column(Text, default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    quality_status: Mapped[str] = mapped_column(String(40), default="可用", index=True)
+    transcript: Mapped[str] = mapped_column(Text, default="")
+    uploaded_by: Mapped[str] = mapped_column(String(80), default="客户")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return self.file_name
+
+
+class VoiceCloneRecord(Base):
+    __tablename__ = "voice_clone_records"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    profile_id: Mapped[str] = mapped_column(String(32), ForeignKey("voice_profiles.id"), index=True)
+    training_job_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("voice_training_jobs.id"), nullable=True, index=True)
+    cloned_voice_name: Mapped[str] = mapped_column(String(120), default="")
+    engine: Mapped[str] = mapped_column(String(80), default="mock-voice-engine")
+    status: Mapped[str] = mapped_column(String(40), default="排队中", index=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    sample_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"{self.cloned_voice_name} {self.status}"
 
 
 class VoiceUsageRecord(Base):

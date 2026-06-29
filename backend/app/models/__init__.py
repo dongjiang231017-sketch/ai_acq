@@ -6,7 +6,9 @@ from app.models.growth import (
     KnowledgeBaseItem,
     LearningExperiment,
     LearningSuggestion,
+    VoiceCloneRecord,
     VoiceProfile,
+    VoiceSample,
     VoiceTrainingJob,
     VoiceUsageRecord,
 )
@@ -25,7 +27,9 @@ __all__ = [
     "ReportExport",
     "SystemAuditLog",
     "SystemSetting",
+    "VoiceCloneRecord",
     "VoiceProfile",
+    "VoiceSample",
     "VoiceTrainingJob",
     "VoiceUsageRecord",
 ]

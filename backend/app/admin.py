@@ -14,7 +14,9 @@ from app.models.growth import (
     KnowledgeBaseItem,
     LearningExperiment,
     LearningSuggestion,
+    VoiceCloneRecord,
     VoiceProfile,
+    VoiceSample,
     VoiceTrainingJob,
     VoiceUsageRecord,
 )
@@ -620,6 +622,65 @@ class VoiceTrainingJobAdmin(ModelView, model=VoiceTrainingJob):
     }
 
 
+class VoiceSampleAdmin(ModelView, model=VoiceSample):
+    name = "声音样本"
+    name_plural = "声音样本"
+    icon = "fa-solid fa-file-audio"
+
+    column_list = [
+        VoiceSample.profile_id,
+        VoiceSample.file_name,
+        VoiceSample.content_type,
+        VoiceSample.size_bytes,
+        VoiceSample.duration_seconds,
+        VoiceSample.quality_status,
+        VoiceSample.created_at,
+    ]
+    column_searchable_list = [VoiceSample.file_name, VoiceSample.quality_status, VoiceSample.uploaded_by]
+    column_sortable_list = [VoiceSample.created_at, VoiceSample.size_bytes, VoiceSample.duration_seconds]
+    column_labels = {
+        VoiceSample.profile_id: "声音档案ID",
+        VoiceSample.file_name: "文件名",
+        VoiceSample.content_type: "文件类型",
+        VoiceSample.storage_path: "本地存储路径",
+        VoiceSample.size_bytes: "文件大小",
+        VoiceSample.duration_seconds: "样本时长",
+        VoiceSample.quality_status: "质检状态",
+        VoiceSample.transcript: "转写文本",
+        VoiceSample.uploaded_by: "上传人",
+        VoiceSample.created_at: "上传时间",
+    }
+
+
+class VoiceCloneRecordAdmin(ModelView, model=VoiceCloneRecord):
+    name = "克隆记录"
+    name_plural = "克隆语音记录"
+    icon = "fa-solid fa-record-vinyl"
+
+    column_list = [
+        VoiceCloneRecord.cloned_voice_name,
+        VoiceCloneRecord.status,
+        VoiceCloneRecord.engine,
+        VoiceCloneRecord.sample_count,
+        VoiceCloneRecord.sample_minutes,
+        VoiceCloneRecord.created_at,
+    ]
+    column_searchable_list = [VoiceCloneRecord.cloned_voice_name, VoiceCloneRecord.status, VoiceCloneRecord.engine]
+    column_sortable_list = [VoiceCloneRecord.created_at, VoiceCloneRecord.sample_count]
+    column_labels = {
+        VoiceCloneRecord.profile_id: "声音档案ID",
+        VoiceCloneRecord.training_job_id: "训练任务ID",
+        VoiceCloneRecord.cloned_voice_name: "克隆音色",
+        VoiceCloneRecord.engine: "克隆引擎",
+        VoiceCloneRecord.status: "状态",
+        VoiceCloneRecord.sample_count: "样本数",
+        VoiceCloneRecord.sample_minutes: "样本分钟",
+        VoiceCloneRecord.result: "结果",
+        VoiceCloneRecord.created_at: "创建时间",
+        VoiceCloneRecord.completed_at: "完成时间",
+    }
+
+
 class VoiceUsageRecordAdmin(ModelView, model=VoiceUsageRecord):
     name = "声音使用记录"
     name_plural = "声音使用记录"
@@ -765,6 +826,8 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(LearningExperimentAdmin)
     admin.add_view(VoiceProfileAdmin)
     admin.add_view(VoiceTrainingJobAdmin)
+    admin.add_view(VoiceSampleAdmin)
+    admin.add_view(VoiceCloneRecordAdmin)
     admin.add_view(VoiceUsageRecordAdmin)
     admin.add_view(ReportExportAdmin)
     admin.add_view(SystemSettingAdmin)

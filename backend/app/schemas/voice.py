@@ -84,6 +84,37 @@ class VoiceTrainingJobRead(VoiceTrainingJobCreate):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
+class VoiceSampleRead(BaseModel):
+    id: str
+    profile_id: Annotated[str, Field(alias="profileId")]
+    file_name: Annotated[str, Field(alias="fileName")]
+    content_type: Annotated[str, Field(alias="contentType")]
+    size_bytes: Annotated[int, Field(alias="sizeBytes")]
+    duration_seconds: Annotated[int, Field(alias="durationSeconds")]
+    quality_status: Annotated[str, Field(alias="qualityStatus")]
+    transcript: str
+    uploaded_by: Annotated[str, Field(alias="uploadedBy")]
+    created_at: Annotated[datetime, Field(alias="createdAt")]
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class VoiceCloneRecordRead(BaseModel):
+    id: str
+    profile_id: Annotated[str, Field(alias="profileId")]
+    training_job_id: Annotated[str | None, Field(alias="trainingJobId")]
+    cloned_voice_name: Annotated[str, Field(alias="clonedVoiceName")]
+    engine: str
+    status: str
+    sample_count: Annotated[int, Field(alias="sampleCount")]
+    sample_minutes: Annotated[int, Field(alias="sampleMinutes")]
+    result: str
+    created_at: Annotated[datetime, Field(alias="createdAt")]
+    completed_at: Annotated[datetime | None, Field(alias="completedAt")]
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
 class VoiceUsageRecordRead(BaseModel):
     id: str
     profile_id: Annotated[str | None, Field(alias="profileId")]

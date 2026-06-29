@@ -390,6 +390,33 @@ export type VoiceTrainingJob = {
   finishedAt?: string | null;
 };
 
+export type VoiceSample = {
+  id: string;
+  profileId: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  durationSeconds: number;
+  qualityStatus: string;
+  transcript: string;
+  uploadedBy: string;
+  createdAt: string;
+};
+
+export type VoiceCloneRecord = {
+  id: string;
+  profileId: string;
+  trainingJobId?: string | null;
+  clonedVoiceName: string;
+  engine: string;
+  status: string;
+  sampleCount: number;
+  sampleMinutes: number;
+  result: string;
+  createdAt: string;
+  completedAt?: string | null;
+};
+
 export type VoiceUsageRecord = {
   id: string;
   profileId?: string | null;
@@ -519,9 +546,10 @@ export type SystemAuditLog = {
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const isFormData = options?.body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...options?.headers,
     },
     ...options,
@@ -691,12 +719,25 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(profile),
     }),
+  voiceSamples: () => request<VoiceSample[]>("/voice/samples"),
+  uploadVoiceSample: (profileId: string, file: File, payload?: { uploadedBy?: string; durationSeconds?: number; transcript?: string }) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("uploaded_by", payload?.uploadedBy || "客户");
+    form.append("duration_seconds", String(payload?.durationSeconds ?? 0));
+    form.append("transcript", payload?.transcript || "");
+    return request<VoiceSample>(`/voice/profiles/${profileId}/samples`, {
+      method: "POST",
+      body: form,
+    });
+  },
   voiceTrainingJobs: () => request<VoiceTrainingJob[]>("/voice/training-jobs"),
   createVoiceTrainingJob: (profileId: string, job: { engine: string; sampleMinutes: number; message?: string }) =>
     request<VoiceTrainingJob>(`/voice/profiles/${profileId}/training-jobs`, {
       method: "POST",
       body: JSON.stringify(job),
     }),
+  voiceCloneRecords: () => request<VoiceCloneRecord[]>("/voice/clone-records"),
   voiceUsageRecords: () => request<VoiceUsageRecord[]>("/voice/usage-records"),
   reportsOverview: () => request<ReportOverview>("/reports/overview"),
   reportChannels: () => request<ChannelReport[]>("/reports/channels"),

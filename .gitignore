@@ -19,6 +19,8 @@ __pycache__/
 htmlcov/
 backend/.venv/
 backend/local.db
+.voice_samples/
+backend/.voice_samples/
 .dm_browser_profiles/
 backend/.dm_browser_profiles/
 

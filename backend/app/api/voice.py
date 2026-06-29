@@ -1,16 +1,21 @@
 from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.session import get_db
-from app.models.growth import VoiceProfile, VoiceTrainingJob, VoiceUsageRecord
+from app.models.growth import VoiceCloneRecord, VoiceProfile, VoiceSample, VoiceTrainingJob, VoiceUsageRecord
 from app.schemas.voice import (
+    VoiceCloneRecordRead,
     VoiceOverview,
     VoiceProfileCreate,
     VoiceProfileRead,
     VoiceProfileUpdate,
+    VoiceSampleRead,
     SystemVoiceRead,
     VoiceTrainingJobCreate,
     VoiceTrainingJobRead,
@@ -56,6 +61,7 @@ SYSTEM_VOICES = [
 ]
 
 DEFAULT_SYSTEM_VOICE = next(voice for voice in SYSTEM_VOICES if voice["isDefault"])
+ALLOWED_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".webm"}
 
 
 def _is_system_profile(profile: VoiceProfile) -> bool:
@@ -64,6 +70,41 @@ def _is_system_profile(profile: VoiceProfile) -> bool:
 
 def _clone_profile_filter():
     return and_(VoiceProfile.authorization_status != "系统内置", VoiceProfile.owner_name != "系统")
+
+
+def _voice_sample_root() -> Path:
+    root = Path(settings.voice_sample_storage_root).expanduser()
+    if not root.is_absolute():
+        root = (Path.cwd() / root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_audio_filename(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_AUDIO_SUFFIXES:
+        raise HTTPException(status_code=400, detail="请上传 wav、mp3、m4a、aac、ogg、flac 或 webm 录音文件")
+    return f"{uuid4().hex}{suffix}"
+
+
+def _ensure_clone_profile(db: Session, profile_id: str) -> VoiceProfile:
+    profile = db.get(VoiceProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="声音档案不存在")
+    if _is_system_profile(profile):
+        raise HTTPException(status_code=400, detail="系统内置音色不通过声音档案维护")
+    return profile
+
+
+def _usable_sample_count(db: Session, profile_id: str) -> int:
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(VoiceSample)
+            .where(VoiceSample.profile_id == profile_id, VoiceSample.quality_status == "可用")
+        )
+        or 0
+    )
 
 
 def _seed_voice_assets(db: Session) -> None:
@@ -115,8 +156,8 @@ def voice_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     jobs = (
         db.scalar(
             select(func.count())
-            .select_from(VoiceTrainingJob)
-            .join(VoiceProfile, VoiceTrainingJob.profile_id == VoiceProfile.id)
+            .select_from(VoiceCloneRecord)
+            .join(VoiceProfile, VoiceCloneRecord.profile_id == VoiceProfile.id)
             .where(_clone_profile_filter())
         )
         or 0
@@ -161,11 +202,7 @@ def create_voice_profile(payload: VoiceProfileCreate, db: Session = Depends(get_
 
 @router.patch("/profiles/{profile_id}", response_model=VoiceProfileRead)
 def update_voice_profile(profile_id: str, payload: VoiceProfileUpdate, db: Session = Depends(get_db)) -> VoiceProfile:
-    profile = db.get(VoiceProfile, profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="声音档案不存在")
-    if _is_system_profile(profile):
-        raise HTTPException(status_code=400, detail="系统内置音色不通过声音档案维护")
+    profile = _ensure_clone_profile(db, profile_id)
     for field, value in payload.model_dump(exclude_unset=True, by_alias=False).items():
         setattr(profile, field, value)
     if profile.authorization_status in {"授权撤回", "已拒绝"}:
@@ -176,6 +213,81 @@ def update_voice_profile(profile_id: str, payload: VoiceProfileUpdate, db: Sessi
     return profile
 
 
+@router.get("/samples", response_model=list[VoiceSampleRead])
+def list_voice_samples(db: Session = Depends(get_db)) -> list[VoiceSample]:
+    _seed_voice_assets(db)
+    return list(
+        db.scalars(
+            select(VoiceSample)
+            .join(VoiceProfile, VoiceSample.profile_id == VoiceProfile.id)
+            .where(_clone_profile_filter())
+            .order_by(VoiceSample.created_at.desc())
+        ).all()
+    )
+
+
+@router.get("/profiles/{profile_id}/samples", response_model=list[VoiceSampleRead])
+def list_profile_voice_samples(profile_id: str, db: Session = Depends(get_db)) -> list[VoiceSample]:
+    _ensure_clone_profile(db, profile_id)
+    return list(
+        db.scalars(select(VoiceSample).where(VoiceSample.profile_id == profile_id).order_by(VoiceSample.created_at.desc())).all()
+    )
+
+
+@router.post("/profiles/{profile_id}/samples", response_model=VoiceSampleRead)
+def upload_voice_sample(
+    profile_id: str,
+    file: UploadFile = File(...),
+    uploaded_by: str = Form("客户"),
+    duration_seconds: int = Form(0),
+    transcript: str = Form(""),
+    db: Session = Depends(get_db),
+) -> VoiceSample:
+    profile = _ensure_clone_profile(db, profile_id)
+    safe_filename = _safe_audio_filename(file.filename or "voice-sample.wav")
+    profile_dir = _voice_sample_root() / profile.id
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    target = profile_dir / safe_filename
+
+    size = 0
+    with target.open("wb") as output:
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            output.write(chunk)
+
+    if size <= 0:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="录音文件为空，请重新上传")
+
+    quality_status = "可用" if (file.content_type or "").startswith("audio/") else "待复核"
+    sample = VoiceSample(
+        profile_id=profile.id,
+        file_name=file.filename or safe_filename,
+        content_type=file.content_type or "audio/*",
+        storage_path=str(target),
+        size_bytes=size,
+        duration_seconds=max(duration_seconds, 0),
+        quality_status=quality_status,
+        transcript=transcript,
+        uploaded_by=uploaded_by or profile.owner_name or "客户",
+    )
+    db.add(sample)
+    db.flush()
+
+    profile.sample_count = _usable_sample_count(db, profile.id)
+    if profile.authorization_status == "授权通过" and profile.status not in {"训练中", "可用"}:
+        profile.status = "可训练"
+    elif profile.authorization_status != "授权通过":
+        profile.status = "待授权"
+    profile.consent_material = profile.consent_material or "已上传授权录音样本，等待补充授权说明。"
+    profile.risk_note = f"已上传 {profile.sample_count} 条可用录音样本；训练前仍需授权通过。"
+    profile.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(sample)
+    return sample
+
+
 @router.get("/training-jobs", response_model=list[VoiceTrainingJobRead])
 def list_training_jobs(db: Session = Depends(get_db)) -> list[VoiceTrainingJob]:
     _seed_voice_assets(db)
@@ -183,6 +295,7 @@ def list_training_jobs(db: Session = Depends(get_db)) -> list[VoiceTrainingJob]:
         db.scalars(
             select(VoiceTrainingJob)
             .join(VoiceProfile, VoiceTrainingJob.profile_id == VoiceProfile.id)
+            .join(VoiceCloneRecord, VoiceCloneRecord.training_job_id == VoiceTrainingJob.id)
             .where(_clone_profile_filter())
             .order_by(VoiceTrainingJob.created_at.desc())
         ).all()
@@ -191,29 +304,64 @@ def list_training_jobs(db: Session = Depends(get_db)) -> list[VoiceTrainingJob]:
 
 @router.post("/profiles/{profile_id}/training-jobs", response_model=VoiceTrainingJobRead)
 def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Session = Depends(get_db)) -> VoiceTrainingJob:
-    profile = db.get(VoiceProfile, profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="声音档案不存在")
-    if _is_system_profile(profile):
-        raise HTTPException(status_code=400, detail="系统内置音色无需克隆训练")
+    profile = _ensure_clone_profile(db, profile_id)
     if profile.authorization_status != "授权通过":
         raise HTTPException(status_code=400, detail="声音档案未授权，不能进入训练")
+    usable_samples = _usable_sample_count(db, profile.id)
+    if usable_samples <= 0:
+        raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再创建克隆训练")
+    sample_seconds = (
+        db.scalar(
+            select(func.coalesce(func.sum(VoiceSample.duration_seconds), 0)).where(
+                VoiceSample.profile_id == profile.id, VoiceSample.quality_status == "可用"
+            )
+        )
+        or 0
+    )
+    sample_minutes = max(payload.sample_minutes, max(1, int(sample_seconds // 60) if sample_seconds else usable_samples))
     job = VoiceTrainingJob(
         profile_id=profile.id,
         status="排队中",
         progress=0,
         engine=payload.engine,
-        sample_minutes=payload.sample_minutes,
-        message=payload.message or "训练任务已创建；真实克隆服务仍需单独接入安全门。",
+        sample_minutes=sample_minutes,
+        message=payload.message or "克隆训练任务已创建；真实克隆服务接入前保留人工复核安全门。",
         started_at=None,
         finished_at=None,
     )
     db.add(job)
-    if profile.authorization_status == "授权通过":
-        profile.status = "训练中"
+    db.flush()
+    db.add(
+        VoiceCloneRecord(
+            profile_id=profile.id,
+            training_job_id=job.id,
+            cloned_voice_name=profile.name,
+            engine=job.engine,
+            status=job.status,
+            sample_count=usable_samples,
+            sample_minutes=job.sample_minutes,
+            result=job.message,
+        )
+    )
+    profile.status = "训练中"
+    profile.sample_count = usable_samples
+    profile.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(job)
     return job
+
+
+@router.get("/clone-records", response_model=list[VoiceCloneRecordRead])
+def list_voice_clone_records(db: Session = Depends(get_db)) -> list[VoiceCloneRecord]:
+    _seed_voice_assets(db)
+    return list(
+        db.scalars(
+            select(VoiceCloneRecord)
+            .join(VoiceProfile, VoiceCloneRecord.profile_id == VoiceProfile.id)
+            .where(_clone_profile_filter())
+            .order_by(VoiceCloneRecord.created_at.desc())
+        ).all()
+    )
 
 
 @router.get("/usage-records", response_model=list[VoiceUsageRecordRead])

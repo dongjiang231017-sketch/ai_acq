@@ -49,8 +49,10 @@ import {
   ReportOverview,
   SalesPerformanceReport,
   SystemVoice,
+  VoiceCloneRecord,
   VoiceOverview,
   VoiceProfile,
+  VoiceSample,
   VoiceTrainingJob,
   VoiceUsageRecord,
   SettingsOverview,
@@ -676,6 +678,10 @@ const fallbackVoiceProfiles: VoiceProfile[] = [
 
 const fallbackVoiceTrainingJobs: VoiceTrainingJob[] = [];
 
+const fallbackVoiceSamples: VoiceSample[] = [];
+
+const fallbackVoiceCloneRecords: VoiceCloneRecord[] = [];
+
 const fallbackVoiceUsageRecords: VoiceUsageRecord[] = [
   {
     id: "voice_usage_1",
@@ -980,6 +986,8 @@ function App() {
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>(fallbackSystemVoices);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>(fallbackVoiceProfiles);
   const [voiceTrainingJobs, setVoiceTrainingJobs] = useState<VoiceTrainingJob[]>(fallbackVoiceTrainingJobs);
+  const [voiceSamples, setVoiceSamples] = useState<VoiceSample[]>(fallbackVoiceSamples);
+  const [voiceCloneRecords, setVoiceCloneRecords] = useState<VoiceCloneRecord[]>(fallbackVoiceCloneRecords);
   const [voiceUsageRecords, setVoiceUsageRecords] = useState<VoiceUsageRecord[]>(fallbackVoiceUsageRecords);
   const [reportOverview, setReportOverview] = useState<ReportOverview>(fallbackReportOverview);
   const [channelReports, setChannelReports] = useState<ChannelReport[]>(fallbackChannelReports);
@@ -1068,6 +1076,9 @@ function App() {
     consentMaterial: "",
     riskNote: "未授权前不可训练、不可被任务选择。",
   });
+  const [voiceSampleFile, setVoiceSampleFile] = useState<File | null>(null);
+  const [voiceSampleMessage, setVoiceSampleMessage] = useState("");
+  const [isUploadingVoiceSample, setIsUploadingVoiceSample] = useState(false);
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
 
   const active = useMemo(
@@ -1163,7 +1174,18 @@ function App() {
     () => voiceTrainingJobs.filter((job) => customerVoiceProfileIds.has(job.profileId)),
     [customerVoiceProfileIds, voiceTrainingJobs],
   );
+  const customerVoiceSamples = useMemo(
+    () => voiceSamples.filter((sample) => customerVoiceProfileIds.has(sample.profileId)),
+    [customerVoiceProfileIds, voiceSamples],
+  );
+  const customerVoiceCloneRecords = useMemo(
+    () => voiceCloneRecords.filter((record) => customerVoiceProfileIds.has(record.profileId)),
+    [customerVoiceProfileIds, voiceCloneRecords],
+  );
   const activeVoiceProfile = customerVoiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? customerVoiceProfiles[0];
+  const activeVoiceProfileSamples = activeVoiceProfile
+    ? customerVoiceSamples.filter((sample) => sample.profileId === activeVoiceProfile.id)
+    : [];
   const activeChannelReport = channelReports.find((channel) => channel.id === selectedChannelReportId) ?? channelReports[0];
   const activeSalesReport = salesReports.find((report) => report.id === selectedSalesReportId) ?? salesReports[0];
   const activeReportExport = reportExports.find((exportJob) => exportJob.id === selectedReportExportId) ?? reportExports[0];
@@ -1202,6 +1224,8 @@ function App() {
       api.systemVoices(),
       api.voiceProfiles(),
       api.voiceTrainingJobs(),
+      api.voiceSamples(),
+      api.voiceCloneRecords(),
       api.voiceUsageRecords(),
       api.reportsOverview(),
       api.reportChannels(),
@@ -1286,30 +1310,32 @@ function App() {
       );
     }
     if (results[22].status === "fulfilled") setVoiceTrainingJobs(results[22].value);
-    if (results[23].status === "fulfilled") setVoiceUsageRecords(results[23].value);
-    if (results[24].status === "fulfilled") setReportOverview(results[24].value);
-    if (results[25].status === "fulfilled") {
-      const nextChannels = results[25].value;
+    if (results[23].status === "fulfilled") setVoiceSamples(results[23].value);
+    if (results[24].status === "fulfilled") setVoiceCloneRecords(results[24].value);
+    if (results[25].status === "fulfilled") setVoiceUsageRecords(results[25].value);
+    if (results[26].status === "fulfilled") setReportOverview(results[26].value);
+    if (results[27].status === "fulfilled") {
+      const nextChannels = results[27].value;
       setChannelReports(nextChannels);
       setSelectedChannelReportId((current) =>
         nextChannels.some((channel) => channel.id === current) ? current : nextChannels[0]?.id ?? "",
       );
     }
-    if (results[26].status === "fulfilled") {
-      const nextSalesReports = results[26].value;
+    if (results[28].status === "fulfilled") {
+      const nextSalesReports = results[28].value;
       setSalesReports(nextSalesReports);
       setSelectedSalesReportId((current) =>
         nextSalesReports.some((report) => report.id === current) ? current : nextSalesReports[0]?.id ?? "",
       );
     }
-    if (results[27].status === "fulfilled") {
-      const nextExports = results[27].value;
+    if (results[29].status === "fulfilled") {
+      const nextExports = results[29].value;
       setReportExports(nextExports);
       setSelectedReportExportId((current) => (nextExports.some((job) => job.id === current) ? current : nextExports[0]?.id ?? ""));
     }
-    if (results[28].status === "fulfilled") setSettingsOverview(results[28].value);
-    if (results[29].status === "fulfilled") {
-      const nextSettings = results[29].value;
+    if (results[30].status === "fulfilled") setSettingsOverview(results[30].value);
+    if (results[31].status === "fulfilled") {
+      const nextSettings = results[31].value;
       setSystemSettings(nextSettings);
       setSelectedSystemSettingId((current) => {
         const nextId = nextSettings.some((setting) => setting.id === current) ? current : nextSettings[0]?.id ?? "";
@@ -1598,30 +1624,76 @@ function App() {
     return activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "系统内置音色";
   }
 
+  function voiceSamplesForProfile(profileId: string) {
+    return customerVoiceSamples.filter((sample) => sample.profileId === profileId);
+  }
+
+  function usableVoiceSampleCount(profileId: string) {
+    return voiceSamplesForProfile(profileId).filter((sample) => sample.qualityStatus === "可用").length;
+  }
+
+  function voiceTrainingBlockReason(profile: VoiceProfile) {
+    if (profile.authorizationStatus !== "授权通过") return "需先通过授权审核";
+    if (usableVoiceSampleCount(profile.id) <= 0) return "需先上传可用录音样本";
+    return "";
+  }
+
+  function formatBytes(bytes: number) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
+    return `${Math.round(bytes / 1024 / 102.4) / 10} MB`;
+  }
+
   async function submitVoiceProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!voiceProfileForm.name.trim() || !voiceProfileForm.ownerName.trim()) return;
+    if (!voiceProfileForm.name.trim() || !voiceProfileForm.ownerName.trim()) {
+      setVoiceSampleMessage("请填写档案名称和授权人。");
+      return;
+    }
+    if (!voiceSampleFile) {
+      setVoiceSampleMessage("请先上传客户或员工本人授权录音样本。");
+      return;
+    }
 
-    const created = await api.createVoiceProfile({
-      ...voiceProfileForm,
-      status: "待授权",
-      sampleCount: Number(voiceProfileForm.sampleCount),
-      fallbackVoice: voiceProfileForm.fallbackVoice || activeSystemVoice?.name || defaultSystemVoice?.name || "标准AI音色",
-    });
-    setVoiceProfiles((current) => [created, ...current]);
-    setSelectedVoiceProfileId(created.id);
-    const overviewData = await api.voiceOverview();
-    setVoiceOverview(overviewData);
-    setVoiceProfileForm({
-      name: "",
-      ownerName: "",
-      scenario: "外呼",
-      authorizationStatus: "待提交",
-      sampleCount: 0,
-      fallbackVoice: activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "标准AI音色",
-      consentMaterial: "",
-      riskNote: "未授权前不可训练、不可被任务选择。",
-    });
+    setIsUploadingVoiceSample(true);
+    try {
+      const created = await api.createVoiceProfile({
+        ...voiceProfileForm,
+        status: "待授权",
+        sampleCount: 0,
+        fallbackVoice: voiceProfileForm.fallbackVoice || activeSystemVoice?.name || defaultSystemVoice?.name || "标准AI音色",
+      });
+      await api.uploadVoiceSample(created.id, voiceSampleFile, {
+        uploadedBy: voiceProfileForm.ownerName,
+        transcript: voiceProfileForm.consentMaterial,
+      });
+      const [overviewData, profileData, sampleData] = await Promise.all([
+        api.voiceOverview(),
+        api.voiceProfiles(),
+        api.voiceSamples(),
+      ]);
+      setVoiceProfiles(profileData);
+      setVoiceSamples(sampleData);
+      setVoiceOverview(overviewData);
+      setSelectedVoiceProfileId(created.id);
+      setActiveVoiceTab("授权审核");
+      setVoiceSampleFile(null);
+      setVoiceSampleMessage("克隆档案已创建，录音样本已上传，等待授权审核。");
+      setVoiceProfileForm({
+        name: "",
+        ownerName: "",
+        scenario: "外呼",
+        authorizationStatus: "待提交",
+        sampleCount: 0,
+        fallbackVoice: activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "标准AI音色",
+        consentMaterial: "",
+        riskNote: "未授权前不可训练、不可被任务选择。",
+      });
+    } catch (error) {
+      setVoiceSampleMessage(error instanceof Error ? error.message : "新增克隆档案失败");
+    } finally {
+      setIsUploadingVoiceSample(false);
+    }
   }
 
   async function updateVoiceAuthorization(profile: VoiceProfile, authorizationStatus: string) {
@@ -1635,16 +1707,60 @@ function App() {
     setVoiceOverview(overviewData);
   }
 
+  async function uploadSampleForActiveProfile() {
+    if (!activeVoiceProfile) return;
+    if (!voiceSampleFile) {
+      setVoiceSampleMessage("请先选择录音文件。");
+      return;
+    }
+    setIsUploadingVoiceSample(true);
+    try {
+      await api.uploadVoiceSample(activeVoiceProfile.id, voiceSampleFile, {
+        uploadedBy: activeVoiceProfile.ownerName,
+      });
+      const [overviewData, profileData, sampleData] = await Promise.all([
+        api.voiceOverview(),
+        api.voiceProfiles(),
+        api.voiceSamples(),
+      ]);
+      setVoiceOverview(overviewData);
+      setVoiceProfiles(profileData);
+      setVoiceSamples(sampleData);
+      setVoiceSampleFile(null);
+      setVoiceSampleMessage("录音样本已上传，可继续授权审核或创建训练。");
+    } catch (error) {
+      setVoiceSampleMessage(error instanceof Error ? error.message : "上传录音样本失败");
+    } finally {
+      setIsUploadingVoiceSample(false);
+    }
+  }
+
   async function createVoiceTrainingJob(profile: VoiceProfile) {
-    const job = await api.createVoiceTrainingJob(profile.id, {
-      engine: "mock-voice-engine",
-      sampleMinutes: Math.max(profile.sampleCount, 1),
-      message: "训练任务已创建；真实克隆服务保持后置安全门。",
-    });
-    setVoiceTrainingJobs((current) => [job, ...current]);
-    const [overviewData, profileData] = await Promise.all([api.voiceOverview(), api.voiceProfiles()]);
-    setVoiceOverview(overviewData);
-    setVoiceProfiles(profileData);
+    const blockReason = voiceTrainingBlockReason(profile);
+    if (blockReason) {
+      setVoiceSampleMessage(blockReason);
+      return;
+    }
+    try {
+      const usableSamples = usableVoiceSampleCount(profile.id);
+      const job = await api.createVoiceTrainingJob(profile.id, {
+        engine: "mock-voice-engine",
+        sampleMinutes: Math.max(usableSamples, 1),
+        message: "克隆训练任务已创建；真实克隆服务保持后置安全门。",
+      });
+      setVoiceTrainingJobs((current) => [job, ...current]);
+      const [overviewData, profileData, cloneRecordData] = await Promise.all([
+        api.voiceOverview(),
+        api.voiceProfiles(),
+        api.voiceCloneRecords(),
+      ]);
+      setVoiceOverview(overviewData);
+      setVoiceProfiles(profileData);
+      setVoiceCloneRecords(cloneRecordData);
+      setVoiceSampleMessage("克隆训练已创建，并已写入克隆语音记录。");
+    } catch (error) {
+      setVoiceSampleMessage(error instanceof Error ? error.message : "创建训练失败");
+    }
   }
 
   async function createReportExport(reportType?: string) {
@@ -2566,25 +2682,27 @@ function App() {
                     ))}
                   </select>
                 </label>
-                <label>
-                  声音样本数量
+                <label className="wide">
+                  授权录音样本
                   <input
-                    min={0}
-                    type="number"
-                    value={voiceProfileForm.sampleCount}
-                    onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, sampleCount: Number(event.target.value) })}
+                    accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.webm"
+                    onChange={(event) => setVoiceSampleFile(event.target.files?.[0] ?? null)}
+                    type="file"
                   />
+                  <small>{voiceSampleFile ? `${voiceSampleFile.name} · ${formatBytes(voiceSampleFile.size)}` : "请上传客户/员工本人授权录音，作为克隆训练样本。"}</small>
                 </label>
                 <label className="wide">
-                  授权材料 / 样本记录
+                  授权材料 / 说明
                   <textarea
+                    placeholder="填写授权证明、适用范围、录音来源说明。"
                     value={voiceProfileForm.consentMaterial}
                     onChange={(event) => setVoiceProfileForm({ ...voiceProfileForm, consentMaterial: event.target.value })}
                   />
                 </label>
-                <button className="primary-button" type="submit">
+                {voiceSampleMessage && <div className="form-result wide">{voiceSampleMessage}</div>}
+                <button className="primary-button" disabled={isUploadingVoiceSample} type="submit">
                   <Plus size={16} />
-                  新增克隆档案
+                  {isUploadingVoiceSample ? "上传中..." : "新增克隆档案"}
                 </button>
               </form>
             </article>
@@ -2614,7 +2732,7 @@ function App() {
                         <small>{profile.ownerName} · {profile.scenario} · 回退 {profile.fallbackVoice}</small>
                         <small>{profile.riskNote}</small>
                       </div>
-                      <em>{profile.sampleCount} 样本</em>
+                      <em>{usableVoiceSampleCount(profile.id)} 样本</em>
                     </div>
                     <div className="account-row-meta">
                       <span>{profile.status}</span>
@@ -2623,6 +2741,32 @@ function App() {
                   </article>
                 ))}
               </div>
+              {activeVoiceProfile && (
+                <div className="form-grid single">
+                  <label>
+                    为选中档案补充录音
+                    <input
+                      accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.webm"
+                      onChange={(event) => setVoiceSampleFile(event.target.files?.[0] ?? null)}
+                      type="file"
+                    />
+                  </label>
+                  <button className="secondary-button" disabled={isUploadingVoiceSample} onClick={() => void uploadSampleForActiveProfile()} type="button">
+                    <Upload size={16} />
+                    上传到 {activeVoiceProfile.name}
+                  </button>
+                  <div className="profile-grid">
+                    <div>
+                      <span>可用样本</span>
+                      <strong>{activeVoiceProfileSamples.filter((sample) => sample.qualityStatus === "可用").length}</strong>
+                    </div>
+                    <div>
+                      <span>最近样本</span>
+                      <strong>{activeVoiceProfileSamples[0]?.fileName ?? "未上传"}</strong>
+                    </div>
+                  </div>
+                </div>
+              )}
             </article>
           </section>
         )}
@@ -2650,7 +2794,7 @@ function App() {
                       <span>{profile.authorizationStatus}</span>
                     </div>
                     <p>{profile.consentMaterial || "等待授权材料。"}</p>
-                    <small>{profile.riskNote}</small>
+                    <small>{usableVoiceSampleCount(profile.id)} 条可用录音样本 · {profile.riskNote}</small>
                     <div className="button-row card-actions">
                       <button
                         className="row-action is-primary"
@@ -2692,32 +2836,38 @@ function App() {
               </div>
               <div className="account-list">
                 {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无可训练的授权克隆档案。</div>}
-                {customerVoiceProfiles.map((profile) => (
-                  <article
-                    className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
-                    key={profile.id}
-                    onClick={() => setSelectedVoiceProfileId(profile.id)}
-                  >
-                    <div className="account-row-head">
-                      <div>
-                        <strong>{profile.name}</strong>
-                        <small>{profile.authorizationStatus} · {profile.status}</small>
+                {customerVoiceProfiles.map((profile) => {
+                  const blockReason = voiceTrainingBlockReason(profile);
+                  const usableSamples = usableVoiceSampleCount(profile.id);
+                  return (
+                    <article
+                      className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
+                      key={profile.id}
+                      onClick={() => setSelectedVoiceProfileId(profile.id)}
+                    >
+                      <div className="account-row-head">
+                        <div>
+                          <strong>{profile.name}</strong>
+                          <small>{profile.authorizationStatus} · {profile.status} · {usableSamples} 条可用录音样本</small>
+                          <small>{blockReason || "授权和录音样本已满足，可创建克隆训练。"}</small>
+                        </div>
+                        <button
+                          className="row-action is-primary"
+                          disabled={Boolean(blockReason)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void createVoiceTrainingJob(profile);
+                          }}
+                          type="button"
+                        >
+                          创建训练
+                        </button>
                       </div>
-                      <button
-                        className="row-action is-primary"
-                        disabled={profile.authorizationStatus !== "授权通过"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void createVoiceTrainingJob(profile);
-                        }}
-                        type="button"
-                      >
-                        创建训练
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                    </article>
+                  );
+                })}
               </div>
+              {voiceSampleMessage && <div className="form-result">{voiceSampleMessage}</div>}
             </article>
 
             <article className="panel">
@@ -2747,6 +2897,43 @@ function App() {
 
         {showUsage && (
           <section className="content-grid lower">
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Clone Audit</p>
+                  <h2>克隆语音记录</h2>
+                </div>
+                <Activity size={22} />
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>克隆音色</th>
+                      <th>样本</th>
+                      <th>引擎</th>
+                      <th>状态</th>
+                      <th>结果</th>
+                      <th>时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerVoiceCloneRecords.map((record) => (
+                      <tr key={record.id}>
+                        <td>{record.clonedVoiceName}</td>
+                        <td>{record.sampleCount} 条 / {record.sampleMinutes} 分钟</td>
+                        <td>{record.engine}</td>
+                        <td>{record.status}</td>
+                        <td>{record.result}</td>
+                        <td>{new Date(record.createdAt).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {customerVoiceCloneRecords.length === 0 && <div className="empty-state">暂无克隆语音记录，上传样本并创建训练后会自动写入。</div>}
+              </div>
+            </article>
+
             <article className="panel span-2">
               <div className="panel-title">
                 <div>
