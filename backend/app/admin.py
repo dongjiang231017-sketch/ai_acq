@@ -19,6 +19,7 @@ from app.models.growth import (
     VoiceUsageRecord,
 )
 from app.models.lead import MerchantLead
+from app.models.operations import ReportExport, SystemAuditLog, SystemSetting
 from app.models.task import (
     CallRecord,
     CallScript,
@@ -644,6 +645,99 @@ class VoiceUsageRecordAdmin(ModelView, model=VoiceUsageRecord):
     }
 
 
+class ReportExportAdmin(ModelView, model=ReportExport):
+    name = "报表导出"
+    name_plural = "报表导出任务"
+    icon = "fa-solid fa-file-export"
+
+    column_list = [
+        ReportExport.report_type,
+        ReportExport.date_range,
+        ReportExport.file_format,
+        ReportExport.requester,
+        ReportExport.status,
+        ReportExport.row_count,
+        ReportExport.sensitive_fields_included,
+        ReportExport.created_at,
+    ]
+    column_searchable_list = [ReportExport.report_type, ReportExport.requester, ReportExport.status]
+    column_sortable_list = [ReportExport.created_at, ReportExport.row_count]
+    column_default_sort = [(ReportExport.created_at, True)]
+    column_labels = {
+        ReportExport.report_type: "报表类型",
+        ReportExport.date_range: "时间范围",
+        ReportExport.file_format: "格式",
+        ReportExport.requester: "申请人",
+        ReportExport.status: "状态",
+        ReportExport.download_url: "下载地址",
+        ReportExport.row_count: "行数",
+        ReportExport.sensitive_fields_included: "包含敏感字段",
+        ReportExport.created_at: "创建时间",
+        ReportExport.finished_at: "完成时间",
+    }
+
+
+class SystemSettingAdmin(ModelView, model=SystemSetting):
+    name = "系统设置"
+    name_plural = "系统设置"
+    icon = "fa-solid fa-sliders"
+
+    column_list = [
+        SystemSetting.group_key,
+        SystemSetting.item_key,
+        SystemSetting.label,
+        SystemSetting.value_type,
+        SystemSetting.status,
+        SystemSetting.sensitive,
+        SystemSetting.updated_by,
+        SystemSetting.updated_at,
+    ]
+    column_searchable_list = [SystemSetting.group_key, SystemSetting.item_key, SystemSetting.label, SystemSetting.value]
+    column_sortable_list = [SystemSetting.group_key, SystemSetting.updated_at]
+    column_labels = {
+        SystemSetting.group_key: "分组",
+        SystemSetting.item_key: "配置键",
+        SystemSetting.label: "名称",
+        SystemSetting.value: "配置值",
+        SystemSetting.value_type: "值类型",
+        SystemSetting.status: "状态",
+        SystemSetting.description: "说明",
+        SystemSetting.sensitive: "敏感",
+        SystemSetting.updated_by: "更新人",
+        SystemSetting.created_at: "创建时间",
+        SystemSetting.updated_at: "更新时间",
+    }
+
+
+class SystemAuditLogAdmin(ModelView, model=SystemAuditLog):
+    name = "系统审计"
+    name_plural = "系统审计"
+    icon = "fa-solid fa-shield-halved"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        SystemAuditLog.actor,
+        SystemAuditLog.action,
+        SystemAuditLog.target_type,
+        SystemAuditLog.summary,
+        SystemAuditLog.created_at,
+    ]
+    column_searchable_list = [SystemAuditLog.actor, SystemAuditLog.action, SystemAuditLog.summary]
+    column_sortable_list = [SystemAuditLog.created_at]
+    column_default_sort = [(SystemAuditLog.created_at, True)]
+    column_labels = {
+        SystemAuditLog.actor: "操作者",
+        SystemAuditLog.action: "动作",
+        SystemAuditLog.target_type: "对象类型",
+        SystemAuditLog.target_id: "对象ID",
+        SystemAuditLog.summary: "摘要",
+        SystemAuditLog.before_value: "变更前",
+        SystemAuditLog.after_value: "变更后",
+        SystemAuditLog.created_at: "时间",
+    }
+
+
 def setup_admin(app: FastAPI) -> None:
     authentication_backend = AdminAuth(secret_key=settings.admin_secret_key, same_site="lax")
     admin = Admin(
@@ -672,3 +766,6 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(VoiceProfileAdmin)
     admin.add_view(VoiceTrainingJobAdmin)
     admin.add_view(VoiceUsageRecordAdmin)
+    admin.add_view(ReportExportAdmin)
+    admin.add_view(SystemSettingAdmin)
+    admin.add_view(SystemAuditLogAdmin)

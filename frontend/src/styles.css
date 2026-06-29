@@ -313,7 +313,15 @@ button {
   background: #ffad21;
 }
 
+.tone-orange {
+  background: #ffad21;
+}
+
 .tone-rose {
+  background: #f55379;
+}
+
+.tone-pink {
   background: #f55379;
 }
 
@@ -405,6 +413,10 @@ button {
 .form-grid .wide,
 .form-grid > button {
   grid-column: 1 / -1;
+}
+
+.form-grid.single {
+  grid-template-columns: 1fr;
 }
 
 input,
@@ -751,6 +763,10 @@ button:disabled {
   gap: 12px;
 }
 
+.record-grid.single {
+  grid-template-columns: 1fr;
+}
+
 .record-card {
   border: 1px solid #e2ebf6;
   border-radius: 14px;
@@ -780,6 +796,53 @@ button:disabled {
   margin-top: 10px;
   color: #7b8aa0;
   font-weight: 800;
+}
+
+.funnel-list,
+.setting-list {
+  display: grid;
+  gap: 10px;
+}
+
+.funnel-step {
+  min-height: 74px;
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  background: #fbfdff;
+  padding: 12px 14px;
+  text-align: left;
+}
+
+.funnel-step span {
+  color: #53647e;
+  font-weight: 900;
+}
+
+.funnel-step strong {
+  color: #18243a;
+  font-size: 24px;
+}
+
+.funnel-step small {
+  border-radius: 999px;
+  background: #e9f2ff;
+  color: #2473f6;
+  padding: 5px 9px;
+  font-weight: 900;
+}
+
+.panel-note {
+  margin: 12px 0 0;
+  border-radius: 12px;
+  background: #f6f9fd;
+  color: #53647e;
+  padding: 10px 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .dm-inbox-grid {

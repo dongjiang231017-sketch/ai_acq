@@ -10,6 +10,7 @@ from app.models.growth import (
     VoiceTrainingJob,
     VoiceUsageRecord,
 )
+from app.models.operations import ReportExport, SystemAuditLog, SystemSetting
 from app.models.task import OutreachTask
 
 __all__ = [
@@ -21,6 +22,9 @@ __all__ = [
     "LearningSuggestion",
     "MerchantLead",
     "OutreachTask",
+    "ReportExport",
+    "SystemAuditLog",
+    "SystemSetting",
     "VoiceProfile",
     "VoiceTrainingJob",
     "VoiceUsageRecord",

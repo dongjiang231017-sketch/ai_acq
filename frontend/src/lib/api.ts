@@ -387,6 +387,123 @@ export type VoiceUsageRecord = {
   createdAt: string;
 };
 
+export type ReportFunnelStep = {
+  key: string;
+  label: string;
+  value: number;
+  rate: number;
+};
+
+export type ReportOverview = {
+  totalLeads: number;
+  totalTouches: number;
+  connected: number;
+  highIntent: number;
+  pendingWorkOrders: number;
+  conversionRate: number;
+  exportJobs: number;
+  funnel: ReportFunnelStep[];
+  updatedAt: string;
+};
+
+export type ChannelReport = {
+  id: string;
+  channel: string;
+  leads: number;
+  touches: number;
+  connected: number;
+  intent: number;
+  handoff: number;
+  conversionRate: number;
+  status: string;
+  insight: string;
+};
+
+export type SalesPerformanceReport = {
+  id: string;
+  ownerName: string;
+  assignedCustomers: number;
+  pendingWorkOrders: number;
+  closedWorkOrders: number;
+  highIntent: number;
+  handoff: number;
+  conversionRate: number;
+  lastActivityAt?: string | null;
+};
+
+export type ReportExport = {
+  id: string;
+  reportType: string;
+  dateRange: string;
+  fileFormat: string;
+  requester: string;
+  status: string;
+  downloadUrl: string;
+  rowCount: number;
+  sensitiveFieldsIncluded: boolean;
+  createdAt: string;
+  finishedAt?: string | null;
+};
+
+export type ReportExportCreate = {
+  reportType: string;
+  dateRange: string;
+  fileFormat: string;
+  requester: string;
+  includeSensitiveFields: boolean;
+};
+
+export type SettingsGroupOverview = {
+  groupKey: string;
+  label: string;
+  total: number;
+  enabled: number;
+  warning: number;
+};
+
+export type SettingsOverview = {
+  totalSettings: number;
+  enabledSettings: number;
+  warningSettings: number;
+  sensitiveSettings: number;
+  auditLogs: number;
+  groups: SettingsGroupOverview[];
+};
+
+export type SystemSetting = {
+  id: string;
+  groupKey: string;
+  itemKey: string;
+  label: string;
+  value: string;
+  valueType: string;
+  status: string;
+  description: string;
+  sensitive: boolean;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SystemSettingUpdate = {
+  value?: string;
+  status?: string;
+  description?: string;
+  actor?: string;
+};
+
+export type SystemAuditLog = {
+  id: string;
+  actor: string;
+  action: string;
+  targetType: string;
+  targetId?: string | null;
+  summary: string;
+  beforeValue?: string | null;
+  afterValue?: string | null;
+  createdAt: string;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -566,4 +683,21 @@ export const api = {
       body: JSON.stringify(job),
     }),
   voiceUsageRecords: () => request<VoiceUsageRecord[]>("/voice/usage-records"),
+  reportsOverview: () => request<ReportOverview>("/reports/overview"),
+  reportChannels: () => request<ChannelReport[]>("/reports/channels"),
+  salesReports: () => request<SalesPerformanceReport[]>("/reports/sales"),
+  reportExports: () => request<ReportExport[]>("/reports/exports"),
+  createReportExport: (payload: ReportExportCreate) =>
+    request<ReportExport>("/reports/exports", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  settingsOverview: () => request<SettingsOverview>("/settings/overview"),
+  systemSettings: () => request<SystemSetting[]>("/settings/items"),
+  updateSystemSetting: (settingId: string, payload: SystemSettingUpdate) =>
+    request<SystemSetting>(`/settings/items/${settingId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  systemAuditLogs: () => request<SystemAuditLog[]>("/settings/audit-logs"),
 };
