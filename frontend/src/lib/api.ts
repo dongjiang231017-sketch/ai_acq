@@ -118,9 +118,18 @@ export type DmAccount = {
   accountName: string;
   loginLabel?: string | null;
   status: string;
+  browserProfileKey?: string | null;
+  browserProfilePath?: string | null;
+  sessionStatus?: string | null;
+  riskStatus?: string | null;
   dailyLimit: number;
   sentToday: number;
+  minSendIntervalSeconds: number;
+  cooldownUntil?: string | null;
+  lastSentAt?: string | null;
   lastSyncAt?: string | null;
+  lastLoginCheckAt?: string | null;
+  lastError?: string | null;
   createdAt: string;
 };
 
@@ -164,6 +173,27 @@ export type DmConfig = {
   queueEnabled: boolean;
   queueName: string;
   redisUrlConfigured: boolean;
+  browserProfileRoot: string;
+};
+
+export type DmPlatformConfig = {
+  id: string;
+  platform: string;
+  homeUrl: string;
+  inboxUrl: string;
+  merchantSearchUrl: string;
+  messageButtonSelector: string;
+  inputSelector: string;
+  sendButtonSelector: string;
+  unreadSelector: string;
+  enabled: boolean;
+  createdAt: string;
+};
+
+export type DmSyncResult = {
+  checked: number;
+  newReplies: number;
+  needsHandoff: number;
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -227,11 +257,30 @@ export const api = {
     accountName: string;
     loginLabel?: string | null;
     status: string;
+    browserProfileKey?: string | null;
+    sessionStatus?: string | null;
+    riskStatus?: string | null;
     dailyLimit: number;
+    minSendIntervalSeconds?: number;
   }) =>
     request<DmAccount>("/direct-messages/accounts", {
       method: "POST",
       body: JSON.stringify(account),
+    }),
+  updateDmAccount: (accountId: string, account: Partial<DmAccount>) =>
+    request<DmAccount>(`/direct-messages/accounts/${accountId}`, {
+      method: "PATCH",
+      body: JSON.stringify(account),
+    }),
+  preflightDmAccount: (accountId: string) =>
+    request<DmAccount>(`/direct-messages/accounts/${accountId}/preflight`, {
+      method: "POST",
+    }),
+  dmPlatformConfigs: () => request<DmPlatformConfig[]>("/direct-messages/platform-configs"),
+  createDmPlatformConfig: (config: Omit<DmPlatformConfig, "id" | "createdAt">) =>
+    request<DmPlatformConfig>("/direct-messages/platform-configs", {
+      method: "POST",
+      body: JSON.stringify(config),
     }),
   dmTemplates: () => request<DmTemplate[]>("/direct-messages/templates"),
   createDmTemplate: (template: { name: string; platform: string; content: string; isActive: boolean }) =>
@@ -256,6 +305,10 @@ export const api = {
       method: "POST",
     }),
   dmConversations: () => request<DmConversation[]>("/direct-messages/conversations"),
+  syncDmReplies: () =>
+    request<DmSyncResult>("/direct-messages/sync-replies", {
+      method: "POST",
+    }),
   dmMessages: (conversationId?: string) =>
     request<DmMessage[]>(
       conversationId ? `/direct-messages/messages?conversationId=${encodeURIComponent(conversationId)}` : "/direct-messages/messages",

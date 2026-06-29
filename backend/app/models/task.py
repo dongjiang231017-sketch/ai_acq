@@ -99,13 +99,41 @@ class DirectMessageAccount(Base):
     account_name: Mapped[str] = mapped_column(String(120), index=True)
     login_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="待登录", index=True)
+    browser_profile_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    browser_profile_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_status: Mapped[str | None] = mapped_column(String(40), default="未登录", nullable=True, index=True)
+    risk_status: Mapped[str | None] = mapped_column(String(40), default="正常", nullable=True, index=True)
     daily_limit: Mapped[int] = mapped_column(Integer, default=200)
     sent_today: Mapped[int] = mapped_column(Integer, default=0)
+    min_send_interval_seconds: Mapped[int | None] = mapped_column(Integer, default=0, nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_login_check_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     def __repr__(self) -> str:
         return f"{self.platform} {self.account_name}"
+
+
+class DirectMessagePlatformConfig(Base):
+    __tablename__ = "dm_platform_configs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    platform: Mapped[str] = mapped_column(String(40), index=True)
+    home_url: Mapped[str] = mapped_column(String(240), default="")
+    inbox_url: Mapped[str] = mapped_column(String(240), default="")
+    merchant_search_url: Mapped[str] = mapped_column(String(240), default="")
+    message_button_selector: Mapped[str] = mapped_column(String(240), default="")
+    input_selector: Mapped[str] = mapped_column(String(240), default="")
+    send_button_selector: Mapped[str] = mapped_column(String(240), default="")
+    unread_selector: Mapped[str] = mapped_column(String(240), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return self.platform
 
 
 class DirectMessageTemplate(Base):

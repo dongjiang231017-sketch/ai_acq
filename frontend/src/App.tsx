@@ -28,6 +28,8 @@ import {
   DmConversation,
   DmMessage,
   DmOverview,
+  DmPlatformConfig,
+  DmSyncResult,
   DmTemplate,
   Lead,
   ModuleSummary,
@@ -238,9 +240,18 @@ const fallbackDmAccounts: DmAccount[] = [
     accountName: "南昌本地生活招商号",
     loginLabel: "已登录",
     status: "可用",
+    browserProfileKey: "meituan-nanchang-local",
+    browserProfilePath: ".dm_browser_profiles/meituan-nanchang-local",
+    sessionStatus: "模拟可用",
+    riskStatus: "正常",
     dailyLimit: 200,
     sentToday: 86,
+    minSendIntervalSeconds: 0,
+    cooldownUntil: null,
+    lastSentAt: new Date().toISOString(),
     lastSyncAt: new Date().toISOString(),
+    lastLoginCheckAt: new Date().toISOString(),
+    lastError: null,
     createdAt: new Date().toISOString(),
   },
   {
@@ -249,12 +260,43 @@ const fallbackDmAccounts: DmAccount[] = [
     accountName: "餐饮团购增长号",
     loginLabel: "待扫码",
     status: "待登录",
+    browserProfileKey: "eleme-food-growth",
+    browserProfilePath: ".dm_browser_profiles/eleme-food-growth",
+    sessionStatus: "未登录",
+    riskStatus: "正常",
     dailyLimit: 150,
     sentToday: 0,
+    minSendIntervalSeconds: 45,
+    cooldownUntil: null,
+    lastSentAt: null,
     lastSyncAt: null,
+    lastLoginCheckAt: null,
+    lastError: "请先扫码登录",
     createdAt: new Date().toISOString(),
   },
 ];
+
+const fallbackDmPlatformConfigs: DmPlatformConfig[] = [
+  {
+    id: "dm_platform_1",
+    platform: "美团",
+    homeUrl: "https://e.meituan.com/",
+    inboxUrl: "",
+    merchantSearchUrl: "",
+    messageButtonSelector: "",
+    inputSelector: "",
+    sendButtonSelector: "",
+    unreadSelector: "",
+    enabled: false,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackDmSyncResult: DmSyncResult = {
+  checked: 0,
+  newReplies: 0,
+  needsHandoff: 0,
+};
 
 const fallbackDmTemplates: DmTemplate[] = [
   {
@@ -350,6 +392,8 @@ function App() {
   const [dmTemplates, setDmTemplates] = useState<DmTemplate[]>(fallbackDmTemplates);
   const [dmConversations, setDmConversations] = useState<DmConversation[]>(fallbackDmConversations);
   const [dmMessages, setDmMessages] = useState<DmMessage[]>(fallbackDmMessages);
+  const [dmPlatformConfigs, setDmPlatformConfigs] = useState<DmPlatformConfig[]>(fallbackDmPlatformConfigs);
+  const [dmSyncResult, setDmSyncResult] = useState<DmSyncResult>(fallbackDmSyncResult);
   const [activeModule, setActiveModule] = useState("outbound");
   const [apiStatus, setApiStatus] = useState("连接中");
   const [isLoading, setIsLoading] = useState(false);
@@ -388,7 +432,11 @@ function App() {
     accountName: "",
     loginLabel: "待扫码",
     status: "待登录",
+    browserProfileKey: "",
+    sessionStatus: "未登录",
+    riskStatus: "正常",
     dailyLimit: 200,
+    minSendIntervalSeconds: 45,
   });
   const [dmTemplateForm, setDmTemplateForm] = useState({
     name: "视频号团购邀约私信",
@@ -407,7 +455,6 @@ function App() {
   const dmReachableLeads = useMemo(() => leads.filter((lead) => Boolean(lead.platform)), [leads]);
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
-  const activeDmAccount = dmAccounts.find((account) => account.id === dmForm.accountId) ?? dmAccounts[0];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
 
   async function loadData() {
@@ -427,6 +474,7 @@ function App() {
       api.dmTemplates(),
       api.dmConversations(),
       api.dmMessages(),
+      api.dmPlatformConfigs(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -469,6 +517,7 @@ function App() {
     }
     if (results[12].status === "fulfilled") setDmConversations(results[12].value);
     if (results[13].status === "fulfilled") setDmMessages(results[13].value);
+    if (results[14].status === "fulfilled") setDmPlatformConfigs(results[14].value);
     setIsLoading(false);
   }
 
@@ -545,7 +594,7 @@ function App() {
     const created = await api.createDmTask({
       name: dmForm.name,
       leadIds,
-      accountId: activeDmAccount?.id ?? null,
+      accountId: dmForm.accountId || null,
       templateId: activeDmTemplate?.id ?? null,
       scheduledAt: dmForm.scheduledAt || null,
     });
@@ -579,10 +628,21 @@ function App() {
     const created = await api.createDmAccount({
       ...dmAccountForm,
       dailyLimit: Number(dmAccountForm.dailyLimit),
+      minSendIntervalSeconds: Number(dmAccountForm.minSendIntervalSeconds),
     });
     setDmAccounts((current) => [created, ...current]);
     setDmForm((current) => ({ ...current, accountId: created.id }));
-    setDmAccountForm({ platform: "美团", accountName: "", loginLabel: "待扫码", status: "待登录", dailyLimit: 200 });
+    setDmAccountForm({
+      platform: "美团",
+      accountName: "",
+      loginLabel: "待扫码",
+      status: "待登录",
+      browserProfileKey: "",
+      sessionStatus: "未登录",
+      riskStatus: "正常",
+      dailyLimit: 200,
+      minSendIntervalSeconds: 45,
+    });
   }
 
   async function submitDmTemplate(event: React.FormEvent<HTMLFormElement>) {
@@ -592,6 +652,26 @@ function App() {
     const created = await api.createDmTemplate(dmTemplateForm);
     setDmTemplates((current) => [created, ...current]);
     setDmForm((current) => ({ ...current, templateId: created.id }));
+  }
+
+  async function preflightDmAccount(accountId: string) {
+    const updated = await api.preflightDmAccount(accountId);
+    setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
+  }
+
+  async function syncDmReplies() {
+    const result = await api.syncDmReplies();
+    setDmSyncResult(result);
+    const [overviewData, conversationData, messageData, leadData] = await Promise.all([
+      api.dmOverview(),
+      api.dmConversations(),
+      api.dmMessages(),
+      api.leads(),
+    ]);
+    setDmOverview(overviewData);
+    setDmConversations(conversationData);
+    setDmMessages(messageData);
+    setLeads(leadData);
   }
 
   function toggleLead(leadId: string) {
@@ -1043,10 +1123,19 @@ function App() {
                   <p>Live Inbox</p>
                   <h2>平台私信回复监听</h2>
                 </div>
-                <button className="secondary-button" onClick={loadData} type="button">
-                  <RefreshCw size={16} className={isLoading ? "spin" : ""} />
-                  刷新
-                </button>
+                <div className="button-row">
+                  <button className="secondary-button" onClick={syncDmReplies} type="button">
+                    <MessageSquareText size={16} />
+                    同步回复
+                  </button>
+                  <button className="secondary-button" onClick={loadData} type="button">
+                    <RefreshCw size={16} className={isLoading ? "spin" : ""} />
+                    刷新
+                  </button>
+                </div>
+              </div>
+              <div className="sync-summary">
+                上次同步：检查 {dmSyncResult.checked} 条，会话新增回复 {dmSyncResult.newReplies} 条，需接管 {dmSyncResult.needsHandoff} 条。
               </div>
               <div className="dm-inbox-grid">
                 <div className="conversation-list">
@@ -1097,6 +1186,7 @@ function App() {
                 <label>
                   平台账号
                   <select value={dmForm.accountId} onChange={(event) => setDmForm({ ...dmForm, accountId: event.target.value })}>
+                    <option value="">账号池轮转</option>
                     {dmAccounts.map((account) => (
                       <option key={account.id} value={account.id}>
                         {account.platform} · {account.accountName}
@@ -1185,12 +1275,52 @@ function App() {
                   />
                 </label>
                 <label>
+                  Profile 标识
+                  <input
+                    value={dmAccountForm.browserProfileKey}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, browserProfileKey: event.target.value })}
+                  />
+                </label>
+                <label>
+                  登录态
+                  <select
+                    value={dmAccountForm.sessionStatus}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, sessionStatus: event.target.value })}
+                  >
+                    <option>未登录</option>
+                    <option>已登录</option>
+                    <option>模拟可用</option>
+                    <option>需扫码</option>
+                  </select>
+                </label>
+                <label>
+                  风险状态
+                  <select
+                    value={dmAccountForm.riskStatus}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, riskStatus: event.target.value })}
+                  >
+                    <option>正常</option>
+                    <option>需验证</option>
+                    <option>风控暂停</option>
+                    <option>异常</option>
+                  </select>
+                </label>
+                <label>
                   日发送上限
                   <input
                     min={1}
                     type="number"
                     value={dmAccountForm.dailyLimit}
                     onChange={(event) => setDmAccountForm({ ...dmAccountForm, dailyLimit: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  发送间隔秒
+                  <input
+                    min={0}
+                    type="number"
+                    value={dmAccountForm.minSendIntervalSeconds}
+                    onChange={(event) => setDmAccountForm({ ...dmAccountForm, minSendIntervalSeconds: Number(event.target.value) })}
                   />
                 </label>
                 <button className="primary-button" type="submit">
@@ -1213,12 +1343,31 @@ function App() {
                   <article className="account-row" key={account.id}>
                     <div>
                       <strong>{account.accountName}</strong>
-                      <small>{account.platform} · {account.loginLabel ?? "未绑定"}</small>
+                      <small>{account.platform} · {account.loginLabel ?? "未绑定"} · {account.browserProfileKey ?? "未生成Profile"}</small>
+                      {account.lastError && <small className="error-text">{account.lastError}</small>}
                     </div>
                     <span>{account.status}</span>
+                    <span>{account.sessionStatus ?? "未登录"}</span>
+                    <span>{account.riskStatus ?? "正常"}</span>
                     <em>
-                      {account.sentToday}/{account.dailyLimit}
+                      {account.sentToday}/{account.dailyLimit} · {account.minSendIntervalSeconds ?? 0}s
                     </em>
+                    <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
+                      检测
+                    </button>
+                  </article>
+                ))}
+              </div>
+              <div className="platform-config-list">
+                <div className="section-caption">
+                  <strong>平台页面选择器</strong>
+                  <small>{dmPlatformConfigs.length} 个平台</small>
+                </div>
+                {dmPlatformConfigs.map((config) => (
+                  <article className="platform-config-row" key={config.id}>
+                    <strong>{config.platform}</strong>
+                    <span>{config.enabled ? "已启用" : "待配置"}</span>
+                    <small>{config.homeUrl || "未配置首页"}</small>
                   </article>
                 ))}
               </div>

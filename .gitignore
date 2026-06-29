@@ -19,6 +19,8 @@ __pycache__/
 htmlcov/
 backend/.venv/
 backend/local.db
+.dm_browser_profiles/
+backend/.dm_browser_profiles/
 
 # Node / frontend
 frontend/node_modules/

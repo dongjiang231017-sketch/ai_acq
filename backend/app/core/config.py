@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     dm_queue_enabled: bool = False
     dm_queue_name: str = "ai_acq:dm_tasks"
     dm_gateway_mode: str = "simulator"
+    dm_browser_profile_root: str = ".dm_browser_profiles"
     telephony_gateway_mode: str = "simulator"
     asterisk_host: str = "127.0.0.1"
     asterisk_ami_port: int = 5038

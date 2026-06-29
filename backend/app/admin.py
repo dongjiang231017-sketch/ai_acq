@@ -14,6 +14,7 @@ from app.models.task import (
     DirectMessage,
     DirectMessageAccount,
     DirectMessageConversation,
+    DirectMessagePlatformConfig,
     DirectMessageTemplate,
     OutreachTask,
     RecallRule,
@@ -204,21 +205,68 @@ class DirectMessageAccountAdmin(ModelView, model=DirectMessageAccount):
         DirectMessageAccount.account_name,
         DirectMessageAccount.login_label,
         DirectMessageAccount.status,
+        DirectMessageAccount.session_status,
+        DirectMessageAccount.risk_status,
+        DirectMessageAccount.browser_profile_key,
         DirectMessageAccount.daily_limit,
         DirectMessageAccount.sent_today,
+        DirectMessageAccount.last_sent_at,
         DirectMessageAccount.last_sync_at,
     ]
-    column_searchable_list = [DirectMessageAccount.platform, DirectMessageAccount.account_name, DirectMessageAccount.status]
+    column_searchable_list = [
+        DirectMessageAccount.platform,
+        DirectMessageAccount.account_name,
+        DirectMessageAccount.status,
+        DirectMessageAccount.session_status,
+        DirectMessageAccount.risk_status,
+    ]
     column_sortable_list = [DirectMessageAccount.created_at, DirectMessageAccount.sent_today, DirectMessageAccount.daily_limit]
     column_labels = {
         DirectMessageAccount.platform: "平台",
         DirectMessageAccount.account_name: "账号名称",
         DirectMessageAccount.login_label: "登录标识",
         DirectMessageAccount.status: "状态",
+        DirectMessageAccount.browser_profile_key: "浏览器Profile",
+        DirectMessageAccount.browser_profile_path: "Profile路径",
+        DirectMessageAccount.session_status: "登录态",
+        DirectMessageAccount.risk_status: "风险状态",
         DirectMessageAccount.daily_limit: "日上限",
         DirectMessageAccount.sent_today: "今日已发",
+        DirectMessageAccount.min_send_interval_seconds: "最小发送间隔秒",
+        DirectMessageAccount.cooldown_until: "冷却至",
+        DirectMessageAccount.last_sent_at: "最近发送",
         DirectMessageAccount.last_sync_at: "最近同步",
+        DirectMessageAccount.last_login_check_at: "最近登录检测",
+        DirectMessageAccount.last_error: "错误原因",
         DirectMessageAccount.created_at: "创建时间",
+    }
+
+
+class DirectMessagePlatformConfigAdmin(ModelView, model=DirectMessagePlatformConfig):
+    name = "平台选择器"
+    name_plural = "平台私信选择器"
+    icon = "fa-solid fa-code"
+
+    column_list = [
+        DirectMessagePlatformConfig.platform,
+        DirectMessagePlatformConfig.home_url,
+        DirectMessagePlatformConfig.inbox_url,
+        DirectMessagePlatformConfig.enabled,
+        DirectMessagePlatformConfig.created_at,
+    ]
+    column_searchable_list = [DirectMessagePlatformConfig.platform, DirectMessagePlatformConfig.home_url]
+    column_sortable_list = [DirectMessagePlatformConfig.created_at, DirectMessagePlatformConfig.enabled]
+    column_labels = {
+        DirectMessagePlatformConfig.platform: "平台",
+        DirectMessagePlatformConfig.home_url: "首页",
+        DirectMessagePlatformConfig.inbox_url: "收件箱",
+        DirectMessagePlatformConfig.merchant_search_url: "商家搜索页",
+        DirectMessagePlatformConfig.message_button_selector: "私信按钮选择器",
+        DirectMessagePlatformConfig.input_selector: "输入框选择器",
+        DirectMessagePlatformConfig.send_button_selector: "发送按钮选择器",
+        DirectMessagePlatformConfig.unread_selector: "未读选择器",
+        DirectMessagePlatformConfig.enabled: "启用",
+        DirectMessagePlatformConfig.created_at: "创建时间",
     }
 
 
@@ -316,6 +364,7 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(CallRecordAdmin)
     admin.add_view(RecallRuleAdmin)
     admin.add_view(DirectMessageAccountAdmin)
+    admin.add_view(DirectMessagePlatformConfigAdmin)
     admin.add_view(DirectMessageTemplateAdmin)
     admin.add_view(DirectMessageConversationAdmin)
     admin.add_view(DirectMessageAdmin)

@@ -13,6 +13,12 @@ from app.models.task import (
     OutreachTask,
 )
 from app.services.dm_gateway import DirectMessageGateway, DmAttempt, get_dm_gateway
+from app.services.dm_policy import (
+    find_existing_dm_conversation,
+    mark_account_sent,
+    pause_account_for_risk,
+    pick_dm_account,
+)
 
 
 def get_dm_task_leads(db: Session, task: OutreachTask) -> list[MerchantLead]:
@@ -59,16 +65,9 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
     if not leads:
         raise HTTPException(status_code=400, detail="暂无可私信线索")
 
-    account = _get_dm_account(db, task)
-    if not account:
-        raise HTTPException(status_code=400, detail="暂无可用平台账号")
-
     template = _get_dm_template(db, task)
     if not template:
         raise HTTPException(status_code=400, detail="暂无可用私信模板")
-
-    if account.sent_today + len(leads) > account.daily_limit:
-        raise HTTPException(status_code=400, detail="本账号今日发送量将超过上限")
 
     active_gateway = gateway or get_dm_gateway()
     _clear_existing_conversations(db, task.id)
@@ -80,10 +79,66 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
     task.intent_count = 0
     task.failed_count = 0
 
-    sent_count = 0
     for index, lead in enumerate(leads):
-        result = active_gateway.send_message(DmAttempt(task=task, lead=lead, account=account, template=template, sequence=index))
         now = datetime.utcnow()
+        existing = find_existing_dm_conversation(db, lead)
+        if existing:
+            db.add(
+                DirectMessageConversation(
+                    task_id=task.id,
+                    lead_id=lead.id,
+                    account_id=existing.account_id,
+                    platform=existing.platform,
+                    merchant_name=lead.name,
+                    status="已跳过",
+                    intent_level="重复",
+                    last_message="该商家已有私信触达记录，已跳过重复发送。",
+                    last_message_at=now,
+                    need_handoff=False,
+                )
+            )
+            continue
+
+        account, account_reason = pick_dm_account(db, task, now)
+        if not account:
+            db.add(
+                DirectMessageConversation(
+                    task_id=task.id,
+                    lead_id=lead.id,
+                    account_id=None,
+                    platform=lead.platform,
+                    merchant_name=lead.name,
+                    status="账号不可用",
+                    intent_level="失败",
+                    last_message=account_reason,
+                    last_message_at=now,
+                    need_handoff=False,
+                )
+            )
+            task.failed_count += 1
+            continue
+
+        try:
+            result = active_gateway.send_message(DmAttempt(task=task, lead=lead, account=account, template=template, sequence=index))
+        except RuntimeError as exc:
+            pause_account_for_risk(account, str(exc), now)
+            db.add(
+                DirectMessageConversation(
+                    task_id=task.id,
+                    lead_id=lead.id,
+                    account_id=account.id,
+                    platform=account.platform,
+                    merchant_name=lead.name,
+                    status="发送失败",
+                    intent_level="失败",
+                    last_message=str(exc),
+                    last_message_at=now,
+                    need_handoff=False,
+                )
+            )
+            task.failed_count += 1
+            continue
+
         conversation = DirectMessageConversation(
             task_id=task.id,
             lead_id=lead.id,
@@ -109,7 +164,7 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
                 raw_payload=result.raw_payload,
             )
         )
-        sent_count += 1
+        mark_account_sent(account, now)
 
         if result.reply_content:
             db.add(
@@ -134,8 +189,6 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
     task.completed_count = len(leads)
     task.status = "已完成"
     task.finished_at = datetime.utcnow()
-    account.sent_today += sent_count
-    account.last_sync_at = datetime.utcnow()
     db.commit()
     db.refresh(task)
     return task

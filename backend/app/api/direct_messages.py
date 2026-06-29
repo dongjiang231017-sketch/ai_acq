@@ -11,21 +11,28 @@ from app.models.task import (
     DirectMessage,
     DirectMessageAccount,
     DirectMessageConversation,
+    DirectMessagePlatformConfig,
     DirectMessageTemplate,
     OutreachTask,
 )
 from app.schemas.dm import (
     DmAccountCreate,
     DmAccountRead,
+    DmAccountUpdate,
     DmConfigRead,
     DmConversationRead,
     DmMessageRead,
     DmOverview,
+    DmPlatformConfigCreate,
+    DmPlatformConfigRead,
+    DmSyncResult,
     DmTaskCreate,
     DmTemplateCreate,
     DmTemplateRead,
 )
 from app.schemas.task import TaskRead
+from app.services.dm_browser_profile import attach_profile_defaults, normalize_account_state
+from app.services.dm_listener import sync_simulated_dm_replies
 from app.services.dm_queue import enqueue_dm_task
 from app.services.dm_runner import run_dm_task
 
@@ -42,9 +49,14 @@ def _seed_default_account(db: Session) -> DirectMessageAccount:
         account_name="南昌本地生活招商号",
         login_label="待绑定真实平台账号",
         status="可用",
+        session_status="模拟可用",
+        risk_status="正常",
         daily_limit=200,
+        min_send_interval_seconds=0,
     )
     db.add(account)
+    db.flush()
+    normalize_account_state(account)
     db.commit()
     db.refresh(account)
     return account
@@ -67,6 +79,21 @@ def _seed_default_template(db: Session) -> DirectMessageTemplate:
     db.commit()
     db.refresh(template)
     return template
+
+
+def _seed_default_platform_configs(db: Session) -> list[DirectMessagePlatformConfig]:
+    configs = list(db.scalars(select(DirectMessagePlatformConfig).order_by(DirectMessagePlatformConfig.created_at.desc())).all())
+    if configs:
+        return configs
+
+    defaults = [
+        DirectMessagePlatformConfig(platform="美团", home_url="https://e.meituan.com/", inbox_url="", enabled=False),
+        DirectMessagePlatformConfig(platform="饿了么", home_url="https://open.shop.ele.me/", inbox_url="", enabled=False),
+        DirectMessagePlatformConfig(platform="抖音", home_url="https://business.douyin.com/", inbox_url="", enabled=False),
+    ]
+    db.add_all(defaults)
+    db.commit()
+    return defaults
 
 
 @router.get("/overview", response_model=DmOverview)
@@ -119,22 +146,79 @@ def dm_config() -> dict[str, object]:
         "queueEnabled": settings.dm_queue_enabled,
         "queueName": settings.dm_queue_name,
         "redisUrlConfigured": bool(settings.redis_url),
+        "browserProfileRoot": settings.dm_browser_profile_root,
     }
 
 
 @router.get("/accounts", response_model=list[DmAccountRead])
 def list_dm_accounts(db: Session = Depends(get_db)) -> list[DirectMessageAccount]:
     _seed_default_account(db)
-    return list(db.scalars(select(DirectMessageAccount).order_by(DirectMessageAccount.created_at.desc())).all())
+    accounts = list(db.scalars(select(DirectMessageAccount).order_by(DirectMessageAccount.created_at.desc())).all())
+    for account in accounts:
+        normalize_account_state(account)
+    db.commit()
+    return accounts
 
 
 @router.post("/accounts", response_model=DmAccountRead)
 def create_dm_account(payload: DmAccountCreate, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = DirectMessageAccount(**payload.model_dump(by_alias=False))
     db.add(account)
+    db.flush()
+    normalize_account_state(account)
     db.commit()
     db.refresh(account)
     return account
+
+
+@router.patch("/accounts/{account_id}", response_model=DmAccountRead)
+def update_dm_account(account_id: str, payload: DmAccountUpdate, db: Session = Depends(get_db)) -> DirectMessageAccount:
+    account = db.get(DirectMessageAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="平台账号不存在")
+
+    for key, value in payload.model_dump(by_alias=False, exclude_unset=True).items():
+        setattr(account, key, value)
+    normalize_account_state(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.post("/accounts/{account_id}/preflight", response_model=DmAccountRead)
+def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> DirectMessageAccount:
+    account = db.get(DirectMessageAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="平台账号不存在")
+
+    normalize_account_state(account)
+    account.last_login_check_at = datetime.utcnow()
+    if settings.dm_gateway_mode == "simulator":
+        account.status = "可用"
+        account.session_status = "模拟可用"
+        account.risk_status = "正常"
+        account.last_error = None
+    elif account.session_status != "已登录":
+        account.status = "待登录"
+        account.last_error = "请先在客户端完成该平台账号扫码登录"
+
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.get("/platform-configs", response_model=list[DmPlatformConfigRead])
+def list_dm_platform_configs(db: Session = Depends(get_db)) -> list[DirectMessagePlatformConfig]:
+    return _seed_default_platform_configs(db)
+
+
+@router.post("/platform-configs", response_model=DmPlatformConfigRead)
+def create_dm_platform_config(payload: DmPlatformConfigCreate, db: Session = Depends(get_db)) -> DirectMessagePlatformConfig:
+    config = DirectMessagePlatformConfig(**payload.model_dump(by_alias=False))
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
 
 
 @router.get("/templates", response_model=list[DmTemplateRead])
@@ -164,9 +248,14 @@ def create_dm_task(payload: DmTaskCreate, db: Session = Depends(get_db)) -> Outr
     if len(leads) != len(unique_lead_ids):
         raise HTTPException(status_code=400, detail="包含不存在的线索")
 
-    account = db.get(DirectMessageAccount, payload.account_id) if payload.account_id else _seed_default_account(db)
-    if not account:
-        raise HTTPException(status_code=400, detail="平台账号不存在")
+    account_id = None
+    if payload.account_id:
+        account = db.get(DirectMessageAccount, payload.account_id)
+        if not account:
+            raise HTTPException(status_code=400, detail="平台账号不存在")
+        account_id = account.id
+    else:
+        _seed_default_account(db)
 
     template = db.get(DirectMessageTemplate, payload.template_id) if payload.template_id else _seed_default_template(db)
     if not template:
@@ -179,7 +268,7 @@ def create_dm_task(payload: DmTaskCreate, db: Session = Depends(get_db)) -> Outr
         target_count=len(leads),
         concurrency=1,
         script_id=template.id,
-        dm_account_id=account.id,
+        dm_account_id=account_id,
         dm_template_id=template.id,
         target_lead_ids=",".join(unique_lead_ids),
         scheduled_at=payload.scheduled_at,
@@ -217,6 +306,12 @@ def start_dm_task(task_id: str, db: Session = Depends(get_db)) -> OutreachTask:
 @router.get("/conversations", response_model=list[DmConversationRead])
 def list_dm_conversations(db: Session = Depends(get_db)) -> list[DirectMessageConversation]:
     return list(db.scalars(select(DirectMessageConversation).order_by(DirectMessageConversation.created_at.desc())).all())
+
+
+@router.post("/sync-replies", response_model=DmSyncResult)
+def sync_dm_replies(db: Session = Depends(get_db)) -> dict[str, int]:
+    result = sync_simulated_dm_replies(db)
+    return {"checked": result.checked, "newReplies": result.new_replies, "needsHandoff": result.needs_handoff}
 
 
 @router.get("/messages", response_model=list[DmMessageRead])

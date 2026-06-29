@@ -9,7 +9,13 @@ class DmAccountCreate(BaseModel):
     account_name: Annotated[str, Field(alias="accountName", min_length=1, max_length=120)]
     login_label: Annotated[str | None, Field(alias="loginLabel")] = None
     status: str = "待登录"
+    browser_profile_key: Annotated[str | None, Field(alias="browserProfileKey")] = None
+    browser_profile_path: Annotated[str | None, Field(alias="browserProfilePath")] = None
+    session_status: Annotated[str | None, Field(alias="sessionStatus")] = "未登录"
+    risk_status: Annotated[str | None, Field(alias="riskStatus")] = "正常"
     daily_limit: Annotated[int, Field(alias="dailyLimit", ge=1, le=5000)] = 200
+    min_send_interval_seconds: Annotated[int, Field(alias="minSendIntervalSeconds", ge=0, le=3600)] = 45
+    cooldown_until: Annotated[datetime | None, Field(alias="cooldownUntil")] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -17,10 +23,29 @@ class DmAccountCreate(BaseModel):
 class DmAccountRead(DmAccountCreate):
     id: str
     sent_today: Annotated[int, Field(alias="sentToday")]
+    last_sent_at: Annotated[datetime | None, Field(alias="lastSentAt")]
     last_sync_at: Annotated[datetime | None, Field(alias="lastSyncAt")]
+    last_login_check_at: Annotated[datetime | None, Field(alias="lastLoginCheckAt")]
+    last_error: Annotated[str | None, Field(alias="lastError")]
     created_at: Annotated[datetime, Field(alias="createdAt")]
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class DmAccountUpdate(BaseModel):
+    account_name: Annotated[str | None, Field(alias="accountName", min_length=1, max_length=120)] = None
+    login_label: Annotated[str | None, Field(alias="loginLabel")] = None
+    status: str | None = None
+    browser_profile_key: Annotated[str | None, Field(alias="browserProfileKey")] = None
+    browser_profile_path: Annotated[str | None, Field(alias="browserProfilePath")] = None
+    session_status: Annotated[str | None, Field(alias="sessionStatus")] = None
+    risk_status: Annotated[str | None, Field(alias="riskStatus")] = None
+    daily_limit: Annotated[int | None, Field(alias="dailyLimit", ge=1, le=5000)] = None
+    min_send_interval_seconds: Annotated[int | None, Field(alias="minSendIntervalSeconds", ge=0, le=3600)] = None
+    cooldown_until: Annotated[datetime | None, Field(alias="cooldownUntil")] = None
+    last_error: Annotated[str | None, Field(alias="lastError")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class DmTemplateCreate(BaseModel):
@@ -79,6 +104,35 @@ class DmMessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
+class DmPlatformConfigCreate(BaseModel):
+    platform: str = Field(min_length=1, max_length=40)
+    home_url: Annotated[str, Field(alias="homeUrl")] = ""
+    inbox_url: Annotated[str, Field(alias="inboxUrl")] = ""
+    merchant_search_url: Annotated[str, Field(alias="merchantSearchUrl")] = ""
+    message_button_selector: Annotated[str, Field(alias="messageButtonSelector")] = ""
+    input_selector: Annotated[str, Field(alias="inputSelector")] = ""
+    send_button_selector: Annotated[str, Field(alias="sendButtonSelector")] = ""
+    unread_selector: Annotated[str, Field(alias="unreadSelector")] = ""
+    enabled: bool = True
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DmPlatformConfigRead(DmPlatformConfigCreate):
+    id: str
+    created_at: Annotated[datetime, Field(alias="createdAt")]
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class DmSyncResult(BaseModel):
+    checked: int
+    new_replies: Annotated[int, Field(alias="newReplies")]
+    needs_handoff: Annotated[int, Field(alias="needsHandoff")]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DmOverview(BaseModel):
     accounts: int
     active_accounts: Annotated[int, Field(alias="activeAccounts")]
@@ -95,5 +149,6 @@ class DmConfigRead(BaseModel):
     queue_enabled: Annotated[bool, Field(alias="queueEnabled")]
     queue_name: Annotated[str, Field(alias="queueName")]
     redis_url_configured: Annotated[bool, Field(alias="redisUrlConfigured")]
+    browser_profile_root: Annotated[str, Field(alias="browserProfileRoot")]
 
     model_config = ConfigDict(populate_by_name=True)
