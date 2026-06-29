@@ -198,8 +198,8 @@ class RecallRuleAdmin(ModelView, model=RecallRule):
 
 
 class DirectMessageAccountAdmin(ModelView, model=DirectMessageAccount):
-    name = "平台账号"
-    name_plural = "平台私信账号"
+    name = "平台个人号"
+    name_plural = "平台私信个人号"
     icon = "fa-solid fa-user-shield"
 
     column_list = [
@@ -225,8 +225,8 @@ class DirectMessageAccountAdmin(ModelView, model=DirectMessageAccount):
     column_sortable_list = [DirectMessageAccount.created_at, DirectMessageAccount.sent_today, DirectMessageAccount.daily_limit]
     column_labels = {
         DirectMessageAccount.platform: "平台",
-        DirectMessageAccount.account_name: "账号名称",
-        DirectMessageAccount.login_label: "登录标识",
+        DirectMessageAccount.account_name: "个人号名称",
+        DirectMessageAccount.login_label: "个人号标识",
         DirectMessageAccount.status: "状态",
         DirectMessageAccount.browser_profile_key: "浏览器Profile",
         DirectMessageAccount.browser_profile_path: "Profile路径",

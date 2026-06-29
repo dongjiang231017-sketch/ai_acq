@@ -48,22 +48,36 @@ from app.services.dm_runner import run_dm_task
 router = APIRouter()
 
 PLATFORM_LOGIN_URLS = {
-    "美团": "https://e.meituan.com/",
+    "美团": "",
     "饿了么": "https://open.shop.ele.me/",
     "抖音": "https://business.douyin.com/",
     "视频号": "https://channels.weixin.qq.com/",
 }
 
+LEGACY_BUSINESS_BACKEND_URLS = {
+    "美团": {"https://e.meituan.com", "https://e.meituan.com/"},
+}
+
+
+def _is_legacy_business_backend_url(platform: str, url: str | None) -> bool:
+    if not url:
+        return False
+    return url.strip().rstrip("/") in {item.rstrip("/") for item in LEGACY_BUSINESS_BACKEND_URLS.get(platform, set())}
+
 
 def _seed_default_account(db: Session) -> DirectMessageAccount:
     account = db.scalar(select(DirectMessageAccount).where(DirectMessageAccount.status == "可用").order_by(DirectMessageAccount.created_at.desc()))
     if account:
+        if account.login_label in {"待绑定真实平台账号", "待绑定商家号"}:
+            account.login_label = "待绑定个人号"
+            db.commit()
+            db.refresh(account)
         return account
 
     account = DirectMessageAccount(
         platform="美团",
         account_name="南昌本地生活招商号",
-        login_label="待绑定真实平台账号",
+        login_label="待绑定个人号",
         status="可用",
         session_status="模拟可用",
         risk_status="正常",
@@ -103,7 +117,7 @@ def _seed_default_platform_configs(db: Session) -> list[DirectMessagePlatformCon
         return configs
 
     defaults = [
-        DirectMessagePlatformConfig(platform="美团", home_url="https://e.meituan.com/", inbox_url="", enabled=False),
+        DirectMessagePlatformConfig(platform="美团", home_url="", inbox_url="", enabled=False),
         DirectMessagePlatformConfig(platform="饿了么", home_url="https://open.shop.ele.me/", inbox_url="", enabled=False),
         DirectMessagePlatformConfig(platform="抖音", home_url="https://business.douyin.com/", inbox_url="", enabled=False),
     ]
@@ -122,7 +136,10 @@ def _platform_config(db: Session, platform: str) -> DirectMessagePlatformConfig 
 
 def _login_url_for_account(db: Session, account: DirectMessageAccount) -> str:
     config = _platform_config(db, account.platform)
-    return (config.home_url if config and config.home_url else PLATFORM_LOGIN_URLS.get(account.platform, "")).strip()
+    configured_url = (config.home_url if config and config.home_url else "").strip()
+    if configured_url and not _is_legacy_business_backend_url(account.platform, configured_url):
+        return configured_url
+    return PLATFORM_LOGIN_URLS.get(account.platform, "").strip()
 
 
 def _login_session_payload(account: DirectMessageAccount, login_url: str) -> dict[str, object]:
@@ -208,13 +225,13 @@ def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[
     normalize_account_state(account)
     login_url = _login_url_for_account(db, account)
     if not login_url:
-        raise HTTPException(status_code=400, detail="请先配置该平台的登录首页")
+        raise HTTPException(status_code=400, detail=f"请先配置{account.platform}个人号登录 URL")
 
     account.last_login_check_at = datetime.utcnow()
     if account.session_status not in {"已登录", "模拟可用"}:
         account.status = "待登录"
         account.session_status = "未登录"
-        account.last_error = "隔离登录会话已创建，请在客户端内置登录页完成登录后点击检测"
+        account.last_error = "隔离登录会话已创建，请在客户端内置个人号登录页完成登录后点击检测"
     db.commit()
     db.refresh(account)
     return account, login_url
@@ -302,7 +319,7 @@ def create_dm_account(payload: DmAccountCreate, db: Session = Depends(get_db)) -
 def update_dm_account(account_id: str, payload: DmAccountUpdate, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = db.get(DirectMessageAccount, account_id)
     if not account:
-        raise HTTPException(status_code=404, detail="平台账号不存在")
+        raise HTTPException(status_code=404, detail="平台个人号不存在")
 
     for key, value in payload.model_dump(by_alias=False, exclude_unset=True).items():
         setattr(account, key, value)
@@ -316,7 +333,7 @@ def update_dm_account(account_id: str, payload: DmAccountUpdate, db: Session = D
 def create_dm_account_login_session(account_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(DirectMessageAccount, account_id)
     if not account:
-        raise HTTPException(status_code=404, detail="平台账号不存在")
+        raise HTTPException(status_code=404, detail="平台个人号不存在")
 
     account, login_url = _prepare_login_session(db, account)
     return _login_session_payload(account, login_url)
@@ -326,7 +343,7 @@ def create_dm_account_login_session(account_id: str, db: Session = Depends(get_d
 def open_dm_account_login_window(account_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(DirectMessageAccount, account_id)
     if not account:
-        raise HTTPException(status_code=404, detail="平台账号不存在")
+        raise HTTPException(status_code=404, detail="平台个人号不存在")
 
     account, login_url = _prepare_login_session(db, account)
     launched, launch_message = _launch_isolated_login_window(login_url, account.browser_profile_path or "")
@@ -341,7 +358,7 @@ def open_dm_account_login_window(account_id: str, db: Session = Depends(get_db))
 def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = db.get(DirectMessageAccount, account_id)
     if not account:
-        raise HTTPException(status_code=404, detail="平台账号不存在")
+        raise HTTPException(status_code=404, detail="平台个人号不存在")
 
     normalize_account_state(account)
     account.last_login_check_at = datetime.utcnow()
@@ -359,7 +376,7 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
         account.last_error = result.last_error
     elif account.session_status != "已登录":
         account.status = "待登录"
-        account.last_error = "请先在客户端完成该平台账号扫码登录"
+        account.last_error = "请先在客户端完成该平台个人号扫码登录"
 
     db.commit()
     db.refresh(account)
@@ -428,7 +445,7 @@ def create_dm_task(payload: DmTaskCreate, db: Session = Depends(get_db)) -> Outr
     if payload.account_id:
         account = db.get(DirectMessageAccount, payload.account_id)
         if not account:
-            raise HTTPException(status_code=400, detail="平台账号不存在")
+            raise HTTPException(status_code=400, detail="平台个人号不存在")
         account_id = account.id
     else:
         _seed_default_account(db)

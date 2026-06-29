@@ -50,7 +50,7 @@ const fallbackModules: ModuleSummary[] = [
   { key: "collector", name: "线索采集", description: "采集任务、来源配置、清洗规则。", pageCount: 5, status: "ready" },
   { key: "leads", name: "商家线索库", description: "商家资料、电话库、主页和去重审核。", pageCount: 5, status: "ready" },
   { key: "outbound", name: "AI外呼系统", description: "外呼任务、话术流程、通话记录。", pageCount: 6, status: "ready" },
-  { key: "dm", name: "平台私信系统", description: "平台账号、私信任务、模板和会话。", pageCount: 6, status: "ready" },
+  { key: "dm", name: "平台私信系统", description: "平台个人号、私信任务、模板和会话。", pageCount: 6, status: "ready" },
   { key: "intent", name: "意向客户池", description: "客户分级、工单跟进和分配规则。", pageCount: 4, status: "ready" },
   { key: "learning", name: "AI学习中心", description: "建议队列、知识库和实验结果。", pageCount: 5, status: "ready" },
   { key: "voice", name: "声音档案", description: "授权、音色训练和使用记录。", pageCount: 4, status: "ready" },
@@ -80,7 +80,7 @@ const fallbackLeads: Lead[] = [
     category: "本地餐饮",
     phone: "13800000002",
     contactName: "周经理",
-    platformUrl: "https://e.meituan.com/",
+    platformUrl: null,
     source: "导入线索",
     intentScore: 58,
     status: "待外呼",
@@ -265,7 +265,7 @@ const fallbackDmAccounts: DmAccount[] = [
     id: "dm_account_2",
     platform: "饿了么",
     accountName: "餐饮团购增长号",
-    loginLabel: "待扫码",
+    loginLabel: "待绑定个人号",
     status: "待登录",
     browserProfileKey: "eleme-food-growth",
     browserProfilePath: ".dm_browser_profiles/eleme-food-growth",
@@ -287,7 +287,7 @@ const fallbackDmPlatformConfigs: DmPlatformConfig[] = [
   {
     id: "dm_platform_1",
     platform: "美团",
-    homeUrl: "https://e.meituan.com/",
+    homeUrl: "",
     inboxUrl: "",
     merchantSearchUrl: "",
     loginCheckSelector: "",
@@ -313,15 +313,31 @@ const fallbackDmSyncResult: DmSyncResult = {
 };
 
 const platformLoginUrls: Record<string, string> = {
-  美团: "https://e.meituan.com/",
+  美团: "",
   饿了么: "https://open.shop.ele.me/",
   抖音: "https://business.douyin.com/",
   视频号: "https://channels.weixin.qq.com/",
 };
 
+function isLegacyBusinessBackendUrl(platform: string, url?: string | null) {
+  const normalized = (url ?? "").trim().replace(/\/+$/, "");
+  return platform === "美团" && normalized === "https://e.meituan.com";
+}
+
+function personalLoginUrl(platform: string, url?: string | null) {
+  const value = (url ?? "").trim();
+  return value && !isLegacyBusinessBackendUrl(platform, value) ? value : "";
+}
+
+function accountLoginLabel(account: DmAccount) {
+  const label = account.loginLabel?.trim();
+  if (!label || label === "待绑定真实平台账号" || label === "待绑定商家号") return "待绑定个人号";
+  return label;
+}
+
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
   platform: "美团",
-  homeUrl: "https://e.meituan.com/",
+  homeUrl: "",
   inboxUrl: "",
   merchantSearchUrl: "",
   loginCheckSelector: "",
@@ -471,7 +487,7 @@ function App() {
   const [dmAccountForm, setDmAccountForm] = useState({
     platform: "美团",
     accountName: "",
-    loginLabel: "待扫码",
+    loginLabel: "待绑定个人号",
     status: "待登录",
     browserProfileKey: "",
     sessionStatus: "未登录",
@@ -512,7 +528,10 @@ function App() {
     return dmPlatformConfigs.find((config) => config.platform === activeLoginAccount.platform) ?? null;
   }, [activeLoginAccount, dmPlatformConfigs]);
   const activeLoginUrl =
-    dmLoginSession?.loginUrl || activeLoginConfig?.homeUrl || (activeLoginAccount ? platformLoginUrls[activeLoginAccount.platform] : "") || "";
+    personalLoginUrl(activeLoginAccount?.platform ?? "", dmLoginSession?.loginUrl) ||
+    personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginConfig?.homeUrl) ||
+    personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginAccount ? platformLoginUrls[activeLoginAccount.platform] : "") ||
+    "";
   const activeProfileKey =
     dmLoginSession?.profileKey || activeLoginAccount?.browserProfileKey || `${activeLoginAccount?.platform ?? "platform"}-account`;
   const activeProfilePath =
@@ -706,7 +725,7 @@ function App() {
     setDmAccountForm({
       platform: "美团",
       accountName: "",
-      loginLabel: "待扫码",
+      loginLabel: "待绑定个人号",
       status: "待登录",
       browserProfileKey: "",
       sessionStatus: "未登录",
@@ -1268,7 +1287,7 @@ function App() {
         </section>
 
         <section className="metrics outbound-metrics">
-          <MetricCard icon={<MessageSquareText size={20} />} label="平台账号" value={dmOverview.activeAccounts} detail={`共 ${dmOverview.accounts} 个`} tone="blue" />
+          <MetricCard icon={<MessageSquareText size={20} />} label="平台个人号" value={dmOverview.activeAccounts} detail={`共 ${dmOverview.accounts} 个`} tone="blue" />
           <MetricCard icon={<Zap size={20} />} label="今日发送" value={dmOverview.todaySent} detail="平台私信" tone="green" />
           <MetricCard icon={<Activity size={20} />} label="商家回复" value={dmOverview.replies} detail="今日回复" tone="amber" />
           <MetricCard icon={<Headphones size={20} />} label="需接管" value={dmOverview.needsHandoff} detail="人工跟进" tone="rose" />
@@ -1343,9 +1362,9 @@ function App() {
                   <input value={dmForm.name} onChange={(event) => setDmForm({ ...dmForm, name: event.target.value })} />
                 </label>
                 <label>
-                  平台账号
+                  平台个人号
                   <select value={dmForm.accountId} onChange={(event) => setDmForm({ ...dmForm, accountId: event.target.value })}>
-                    <option value="">账号池轮转</option>
+                    <option value="">个人号池轮转</option>
                     {dmAccounts.map((account) => (
                       <option key={account.id} value={account.id}>
                         {account.platform} · {account.accountName}
@@ -1405,7 +1424,7 @@ function App() {
               <div className="panel-title">
                 <div>
                   <p>Accounts</p>
-                  <h2>平台账号管理</h2>
+                  <h2>平台个人号管理</h2>
                 </div>
                 <Users size={22} />
               </div>
@@ -1420,14 +1439,14 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  账号名称
+                  个人号名称
                   <input
                     value={dmAccountForm.accountName}
                     onChange={(event) => setDmAccountForm({ ...dmAccountForm, accountName: event.target.value })}
                   />
                 </label>
                 <label>
-                  登录标识
+                  个人号标识
                   <input
                     value={dmAccountForm.loginLabel}
                     onChange={(event) => setDmAccountForm({ ...dmAccountForm, loginLabel: event.target.value })}
@@ -1493,7 +1512,7 @@ function App() {
               <div className="panel-title">
                 <div>
                   <p>Status</p>
-                  <h2>账号额度和登录状态</h2>
+                  <h2>个人号额度和登录状态</h2>
                 </div>
                 <ShieldAlert size={22} />
               </div>
@@ -1503,7 +1522,7 @@ function App() {
                     <div className="account-row-head">
                       <div>
                         <strong>{account.accountName}</strong>
-                        <small>{account.platform} · {account.loginLabel ?? "未绑定"} · {account.browserProfileKey ?? "未生成Profile"}</small>
+                        <small>{account.platform} · {accountLoginLabel(account)} · {account.browserProfileKey ?? "未生成Profile"}</small>
                         {account.lastError && <small className="error-text">{account.lastError}</small>}
                       </div>
                       <em>
@@ -1533,14 +1552,18 @@ function App() {
               </div>
               <div className="platform-config-list">
                 <div className="section-caption">
-                  <strong>平台页面选择器</strong>
+                  <strong>个人号页面选择器</strong>
                   <small>{dmPlatformConfigs.length} 个平台</small>
                 </div>
                 {dmPlatformConfigs.map((config) => (
                   <article className="platform-config-row" key={config.id}>
                     <strong>{config.platform}</strong>
                     <span>{config.enabled ? "已启用" : "待配置"}</span>
-                    <small>{config.homeUrl || "未配置首页"}</small>
+                    <small>
+                      {isLegacyBusinessBackendUrl(config.platform, config.homeUrl)
+                        ? "需改为个人号登录 URL"
+                        : config.homeUrl || "未配置个人号登录 URL"}
+                    </small>
                     <button className="row-action" onClick={() => editDmPlatformConfig(config)} type="button">
                       编辑
                     </button>
@@ -1553,7 +1576,7 @@ function App() {
               <div className="panel-title">
                 <div>
                   <p>Login</p>
-                  <h2>客户端内置登录工作台</h2>
+                  <h2>客户端内置个人号登录工作台</h2>
                 </div>
                 <KeyRound size={22} />
               </div>
@@ -1578,8 +1601,8 @@ function App() {
                 <section className="embedded-login-frame">
                   <div className="embedded-browser-bar">
                     <span className="status-dot" />
-                    <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 登录页` : "选择平台账号"}</strong>
-                    <em>{activeLoginUrl || "请先配置平台首页"}</em>
+                    <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录页` : "选择平台个人号"}</strong>
+                    <em>{activeLoginUrl || "请先配置个人号登录 URL"}</em>
                   </div>
                   <div className={`embedded-login-body ${dmLoginWindowUrl ? "is-open" : ""}`}>
                     <div className={`login-preview ${dmLoginWindowUrl ? "has-webview" : ""}`}>
@@ -1588,10 +1611,10 @@ function App() {
                           <iframe
                             referrerPolicy="no-referrer"
                             src={dmLoginWindowUrl}
-                            title={`${activeLoginAccount?.platform ?? "平台"}隔离登录页`}
+                            title={`${activeLoginAccount?.platform ?? "平台"}隔离个人号登录页`}
                           />
                           <div className="embedded-webview-note">
-                            <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台账号"}</strong>
+                            <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
                             <span>{dmLoginMessage || "独立登录窗口已打开"}</span>
                           </div>
                         </div>
@@ -1602,7 +1625,7 @@ function App() {
                           </div>
                           <strong>{activeLoginAccount ? activeLoginAccount.accountName : "暂无账号"}</strong>
                           <span>{activeLoginAccount?.sessionStatus ?? "未登录"}</span>
-                          <p>{dmLoginMessage || "点击登录后，在该账号自己的隔离页面完成扫码或账号登录。"}</p>
+                          <p>{dmLoginMessage || "点击登录后，在该个人号自己的隔离页面完成扫码或账号登录，再用它去私信商家。"}</p>
                         </>
                       )}
                     </div>
@@ -1633,7 +1656,7 @@ function App() {
                       type="button"
                     >
                       <KeyRound size={16} />
-                      {isOpeningDmLogin ? "正在打开" : "打开内置登录页"}
+                      {isOpeningDmLogin ? "正在打开" : "打开个人号登录页"}
                     </button>
                     <button
                       className="secondary-button"
@@ -1687,8 +1710,9 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  平台首页
+                  个人号登录 URL
                   <input
+                    placeholder="填写平台个人号登录 URL"
                     value={dmPlatformForm.homeUrl}
                     onChange={(event) => setDmPlatformForm({ ...dmPlatformForm, homeUrl: event.target.value })}
                   />
