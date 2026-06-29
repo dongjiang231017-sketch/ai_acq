@@ -77,10 +77,16 @@ def _is_legacy_business_backend_url(platform: str, url: str | None) -> bool:
 def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
     accounts = list(db.scalars(select(DirectMessageAccount).order_by(DirectMessageAccount.created_at.desc())).all())
     existing_platforms = {account.platform for account in accounts}
+    default_account_names = {str(account["platform"]): str(account["account_name"]) for account in DEFAULT_DM_ACCOUNTS}
+    legacy_business_name_tokens = ("招商号", "商家号", "经营宝")
     changed = False
     for account in accounts:
         if account.login_label in {"待绑定真实平台账号", "待绑定商家号", ""} or not account.login_label:
             account.login_label = "待绑定个人号"
+            changed = True
+        default_account_name = default_account_names.get(account.platform)
+        if default_account_name and any(token in account.account_name for token in legacy_business_name_tokens):
+            account.account_name = default_account_name
             changed = True
 
     for account_config in DEFAULT_DM_ACCOUNTS:
