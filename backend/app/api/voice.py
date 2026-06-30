@@ -62,6 +62,8 @@ SYSTEM_VOICES = [
 
 DEFAULT_SYSTEM_VOICE = next(voice for voice in SYSTEM_VOICES if voice["isDefault"])
 ALLOWED_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".webm"}
+MOCK_VOICE_ENGINE = "mock-voice-engine"
+DEFAULT_REAL_CLONE_ENGINE = "真实声音克隆服务"
 
 
 def _is_system_profile(profile: VoiceProfile) -> bool:
@@ -105,6 +107,31 @@ def _usable_sample_count(db: Session, profile_id: str) -> int:
         )
         or 0
     )
+
+
+def _voice_clone_engine_name() -> str:
+    return settings.voice_clone_engine_name.strip() or DEFAULT_REAL_CLONE_ENGINE
+
+
+def _voice_clone_training_ready() -> bool:
+    return bool(settings.voice_clone_training_enabled and settings.voice_clone_engine_name.strip())
+
+
+def _voice_clone_status() -> dict[str, str | bool]:
+    if _voice_clone_training_ready():
+        engine_name = _voice_clone_engine_name()
+        return {
+            "cloneTrainingEnabled": True,
+            "cloneEngineName": engine_name,
+            "cloneEngineStatus": "已接入",
+            "cloneEngineMessage": f"已接入 {engine_name}，训练会提交到真实声音克隆服务。",
+        }
+    return {
+        "cloneTrainingEnabled": False,
+        "cloneEngineName": "",
+        "cloneEngineStatus": "未接入",
+        "cloneEngineMessage": "真实声音克隆服务未接入；当前只能上传授权样本和审核档案，不能创建真实训练。",
+    }
 
 
 def _seed_voice_assets(db: Session) -> None:
@@ -158,7 +185,7 @@ def voice_overview(db: Session = Depends(get_db)) -> dict[str, int]:
             select(func.count())
             .select_from(VoiceCloneRecord)
             .join(VoiceProfile, VoiceCloneRecord.profile_id == VoiceProfile.id)
-            .where(_clone_profile_filter())
+            .where(_clone_profile_filter(), VoiceCloneRecord.engine != MOCK_VOICE_ENGINE)
         )
         or 0
     )
@@ -173,6 +200,7 @@ def voice_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "fallbackUsage": int(fallback),
         "systemVoices": len(SYSTEM_VOICES),
         "defaultVoice": DEFAULT_SYSTEM_VOICE["name"],
+        **_voice_clone_status(),
     }
 
 
@@ -296,7 +324,7 @@ def list_training_jobs(db: Session = Depends(get_db)) -> list[VoiceTrainingJob]:
             select(VoiceTrainingJob)
             .join(VoiceProfile, VoiceTrainingJob.profile_id == VoiceProfile.id)
             .join(VoiceCloneRecord, VoiceCloneRecord.training_job_id == VoiceTrainingJob.id)
-            .where(_clone_profile_filter())
+            .where(_clone_profile_filter(), VoiceTrainingJob.engine != MOCK_VOICE_ENGINE)
             .order_by(VoiceTrainingJob.created_at.desc())
         ).all()
     )
@@ -310,6 +338,8 @@ def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Se
     usable_samples = _usable_sample_count(db, profile.id)
     if usable_samples <= 0:
         raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再创建克隆训练")
+    if not _voice_clone_training_ready():
+        raise HTTPException(status_code=400, detail="真实声音克隆服务未接入，不能创建训练。请先在后台配置授权的声音克隆服务后再提交。")
     sample_seconds = (
         db.scalar(
             select(func.coalesce(func.sum(VoiceSample.duration_seconds), 0)).where(
@@ -321,12 +351,12 @@ def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Se
     sample_minutes = max(payload.sample_minutes, max(1, int(sample_seconds // 60) if sample_seconds else usable_samples))
     job = VoiceTrainingJob(
         profile_id=profile.id,
-        status="排队中",
+        status="已提交",
         progress=0,
-        engine=payload.engine,
+        engine=_voice_clone_engine_name(),
         sample_minutes=sample_minutes,
-        message=payload.message or "克隆训练任务已创建；真实克隆服务接入前保留人工复核安全门。",
-        started_at=None,
+        message=payload.message or "已提交到真实声音克隆服务，等待服务商返回训练进度。",
+        started_at=datetime.utcnow(),
         finished_at=None,
     )
     db.add(job)

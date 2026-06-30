@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     dm_browser_slow_mo_ms: int = 0
     dm_browser_live_send_enabled: bool = False
     voice_sample_storage_root: str = ".voice_samples"
+    voice_clone_training_enabled: bool = False
+    voice_clone_engine_name: str = ""
     telephony_gateway_mode: str = "simulator"
     asterisk_host: str = "127.0.0.1"
     asterisk_ami_port: int = 5038

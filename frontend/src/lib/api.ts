@@ -348,6 +348,10 @@ export type VoiceOverview = {
   fallbackUsage: number;
   systemVoices: number;
   defaultVoice: string;
+  cloneTrainingEnabled: boolean;
+  cloneEngineName: string;
+  cloneEngineStatus: string;
+  cloneEngineMessage: string;
 };
 
 export type SystemVoice = {

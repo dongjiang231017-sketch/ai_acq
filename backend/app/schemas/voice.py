@@ -13,6 +13,10 @@ class VoiceOverview(BaseModel):
     fallback_usage: Annotated[int, Field(alias="fallbackUsage")]
     system_voices: Annotated[int, Field(alias="systemVoices")] = 0
     default_voice: Annotated[str, Field(alias="defaultVoice")] = "标准AI音色"
+    clone_training_enabled: Annotated[bool, Field(alias="cloneTrainingEnabled")] = False
+    clone_engine_name: Annotated[str, Field(alias="cloneEngineName")] = ""
+    clone_engine_status: Annotated[str, Field(alias="cloneEngineStatus")] = "未接入"
+    clone_engine_message: Annotated[str, Field(alias="cloneEngineMessage")] = "真实声音克隆服务未接入"
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -65,7 +69,7 @@ class VoiceProfileRead(VoiceProfileCreate):
 
 
 class VoiceTrainingJobCreate(BaseModel):
-    engine: str = "mock-voice-engine"
+    engine: str = "真实声音克隆服务"
     sample_minutes: Annotated[int, Field(alias="sampleMinutes", ge=0)] = 0
     message: str = ""
 
