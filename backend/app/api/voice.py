@@ -173,7 +173,7 @@ def _voice_clone_training_ready() -> bool:
 
 
 def _voice_clone_status() -> dict[str, str | bool]:
-    provider_status = dashscope_provider_status(probe=False)
+    provider_status = dashscope_provider_status(probe=True)
     if provider_status.ready:
         return {
             "cloneTrainingEnabled": True,
@@ -439,7 +439,7 @@ def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Se
     usable_samples = _usable_sample_count(db, profile.id)
     if usable_samples <= 0:
         raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再生成复刻音色")
-    provider_status = dashscope_provider_status(probe=False)
+    provider_status = dashscope_provider_status(probe=True)
     if not provider_status.ready:
         missing_public_url = "" if provider_status.sample_public_base_url_configured else " 还需要配置可公网访问的 VOICE_SAMPLE_PUBLIC_BASE_URL。"
         raise HTTPException(

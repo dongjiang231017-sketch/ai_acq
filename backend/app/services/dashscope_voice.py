@@ -52,6 +52,12 @@ def _api_key() -> str:
     return settings.dashscope_api_key.strip()
 
 
+def _configure_dashscope_sdk() -> None:
+    key = _api_key()
+    if key:
+        dashscope.api_key = key
+
+
 def _workspace() -> str | None:
     value = settings.dashscope_workspace.strip()
     return value or None
@@ -176,6 +182,7 @@ def synthesize_dashscope_preview(profile_id: str, record_id: str, voice_id: str)
     output_path = output_dir / f"{record_id}.wav"
 
     try:
+        _configure_dashscope_sdk()
         synthesizer = SpeechSynthesizer(
             model=settings.dashscope_tts_model,
             voice=voice_id,
@@ -245,4 +252,6 @@ def _nested_response_value(response: object, *keys: str) -> object | None:
 def _safe_provider_error(exc: Exception) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     redacted = re.sub(r"sk-[A-Za-z0-9_-]+", "DASHSCOPE_API_KEY", text)
+    if "Arrearage" in redacted or "overdue-payment" in redacted:
+        return "阿里云 DashScope 账户计费状态异常或欠费，服务拒绝访问。请在阿里云控制台确认百炼/DashScope 账户余额、欠费状态和模型服务开通状态后重试。"
     return redacted[:500]

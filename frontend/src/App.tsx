@@ -1263,6 +1263,7 @@ function App() {
   const [voiceSampleMessage, setVoiceSampleMessage] = useState("");
   const [isUploadingVoiceSample, setIsUploadingVoiceSample] = useState(false);
   const [isCheckingVoiceProvider, setIsCheckingVoiceProvider] = useState(false);
+  const [creatingVoiceCloneProfileId, setCreatingVoiceCloneProfileId] = useState<string | null>(null);
   const settingsEditorRef = useRef<HTMLElement | null>(null);
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
   const nativeLoginViewportRef = useRef<HTMLDivElement | null>(null);
@@ -2073,6 +2074,7 @@ function App() {
     if (profile.authorizationStatus !== "授权通过") return "需先通过授权审核";
     if (usableVoiceSampleCount(profile.id) <= 0) return "需先上传可用录音样本";
     if (!voiceOverview.cloneTrainingEnabled) return voiceOverview.cloneEngineMessage || "真实声音克隆服务未接入";
+    if (voiceProviderStatus.configured && !voiceProviderStatus.ready) return voiceProviderStatus.message;
     return "";
   }
 
@@ -2232,6 +2234,8 @@ function App() {
       setVoiceSampleMessage(blockReason);
       return;
     }
+    setCreatingVoiceCloneProfileId(profile.id);
+    setVoiceSampleMessage(`正在提交「${profile.name}」到 DashScope/CosyVoice 生成复刻音色，请稍等...`);
     try {
       const usableSamples = usableVoiceSampleCount(profile.id);
       const job = await api.createVoiceTrainingJob(profile.id, {
@@ -2250,7 +2254,21 @@ function App() {
       setVoiceCloneRecords(cloneRecordData);
       setVoiceSampleMessage("已生成复刻音色，并写入克隆语音记录。");
     } catch (error) {
-      setVoiceSampleMessage(error instanceof Error ? error.message : "生成复刻音色失败");
+      const [overviewResult, providerResult, profileResult, jobResult, cloneRecordResult] = await Promise.allSettled([
+        api.voiceOverview(),
+        api.voiceProviderStatus(true),
+        api.voiceProfiles(),
+        api.voiceTrainingJobs(),
+        api.voiceCloneRecords(),
+      ]);
+      if (overviewResult.status === "fulfilled") setVoiceOverview(overviewResult.value);
+      if (providerResult.status === "fulfilled") setVoiceProviderStatus(providerResult.value);
+      if (profileResult.status === "fulfilled") setVoiceProfiles(profileResult.value);
+      if (jobResult.status === "fulfilled") setVoiceTrainingJobs(jobResult.value);
+      if (cloneRecordResult.status === "fulfilled") setVoiceCloneRecords(cloneRecordResult.value);
+      setVoiceSampleMessage(error instanceof Error ? `复刻生成失败：${error.message}` : "复刻生成失败");
+    } finally {
+      setCreatingVoiceCloneProfileId(null);
     }
   }
 
@@ -3464,6 +3482,7 @@ function App() {
                 {customerVoiceProfiles.map((profile) => {
                   const blockReason = voiceTrainingBlockReason(profile);
                   const usableSamples = usableVoiceSampleCount(profile.id);
+                  const isCreatingClone = creatingVoiceCloneProfileId === profile.id;
                   return (
                     <article
                       className={profile.id === activeVoiceProfile?.id ? "account-row clickable-card is-selected" : "account-row clickable-card"}
@@ -3478,14 +3497,14 @@ function App() {
                         </div>
                         <button
                           className="row-action is-primary"
-                          disabled={Boolean(blockReason)}
+                          disabled={Boolean(blockReason) || Boolean(creatingVoiceCloneProfileId)}
                           onClick={(event) => {
                             event.stopPropagation();
                             void createVoiceTrainingJob(profile);
                           }}
                           type="button"
                         >
-                          生成复刻
+                          {isCreatingClone ? "生成中..." : "生成复刻"}
                         </button>
                       </div>
                     </article>
