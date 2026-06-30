@@ -263,11 +263,11 @@ const fallbackDmAccounts: DmAccount[] = [
     id: "dm_account_1",
     platform: "美团",
     accountName: "美团个人号-南昌本地生活",
-    loginLabel: "已登录",
-    status: "可用",
+    loginLabel: "待绑定个人号",
+    status: "待登录",
     browserProfileKey: "meituan-nanchang-local",
     browserProfilePath: ".dm_browser_profiles/meituan-nanchang-local",
-    sessionStatus: "模拟可用",
+    sessionStatus: "未登录",
     riskStatus: "正常",
     dailyLimit: 200,
     sentToday: 86,
@@ -284,10 +284,10 @@ const fallbackDmAccounts: DmAccount[] = [
     platform: "饿了么",
     accountName: "饿了么个人号-餐饮招商",
     loginLabel: "待绑定个人号",
-    status: "可用",
+    status: "待登录",
     browserProfileKey: "eleme-food-growth",
     browserProfilePath: ".dm_browser_profiles/eleme-food-growth",
-    sessionStatus: "模拟可用",
+    sessionStatus: "未登录",
     riskStatus: "正常",
     dailyLimit: 150,
     sentToday: 0,
@@ -304,10 +304,10 @@ const fallbackDmAccounts: DmAccount[] = [
     platform: "抖音",
     accountName: "抖音个人号-团购拓客",
     loginLabel: "待绑定个人号",
-    status: "可用",
+    status: "待登录",
     browserProfileKey: "douyin-group-growth",
     browserProfilePath: ".dm_browser_profiles/douyin-group-growth",
-    sessionStatus: "模拟可用",
+    sessionStatus: "未登录",
     riskStatus: "正常",
     dailyLimit: 120,
     sentToday: 0,
@@ -387,6 +387,15 @@ function personalLoginUrl(platform: string, url?: string | null) {
   return value && !isLegacyBusinessBackendUrl(platform, value) ? value : "";
 }
 
+function loginEntryHost(url: string) {
+  if (!url) return "未配置";
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
 function accountLoginLabel(account: DmAccount) {
   const label = account.loginLabel?.trim();
   if (!label || label === "待绑定真实平台账号" || label === "待绑定商家号") return "待绑定个人号";
@@ -394,25 +403,25 @@ function accountLoginLabel(account: DmAccount) {
 }
 
 function isDmLoginReadyStatus(status?: string | null) {
-  return status === "已登录" || status === "模拟可用";
+  return status === "已登录";
 }
 
 function displayDmLoginStatus(status?: string | null) {
-  if (status === "模拟可用") return "已登录/可用";
+  if (status === "模拟可用") return "未检测";
   return status || "未登录";
 }
 
 function dmLoginStatusHint(status?: string | null) {
-  if (status === "模拟可用") return "当前为模拟模式，账号已放行可用于流程联调。";
-  if (status === "已登录") return "已检测到该个人号的隔离登录会话。";
-  return "请在当前页面完成手机号验证码登录。";
+  if (status === "已登录") return "已检测到该个人号的真实平台登录态。";
+  if (status === "模拟可用") return "旧模拟状态不会放行，请重新完成真实登录检测。";
+  return "打开平台真实登录页完成登录，然后回到这里点击检测。";
 }
 
 function platformLoginEntryLabel(config: DmPlatformConfig) {
-  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "客户端内置个人号入口";
-  if (config.homeUrl?.trim()) return "客户端内置个人号入口";
-  if (platformLoginUrls[config.platform]) return "客户端内置个人号入口";
-  return "客户端内置个人号入口";
+  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "平台真实登录入口";
+  if (config.homeUrl?.trim()) return "平台真实登录入口";
+  if (platformLoginUrls[config.platform]) return "平台真实登录入口";
+  return "平台真实登录入口";
 }
 
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
@@ -621,6 +630,10 @@ const fallbackVoiceOverview: VoiceOverview = {
   fallbackUsage: 0,
   systemVoices: 3,
   defaultVoice: "标准AI音色",
+  cloneTrainingEnabled: false,
+  cloneEngineName: "",
+  cloneEngineStatus: "未接入",
+  cloneEngineMessage: "真实声音克隆服务未接入",
 };
 
 const fallbackSystemVoices: SystemVoice[] = [
@@ -1068,12 +1081,7 @@ function App() {
   const [dmLoginMessage, setDmLoginMessage] = useState("");
   const [dmLoginEntryReady, setDmLoginEntryReady] = useState(false);
   const [isPreparingDmLogin, setIsPreparingDmLogin] = useState(false);
-  const [isSubmittingDmInlineLogin, setIsSubmittingDmInlineLogin] = useState(false);
-  const [dmInlineLoginForm, setDmInlineLoginForm] = useState({
-    phoneNumber: "",
-    verificationCode: "",
-    agreementAccepted: true,
-  });
+  const [selectedDmLoginAccountId, setSelectedDmLoginAccountId] = useState<string | null>(null);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
   const [voiceProfileForm, setVoiceProfileForm] = useState({
@@ -1136,8 +1144,12 @@ function App() {
     [dmSupportedAccounts],
   );
   const activeLoginAccount = useMemo(() => {
-    return dmSupportedAccounts.find((account) => account.id === dmLoginSession?.accountId) ?? dmSupportedAccounts[0];
-  }, [dmSupportedAccounts, dmLoginSession]);
+    return (
+      dmSupportedAccounts.find((account) => account.id === selectedDmLoginAccountId) ??
+      dmSupportedAccounts.find((account) => account.id === dmLoginSession?.accountId) ??
+      dmSupportedAccounts[0]
+    );
+  }, [dmSupportedAccounts, dmLoginSession, selectedDmLoginAccountId]);
   const activeLoginConfig = useMemo(() => {
     if (!activeLoginAccount) return null;
     return dmPlatformConfigs.find((config) => config.platform === activeLoginAccount.platform) ?? null;
@@ -1151,8 +1163,8 @@ function App() {
     ? activeLoginConfig
       ? platformLoginEntryLabel(activeLoginConfig)
       : activeLoginUrl
-        ? "客户端内置个人号入口"
-        : "客户端内置个人号入口"
+        ? "平台真实登录入口"
+        : "平台真实登录入口"
     : "选择平台个人号";
   const dmRotationRows = useMemo(
     () =>
@@ -1579,16 +1591,30 @@ function App() {
     }, 80);
   }
 
-  async function prepareInlineDmLogin(accountId: string) {
+  function selectDmLoginAccount(accountId: string) {
+    setSelectedDmLoginAccountId(accountId);
+    if (dmLoginSession?.accountId !== accountId) {
+      setDmLoginEntryReady(false);
+    }
+    const account = dmAccounts.find((item) => item.id === accountId);
+    setDmLoginMessage(
+      account && isDmLoginReadyStatus(account.sessionStatus)
+        ? "该个人号已经检测到真实平台登录态，可以继续检测或重新打开平台登录页。"
+        : "请选择下方“打开真实登录页”，在平台页面完成登录后再点击“登录后检测”。",
+    );
+    revealDmLoginWorkbench();
+  }
+
+  async function openRealDmLogin(accountId: string) {
+    setSelectedDmLoginAccountId(accountId);
     setIsPreparingDmLogin(true);
-    setDmLoginMessage("正在准备客户端内置登录入口...");
+    setDmLoginMessage("正在打开平台真实登录页...");
     revealDmLoginWorkbench();
     try {
-      const session = await api.createDmLoginSession(accountId);
+      const session = await api.openDmLoginWindow(accountId);
       setDmLoginSession(session);
-      setDmLoginEntryReady(true);
-      setDmInlineLoginForm({ phoneNumber: "", verificationCode: "", agreementAccepted: true });
-      setDmLoginMessage("请在当前页面输入手机号和验证码完成登录，全程不离开这个入口。");
+      setDmLoginEntryReady(session.launched);
+      setDmLoginMessage(session.launchMessage || "已打开平台真实登录页，请完成登录后回到客户端点击检测。");
       setDmAccounts((current) =>
         current.map((account) =>
           account.id === accountId
@@ -1599,44 +1625,15 @@ function App() {
                 riskStatus: session.riskStatus,
                 browserProfileKey: session.profileKey,
                 browserProfilePath: session.profilePath,
-                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "请在客户端内置入口完成登录",
+                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "请在平台真实登录页完成登录后点击检测",
               }
             : account,
         ),
       );
     } catch (error) {
-      setDmLoginMessage(error instanceof Error ? error.message : "准备登录入口失败");
+      setDmLoginMessage(error instanceof Error ? error.message : "打开平台真实登录页失败");
     } finally {
       setIsPreparingDmLogin(false);
-    }
-  }
-
-  async function submitInlineDmLogin(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!activeLoginAccount) return;
-    if (!dmInlineLoginForm.phoneNumber.trim()) {
-      setDmLoginMessage("请先输入手机号。");
-      return;
-    }
-    if (!dmInlineLoginForm.verificationCode.trim()) {
-      setDmLoginMessage("请先输入验证码。");
-      return;
-    }
-    if (!dmInlineLoginForm.agreementAccepted) {
-      setDmLoginMessage("请先勾选同意协议。");
-      return;
-    }
-
-    setIsSubmittingDmInlineLogin(true);
-    try {
-      const updated = await api.completeDmInlineLogin(activeLoginAccount.id, dmInlineLoginForm);
-      setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
-      setDmLoginMessage("登录成功，当前个人号已可用于同平台商家私信。");
-      setDmInlineLoginForm((current) => ({ ...current, verificationCode: "" }));
-    } catch (error) {
-      setDmLoginMessage(error instanceof Error ? error.message : "登录失败，请确认验证码后重试");
-    } finally {
-      setIsSubmittingDmInlineLogin(false);
     }
   }
 
@@ -1644,7 +1641,11 @@ function App() {
     try {
       const updated = await api.preflightDmAccount(accountId);
       setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
-      setDmLoginMessage(isDmLoginReadyStatus(updated.sessionStatus) ? "登录态检测通过，当前个人号可用于私信任务。" : "还未检测到登录态，请先在当前页面完成验证码登录。");
+      setDmLoginMessage(
+        isDmLoginReadyStatus(updated.sessionStatus)
+          ? "登录态检测通过，当前个人号可用于同平台商家私信任务。"
+          : updated.lastError || "还未检测到真实平台登录态，请先打开平台真实登录页完成登录。",
+      );
     } catch (error) {
       setDmLoginMessage(error instanceof Error ? error.message : "登录检测失败");
     }
@@ -1726,6 +1727,7 @@ function App() {
   function voiceTrainingBlockReason(profile: VoiceProfile) {
     if (profile.authorizationStatus !== "授权通过") return "需先通过授权审核";
     if (usableVoiceSampleCount(profile.id) <= 0) return "需先上传可用录音样本";
+    if (!voiceOverview.cloneTrainingEnabled) return voiceOverview.cloneEngineMessage || "真实声音克隆服务未接入";
     return "";
   }
 
@@ -1835,9 +1837,9 @@ function App() {
     try {
       const usableSamples = usableVoiceSampleCount(profile.id);
       const job = await api.createVoiceTrainingJob(profile.id, {
-        engine: "mock-voice-engine",
+        engine: voiceOverview.cloneEngineName || "真实声音克隆服务",
         sampleMinutes: Math.max(usableSamples, 1),
-        message: "克隆训练任务已创建；真实克隆服务保持后置安全门。",
+        message: "提交真实声音克隆训练。",
       });
       setVoiceTrainingJobs((current) => [job, ...current]);
       const [overviewData, profileData, cloneRecordData] = await Promise.all([
@@ -1848,7 +1850,7 @@ function App() {
       setVoiceOverview(overviewData);
       setVoiceProfiles(profileData);
       setVoiceCloneRecords(cloneRecordData);
-      setVoiceSampleMessage("克隆训练已创建，并已写入克隆语音记录。");
+      setVoiceSampleMessage("已提交真实声音克隆训练，并写入克隆语音记录。");
     } catch (error) {
       setVoiceSampleMessage(error instanceof Error ? error.message : "创建训练失败");
     }
@@ -2720,7 +2722,7 @@ function App() {
         <section className="metrics outbound-metrics">
           <MetricCard icon={<Headphones size={20} />} label="克隆档案" value={voiceOverview.profiles} detail="客户/员工授权" tone="blue" />
           <MetricCard icon={<Radio size={20} />} label="系统音色" value={systemVoices.length || voiceOverview.systemVoices} detail={activeSystemVoice?.name ?? voiceOverview.defaultVoice} tone="green" />
-          <MetricCard icon={<ShieldAlert size={20} />} label="待授权" value={voiceOverview.pendingAuthorization} detail="不可训练" tone="amber" />
+          <MetricCard icon={<ShieldAlert size={20} />} label="克隆服务" value={voiceOverview.cloneEngineStatus} detail={voiceOverview.cloneEngineName || "未配置真实引擎"} tone="amber" />
           <MetricCard icon={<Activity size={20} />} label="使用记录" value={voiceOverview.usageRecords} detail="审计留痕" tone="rose" />
         </section>
 
@@ -2957,6 +2959,7 @@ function App() {
                 <Activity size={22} />
               </div>
               <div className="account-list">
+                {!voiceOverview.cloneTrainingEnabled && <div className="form-result">{voiceOverview.cloneEngineMessage}</div>}
                 {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无可训练的授权克隆档案。</div>}
                 {customerVoiceProfiles.map((profile) => {
                   const blockReason = voiceTrainingBlockReason(profile);
@@ -2971,7 +2974,7 @@ function App() {
                         <div>
                           <strong>{profile.name}</strong>
                           <small>{profile.authorizationStatus} · {profile.status} · {usableSamples} 条可用录音样本</small>
-                          <small>{blockReason || "授权和录音样本已满足，可创建克隆训练。"}</small>
+                          <small>{blockReason || "授权、录音样本和真实克隆服务均已满足，可提交训练。"}</small>
                         </div>
                         <button
                           className="row-action is-primary"
@@ -3001,7 +3004,11 @@ function App() {
                 <Clock3 size={22} />
               </div>
               <div className="task-list">
-                {customerVoiceTrainingJobs.length === 0 && <div className="empty-state">暂无克隆训练任务。</div>}
+                {customerVoiceTrainingJobs.length === 0 && (
+                  <div className="empty-state">
+                    {voiceOverview.cloneTrainingEnabled ? "暂无克隆训练任务。" : "真实克隆服务未接入，暂不会产生训练任务。"}
+                  </div>
+                )}
                 {customerVoiceTrainingJobs.map((job) => (
                   <div className="task-row" key={job.id}>
                     <span>{job.progress}%</span>
@@ -3808,10 +3815,10 @@ function App() {
                       <button
                         className="row-action is-primary"
                         disabled={isPreparingDmLogin}
-                        onClick={() => prepareInlineDmLogin(account.id)}
+                        onClick={() => openRealDmLogin(account.id)}
                         type="button"
                       >
-                        {isPreparingDmLogin ? "准备中" : "进入登录"}
+                        {isPreparingDmLogin ? "打开中" : "进入登录"}
                       </button>
                       <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
                         检测
@@ -3842,7 +3849,7 @@ function App() {
                       className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
                       disabled={isPreparingDmLogin}
                       key={account.id}
-                      onClick={() => prepareInlineDmLogin(account.id)}
+                      onClick={() => selectDmLoginAccount(account.id)}
                       type="button"
                     >
                       <span>{account.platform}</span>
@@ -3859,61 +3866,48 @@ function App() {
                     <em>{activeLoginEntryText}</em>
                   </div>
                   <div className={`embedded-login-body ${dmLoginEntryReady ? "is-open" : ""}`}>
-                    <div className="login-preview has-inline-form">
-                      <form className="inline-login-form" onSubmit={submitInlineDmLogin}>
-                        <div className="inline-login-brand">
-                          <span>{activeLoginAccount?.platform ?? "平台"}</span>
-                          <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 个人号登录` : "选择平台个人号"}</strong>
-                          <small>{dmLoginStatusHint(activeLoginAccount?.sessionStatus)}</small>
+                    <div className="login-preview has-real-login">
+                      <div className="real-login-panel">
+                        <div className="real-login-mark">
+                          <ExternalLink size={30} />
                         </div>
-                        <label className="inline-login-phone">
-                          <span>+86</span>
-                          <input
-                            autoComplete="tel"
-                            inputMode="tel"
-                            onChange={(event) =>
-                              setDmInlineLoginForm((current) => ({ ...current, phoneNumber: event.target.value }))
-                            }
-                            placeholder="请输入手机号"
-                            type="tel"
-                            value={dmInlineLoginForm.phoneNumber}
-                          />
-                        </label>
-                        <label className="inline-login-code">
-                          <input
-                            autoComplete="one-time-code"
-                            inputMode="numeric"
-                            onChange={(event) =>
-                              setDmInlineLoginForm((current) => ({ ...current, verificationCode: event.target.value }))
-                            }
-                            placeholder="请输入验证码"
-                            type="text"
-                            value={dmInlineLoginForm.verificationCode}
-                          />
-                          <button
-                            onClick={() => setDmLoginMessage("请以平台短信验证码为准；当前客户端全程在这个入口完成登录。")}
-                            type="button"
-                          >
-                            获取验证码
-                          </button>
-                        </label>
-                        <button className="inline-login-submit" disabled={!activeLoginAccount || isSubmittingDmInlineLogin} type="submit">
-                          {isSubmittingDmInlineLogin ? "登录中" : "同意协议并登录"}
+                        <span>{activeLoginAccount?.platform ?? "平台"}</span>
+                        <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 真实登录页` : "选择平台个人号"}</strong>
+                        <p>{dmLoginStatusHint(activeLoginAccount?.sessionStatus)}</p>
+                        <div className="real-login-url">
+                          <small>平台入口</small>
+                          <b>{loginEntryHost(activeLoginUrl)}</b>
+                        </div>
+                        <div className="real-login-steps">
+                          <div>
+                            <em>1</em>
+                            <span>打开平台真实页面</span>
+                          </div>
+                          <div>
+                            <em>2</em>
+                            <span>在独立 Profile 完成登录</span>
+                          </div>
+                          <div>
+                            <em>3</em>
+                            <span>点击登录后检测</span>
+                          </div>
+                        </div>
+                        <button
+                          className="primary-button real-login-button"
+                          disabled={!activeLoginAccount || isPreparingDmLogin}
+                          onClick={() => activeLoginAccount && openRealDmLogin(activeLoginAccount.id)}
+                          type="button"
+                        >
+                          <ExternalLink size={16} />
+                          {isPreparingDmLogin ? "打开中" : "打开真实登录页"}
                         </button>
-                        <label className="inline-login-agreement">
-                          <input
-                            checked={dmInlineLoginForm.agreementAccepted}
-                            onChange={(event) =>
-                              setDmInlineLoginForm((current) => ({ ...current, agreementAccepted: event.target.checked }))
-                            }
-                            type="checkbox"
-                          />
-                          <span>已阅读并同意《用户服务协议》《隐私权政策》</span>
-                        </label>
-                      </form>
-                      <div className="embedded-webview-note inline-login-note">
+                      </div>
+                      <div className="real-login-note">
                         <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
-                        <span>{dmLoginMessage || "这是唯一登录入口：在当前页面输入手机号和验证码，全程不离开这个入口。"}</span>
+                        <span>
+                          {dmLoginMessage ||
+                            "系统会为这个个人号使用独立浏览器 Profile。登录完成后不会立即标记成功，必须检测到 Cookie、localStorage 或页面登录标识后才显示已登录。"}
+                        </span>
                       </div>
                     </div>
                     <div className="profile-inspector">

@@ -22,7 +22,6 @@ from app.models.task import (
 )
 from app.schemas.dm import (
     DmAccountCreate,
-    DmAccountInlineLogin,
     DmAccountLoginSession,
     DmAccountLoginWindow,
     DmAccountRead,
@@ -101,9 +100,31 @@ def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
     legacy_business_name_tokens = ("招商号", "商家号", "经营宝")
     changed = False
     for account in accounts:
+        normalize_account_state(account)
         if _apply_dm_account_support_status(account):
             changed = True
             continue
+        if account.session_status == "模拟可用":
+            if profile_has_session_artifacts(account, include_existing=True):
+                account.status = "可用"
+                account.session_status = "已登录"
+                account.risk_status = "正常"
+                account.last_error = None
+            else:
+                account.status = "待登录"
+                account.session_status = "未登录"
+                account.last_error = "请先打开真实平台登录页，完成登录后点击检测"
+            changed = True
+        elif account.status == "可用" and account.session_status != "已登录":
+            if profile_has_session_artifacts(account, include_existing=True):
+                account.session_status = "已登录"
+                account.risk_status = "正常"
+                account.last_error = None
+            else:
+                account.status = "待登录"
+                account.session_status = "未登录"
+                account.last_error = "请先打开真实平台登录页，完成登录后点击检测"
+            changed = True
         if account.login_label in {"待绑定真实平台账号", "待绑定商家号", ""} or not account.login_label:
             account.login_label = "待绑定个人号"
             changed = True
@@ -119,8 +140,8 @@ def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
             platform=str(account_config["platform"]),
             account_name=str(account_config["account_name"]),
             login_label="待绑定个人号",
-            status="可用",
-            session_status="模拟可用",
+            status="待登录",
+            session_status="未登录",
             risk_status="正常",
             daily_limit=int(account_config["daily_limit"]),
             min_send_interval_seconds=int(account_config["min_send_interval_seconds"]),
@@ -221,7 +242,7 @@ def _login_session_payload(account: DirectMessageAccount, login_url: str) -> dic
         "profilePath": account.browser_profile_path or "",
         "sessionStatus": account.session_status,
         "riskStatus": account.risk_status,
-        "embeddedMode": "desktop-isolated-webview",
+        "embeddedMode": "desktop-isolated-real-login",
         "isolated": True,
     }
 
@@ -287,7 +308,7 @@ def _launch_isolated_login_window(login_url: str, profile_path: str) -> tuple[bo
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return True, "已打开独立登录窗口，请在弹出的页面完成个人号登录，然后回到客户端点击“登录后检测”。"
+    return True, "已打开该平台真实登录页，并使用这个个人号的独立 Profile。请完成登录后回到客户端点击“登录后检测”。"
 
 
 def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[DirectMessageAccount, str]:
@@ -305,10 +326,10 @@ def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[
         raise HTTPException(status_code=400, detail=f"暂不支持{account.platform}内置登录入口，请在高级配置里填写网页登录入口")
 
     account.last_login_check_at = datetime.utcnow()
-    if account.session_status not in {"已登录", "模拟可用"}:
+    if account.session_status != "已登录":
         account.status = "待登录"
         account.session_status = "未登录"
-        account.last_error = "隔离登录会话已创建，请在客户端内置个人号登录页完成登录后点击检测"
+        account.last_error = "隔离登录会话已创建，请打开平台真实登录页完成登录后点击检测"
     db.commit()
     db.refresh(account)
     return account, login_url
@@ -450,38 +471,6 @@ def open_dm_account_login_window(account_id: str, db: Session = Depends(get_db))
     }
 
 
-@router.post("/accounts/{account_id}/inline-login", response_model=DmAccountRead)
-def complete_dm_account_inline_login(
-    account_id: str,
-    payload: DmAccountInlineLogin,
-    db: Session = Depends(get_db),
-) -> DirectMessageAccount:
-    account = db.get(DirectMessageAccount, account_id)
-    if not account:
-        raise HTTPException(status_code=404, detail="平台个人号不存在")
-    if not payload.agreement_accepted:
-        raise HTTPException(status_code=400, detail="请先勾选同意协议")
-
-    normalize_account_state(account)
-    if _apply_dm_account_support_status(account):
-        db.commit()
-        db.refresh(account)
-        raise HTTPException(status_code=400, detail=_unsupported_platform_reason(account.platform))
-
-    digits = "".join(char for char in payload.phone_number if char.isdigit())
-    account.status = "可用"
-    account.session_status = "已登录"
-    account.risk_status = "正常"
-    account.last_error = None
-    account.last_login_check_at = datetime.utcnow()
-    if len(digits) >= 4:
-        account.login_label = f"个人号尾号{digits[-4:]}"
-
-    db.commit()
-    db.refresh(account)
-    return account
-
-
 @router.post("/accounts/{account_id}/preflight", response_model=DmAccountRead)
 def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = db.get(DirectMessageAccount, account_id)
@@ -498,10 +487,16 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
     account.last_login_check_at = datetime.utcnow()
     has_profile_session = profile_has_session_artifacts(account, previous_login_check_at, include_existing=True)
     if settings.dm_gateway_mode == "simulator":
-        account.status = "可用"
-        account.session_status = "已登录" if account.session_status == "已登录" or has_profile_session else "模拟可用"
-        account.risk_status = "正常"
-        account.last_error = None
+        if has_profile_session:
+            account.status = "可用"
+            account.session_status = "已登录"
+            account.risk_status = "正常"
+            account.last_error = None
+        else:
+            account.status = "待登录"
+            account.session_status = "未登录"
+            account.risk_status = "正常"
+            account.last_error = "未检测到真实平台登录态，请先打开平台真实登录页完成登录。"
     elif settings.dm_gateway_mode == "browser":
         config = _platform_config(db, account.platform)
         result = BrowserAutomationDmGateway().preflight_account(account, config)

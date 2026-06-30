@@ -56,7 +56,7 @@ GET  /api/direct-messages/messages
 发送前置校验在 `backend/app/services/dm_policy.py`：
 
 - `status` 必须为 `可用`。
-- `session_status` 必须为 `已登录` 或 `模拟可用`。
+- `session_status` 必须为 `已登录`，不能用模拟状态放行发送。
 - `risk_status` 不能是 `需验证`、`风控暂停`、`封禁`、`异常`。
 - `sent_today` 不能超过 `daily_limit`。
 - `last_sent_at + min_send_interval_seconds` 不能晚于当前时间。
@@ -93,7 +93,7 @@ DM_BROWSER_LIVE_SEND_ENABLED=true
 POST /api/direct-messages/accounts/{account_id}/preflight
 ```
 
-模拟模式会把账号标记为 `可用 / 模拟可用 / 正常`。真实浏览器模式下，应在这里检测扫码登录、验证码、风控页、人机校验，并把账号状态写回。
+检测时会优先读取该账号独立 Profile 下的 Cookie、localStorage、Session Storage 等登录痕迹；浏览器模式下还会结合平台页面登录标识选择器。只有检测成功才写回 `可用 / 已登录 / 正常`，否则保持 `待登录 / 未登录`。
 
 ## 平台页面选择器
 

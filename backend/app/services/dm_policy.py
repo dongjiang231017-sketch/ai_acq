@@ -9,7 +9,7 @@ from app.models.task import DirectMessageAccount, DirectMessageConversation, Out
 
 
 AVAILABLE_ACCOUNT_STATUS = {"可用"}
-AVAILABLE_SESSION_STATUS = {"模拟可用", "已登录"}
+AVAILABLE_SESSION_STATUS = {"已登录"}
 BLOCKED_RISK_STATUS = {"需验证", "风控暂停", "封禁", "异常"}
 SENT_CONVERSATION_STATUS = {"已发送", "已回复"}
 SUPPORTED_DM_PLATFORM_ORDER = ("美团", "饿了么", "抖音")

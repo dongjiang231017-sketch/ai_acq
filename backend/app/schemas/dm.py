@@ -54,14 +54,6 @@ class DmAccountLoginWindow(DmAccountLoginSession):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class DmAccountInlineLogin(BaseModel):
-    phone_number: Annotated[str, Field(alias="phoneNumber", min_length=5, max_length=30)]
-    verification_code: Annotated[str, Field(alias="verificationCode", min_length=4, max_length=12)]
-    agreement_accepted: Annotated[bool, Field(alias="agreementAccepted")] = True
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
 class DmAccountUpdate(BaseModel):
     account_name: Annotated[str | None, Field(alias="accountName", min_length=1, max_length=120)] = None
     login_label: Annotated[str | None, Field(alias="loginLabel")] = None
