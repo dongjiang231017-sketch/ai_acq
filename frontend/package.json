@@ -6,18 +6,22 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "desktop": "electron electron/main.cjs",
+    "desktop:preview": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:4178 electron electron/main.cjs",
+    "desktop:dev": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:5173 electron electron/main.cjs"
   },
   "dependencies": {
+    "lucide-react": "^0.468.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "lucide-react": "^0.468.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^42.5.1",
     "typescript": "^5.8.0",
     "vite": "^7.0.0"
   }

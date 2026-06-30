@@ -30,6 +30,7 @@ import {
   ChannelReport,
   DmAccount,
   DmConversation,
+  DmDesktopLoginEvidence,
   DmLoginSession,
   DmMessage,
   DmOverview,
@@ -75,6 +76,11 @@ const fallbackModules: ModuleSummary[] = [
   { key: "reports", name: "数据报表", description: "渠道、绩效和导出中心。", pageCount: 4, status: "ready" },
   { key: "settings", name: "系统设置", description: "线路、账号和合规保护。", pageCount: 4, status: "ready" },
 ];
+
+type DmLoginWebviewElement = HTMLElement & {
+  getWebContentsId?: () => number;
+  reload?: () => void;
+};
 
 const fallbackLeads: Lead[] = [
   {
@@ -414,14 +420,14 @@ function displayDmLoginStatus(status?: string | null) {
 function dmLoginStatusHint(status?: string | null) {
   if (status === "已登录") return "已检测到该个人号的真实平台登录态。";
   if (status === "模拟可用") return "旧模拟状态不会放行，请重新完成真实登录检测。";
-  return "打开平台真实登录页完成登录，然后回到这里点击检测。";
+  return "在客户端内置登录区完成平台登录，然后点击登录后检测。";
 }
 
 function platformLoginEntryLabel(config: DmPlatformConfig) {
-  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "平台真实登录入口";
-  if (config.homeUrl?.trim()) return "平台真实登录入口";
-  if (platformLoginUrls[config.platform]) return "平台真实登录入口";
-  return "平台真实登录入口";
+  if (isLegacyBusinessBackendUrl(config.platform, config.homeUrl)) return "客户端内置个人号入口";
+  if (config.homeUrl?.trim()) return "客户端内置个人号入口";
+  if (platformLoginUrls[config.platform]) return "客户端内置个人号入口";
+  return "客户端内置个人号入口";
 }
 
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
@@ -1081,6 +1087,7 @@ function App() {
   const [dmLoginMessage, setDmLoginMessage] = useState("");
   const [dmLoginEntryReady, setDmLoginEntryReady] = useState(false);
   const [isPreparingDmLogin, setIsPreparingDmLogin] = useState(false);
+  const [isDesktopClient, setIsDesktopClient] = useState(false);
   const [selectedDmLoginAccountId, setSelectedDmLoginAccountId] = useState<string | null>(null);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
@@ -1099,6 +1106,8 @@ function App() {
   const [isUploadingVoiceSample, setIsUploadingVoiceSample] = useState(false);
   const settingsEditorRef = useRef<HTMLElement | null>(null);
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
+  const nativeLoginViewportRef = useRef<HTMLDivElement | null>(null);
+  const nativeLoginWebviewRef = useRef<DmLoginWebviewElement | null>(null);
 
   const active = useMemo(
     () => modules.find((module) => module.key === activeModule) ?? modules[0],
@@ -1163,8 +1172,8 @@ function App() {
     ? activeLoginConfig
       ? platformLoginEntryLabel(activeLoginConfig)
       : activeLoginUrl
-        ? "平台真实登录入口"
-        : "平台真实登录入口"
+        ? "客户端内置个人号入口"
+        : "客户端内置个人号入口"
     : "选择平台个人号";
   const dmRotationRows = useMemo(
     () =>
@@ -1234,6 +1243,48 @@ function App() {
       return groups;
     }, {});
   }, [clientSettings]);
+
+  useEffect(() => {
+    setIsDesktopClient(Boolean(window.aiAcqDesktop?.isDesktopClient));
+  }, []);
+
+  useEffect(() => {
+    const viewport = nativeLoginViewportRef.current;
+    nativeLoginWebviewRef.current = null;
+    if (!viewport) return;
+
+    viewport.replaceChildren();
+    if (!isDesktopClient || !dmLoginEntryReady || !dmLoginSession || !activeLoginAccount || !activeLoginUrl) return;
+
+    const webview = document.createElement("webview") as DmLoginWebviewElement;
+    webview.className = "native-login-webview";
+    webview.setAttribute("src", activeLoginUrl);
+    webview.setAttribute("partition", `persist:dm-${dmLoginSession.profileKey || dmLoginSession.accountId}`);
+    webview.setAttribute("data-account-id", activeLoginAccount.id);
+    webview.setAttribute("data-platform", activeLoginAccount.platform);
+
+    const handleStart = () => setDmLoginMessage("内置登录页正在加载，请在当前区域完成平台登录。");
+    const handleStop = () => setDmLoginMessage("请在内置页面完成登录，完成后点击“登录后检测”。");
+    const handleFail = (event: Event) => {
+      const failure = event as Event & { errorCode?: number; errorDescription?: string };
+      if (failure.errorCode === -3) return;
+      setDmLoginMessage(failure.errorDescription || "内置登录页加载失败，请检查平台入口是否可访问。");
+    };
+
+    webview.addEventListener("did-start-loading", handleStart);
+    webview.addEventListener("did-stop-loading", handleStop);
+    webview.addEventListener("did-fail-load", handleFail);
+    viewport.appendChild(webview);
+    nativeLoginWebviewRef.current = webview;
+
+    return () => {
+      webview.removeEventListener("did-start-loading", handleStart);
+      webview.removeEventListener("did-stop-loading", handleStop);
+      webview.removeEventListener("did-fail-load", handleFail);
+      webview.remove();
+      if (nativeLoginWebviewRef.current === webview) nativeLoginWebviewRef.current = null;
+    };
+  }, [activeLoginAccount, activeLoginUrl, dmLoginEntryReady, dmLoginSession, isDesktopClient]);
 
   async function loadData() {
     setIsLoading(true);
@@ -1599,8 +1650,10 @@ function App() {
     const account = dmAccounts.find((item) => item.id === accountId);
     setDmLoginMessage(
       account && isDmLoginReadyStatus(account.sessionStatus)
-        ? "该个人号已经检测到真实平台登录态，可以继续检测或重新打开平台登录页。"
-        : "请选择下方“打开真实登录页”，在平台页面完成登录后再点击“登录后检测”。",
+        ? "该个人号已经检测到真实平台登录态，可以继续检测或重新加载内置登录页。"
+        : isDesktopClient
+          ? "请选择下方“在内置页登录”，在当前区域完成登录后再点击“登录后检测”。"
+          : "当前是网页预览，普通浏览器不能内嵌第三方平台登录页；请用桌面客户端打开后在此区域登录。",
     );
     revealDmLoginWorkbench();
   }
@@ -1608,13 +1661,17 @@ function App() {
   async function openRealDmLogin(accountId: string) {
     setSelectedDmLoginAccountId(accountId);
     setIsPreparingDmLogin(true);
-    setDmLoginMessage("正在打开平台真实登录页...");
+    setDmLoginMessage(isDesktopClient ? "正在加载客户端内置登录页..." : "正在准备桌面客户端登录会话...");
     revealDmLoginWorkbench();
     try {
-      const session = await api.openDmLoginWindow(accountId);
+      const session = await api.createDmLoginSession(accountId);
       setDmLoginSession(session);
-      setDmLoginEntryReady(session.launched);
-      setDmLoginMessage(session.launchMessage || "已打开平台真实登录页，请完成登录后回到客户端点击检测。");
+      setDmLoginEntryReady(isDesktopClient);
+      setDmLoginMessage(
+        isDesktopClient
+          ? "已在客户端内置登录区加载平台页面，请在当前区域完成登录后点击“登录后检测”。"
+          : "当前是网页预览，无法内嵌第三方平台登录页；请运行桌面客户端后在这里完成登录。",
+      );
       setDmAccounts((current) =>
         current.map((account) =>
           account.id === accountId
@@ -1625,13 +1682,13 @@ function App() {
                 riskStatus: session.riskStatus,
                 browserProfileKey: session.profileKey,
                 browserProfilePath: session.profilePath,
-                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "请在平台真实登录页完成登录后点击检测",
+                lastError: isDmLoginReadyStatus(session.sessionStatus) ? account.lastError : "请在客户端内置登录区完成登录后点击检测",
               }
             : account,
         ),
       );
     } catch (error) {
-      setDmLoginMessage(error instanceof Error ? error.message : "打开平台真实登录页失败");
+      setDmLoginMessage(error instanceof Error ? error.message : "加载客户端内置登录页失败");
     } finally {
       setIsPreparingDmLogin(false);
     }
@@ -1639,12 +1696,25 @@ function App() {
 
   async function preflightDmAccount(accountId: string) {
     try {
-      const updated = await api.preflightDmAccount(accountId);
+      let updated: DmAccount;
+      const account = dmAccounts.find((item) => item.id === accountId);
+      const webview = nativeLoginWebviewRef.current;
+      const webContentsId = webview?.getWebContentsId?.();
+      if (isDesktopClient && account && activeLoginAccount?.id === accountId && webContentsId) {
+        setDmLoginMessage("正在检测当前内置登录页的 Cookie、localStorage 和页面登录标识...");
+        const evidence: DmDesktopLoginEvidence = await window.aiAcqDesktop!.inspectDmLogin({
+          webContentsId,
+          platform: account.platform,
+        });
+        updated = await api.completeDmDesktopLoginCheck(accountId, evidence);
+      } else {
+        updated = await api.preflightDmAccount(accountId);
+      }
       setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
       setDmLoginMessage(
         isDmLoginReadyStatus(updated.sessionStatus)
           ? "登录态检测通过，当前个人号可用于同平台商家私信任务。"
-          : updated.lastError || "还未检测到真实平台登录态，请先打开平台真实登录页完成登录。",
+          : updated.lastError || "还未检测到真实平台登录态，请先在客户端内置登录区完成登录。",
       );
     } catch (error) {
       setDmLoginMessage(error instanceof Error ? error.message : "登录检测失败");
@@ -3866,47 +3936,64 @@ function App() {
                     <em>{activeLoginEntryText}</em>
                   </div>
                   <div className={`embedded-login-body ${dmLoginEntryReady ? "is-open" : ""}`}>
-                    <div className="login-preview has-real-login">
-                      <div className="real-login-panel">
-                        <div className="real-login-mark">
-                          <ExternalLink size={30} />
-                        </div>
-                        <span>{activeLoginAccount?.platform ?? "平台"}</span>
-                        <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 真实登录页` : "选择平台个人号"}</strong>
-                        <p>{dmLoginStatusHint(activeLoginAccount?.sessionStatus)}</p>
-                        <div className="real-login-url">
-                          <small>平台入口</small>
-                          <b>{loginEntryHost(activeLoginUrl)}</b>
-                        </div>
-                        <div className="real-login-steps">
-                          <div>
-                            <em>1</em>
-                            <span>打开平台真实页面</span>
+                    <div className={`login-preview has-real-login ${isDesktopClient ? "is-desktop-client" : "is-browser-preview"}`}>
+                      <div className={`real-login-panel ${isDesktopClient && dmLoginEntryReady ? "has-native-webview" : ""}`}>
+                        <div
+                          className={`native-login-viewport ${isDesktopClient && dmLoginEntryReady ? "is-visible" : ""}`}
+                          ref={nativeLoginViewportRef}
+                        />
+                        {(!isDesktopClient || !dmLoginEntryReady) && (
+                          <div className="real-login-placeholder">
+                            <div className="real-login-mark">
+                              <KeyRound size={30} />
+                            </div>
+                            <span>{activeLoginAccount?.platform ?? "平台"}</span>
+                            <strong>{activeLoginAccount ? `${activeLoginAccount.platform} 内置个人号登录` : "选择平台个人号"}</strong>
+                            <p>
+                              {isDesktopClient
+                                ? dmLoginStatusHint(activeLoginAccount?.sessionStatus)
+                                : "当前是网页预览，第三方平台登录页不能嵌入普通浏览器。请用桌面客户端打开后在这里登录。"}
+                            </p>
+                            <div className="real-login-url">
+                              <small>内置入口</small>
+                              <b>{loginEntryHost(activeLoginUrl)}</b>
+                            </div>
+                            <div className="real-login-steps">
+                              <div>
+                                <em>1</em>
+                                <span>在内置区加载平台</span>
+                              </div>
+                              <div>
+                                <em>2</em>
+                                <span>独立 Profile 隔离</span>
+                              </div>
+                              <div>
+                                <em>3</em>
+                                <span>登录后检测</span>
+                              </div>
+                            </div>
+                            <div className={`login-mode-alert ${isDesktopClient ? "is-desktop" : "is-preview"}`}>
+                              {isDesktopClient
+                                ? "会在当前区域加载平台页面，不会跳到外部浏览器。"
+                                : "普通浏览器无法承载平台真实登录 WebView，请运行桌面客户端。"}
+                            </div>
+                            <button
+                              className="primary-button real-login-button"
+                              disabled={!activeLoginAccount || isPreparingDmLogin}
+                              onClick={() => activeLoginAccount && openRealDmLogin(activeLoginAccount.id)}
+                              type="button"
+                            >
+                              <KeyRound size={16} />
+                              {isPreparingDmLogin ? "加载中" : isDesktopClient ? "在内置页登录" : "准备桌面登录会话"}
+                            </button>
                           </div>
-                          <div>
-                            <em>2</em>
-                            <span>在独立 Profile 完成登录</span>
-                          </div>
-                          <div>
-                            <em>3</em>
-                            <span>点击登录后检测</span>
-                          </div>
-                        </div>
-                        <button
-                          className="primary-button real-login-button"
-                          disabled={!activeLoginAccount || isPreparingDmLogin}
-                          onClick={() => activeLoginAccount && openRealDmLogin(activeLoginAccount.id)}
-                          type="button"
-                        >
-                          <ExternalLink size={16} />
-                          {isPreparingDmLogin ? "打开中" : "打开真实登录页"}
-                        </button>
+                        )}
                       </div>
                       <div className="real-login-note">
                         <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
                         <span>
                           {dmLoginMessage ||
-                            "系统会为这个个人号使用独立浏览器 Profile。登录完成后不会立即标记成功，必须检测到 Cookie、localStorage 或页面登录标识后才显示已登录。"}
+                            "系统会为这个个人号使用独立 Profile。登录完成后不会立即标记成功，必须检测到 Cookie、localStorage 或页面登录标识后才显示已登录。"}
                         </span>
                       </div>
                     </div>

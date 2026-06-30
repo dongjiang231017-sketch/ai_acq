@@ -152,6 +152,14 @@ export type DmLoginWindow = DmLoginSession & {
   launchMessage: string;
 };
 
+export type DmDesktopLoginEvidence = {
+  url: string;
+  title: string;
+  hasCookieEvidence: boolean;
+  hasStorageEvidence: boolean;
+  hasPageLoginSignal: boolean;
+};
+
 export type DmTemplate = {
   id: string;
   name: string;
@@ -648,6 +656,11 @@ export const api = {
   openDmLoginWindow: (accountId: string) =>
     request<DmLoginWindow>(`/direct-messages/accounts/${accountId}/login-window`, {
       method: "POST",
+    }),
+  completeDmDesktopLoginCheck: (accountId: string, evidence: DmDesktopLoginEvidence) =>
+    request<DmAccount>(`/direct-messages/accounts/${accountId}/desktop-login-check`, {
+      method: "POST",
+      body: JSON.stringify(evidence),
     }),
   dmPlatformConfigs: () => request<DmPlatformConfig[]>("/direct-messages/platform-configs"),
   createDmPlatformConfig: (config: Omit<DmPlatformConfig, "id" | "createdAt">) =>

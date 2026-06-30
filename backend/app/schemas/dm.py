@@ -54,6 +54,16 @@ class DmAccountLoginWindow(DmAccountLoginSession):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DmAccountDesktopLoginCheck(BaseModel):
+    url: str = ""
+    title: str = ""
+    has_cookie_evidence: Annotated[bool, Field(alias="hasCookieEvidence")] = False
+    has_storage_evidence: Annotated[bool, Field(alias="hasStorageEvidence")] = False
+    has_page_login_signal: Annotated[bool, Field(alias="hasPageLoginSignal")] = False
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DmAccountUpdate(BaseModel):
     account_name: Annotated[str | None, Field(alias="accountName", min_length=1, max_length=120)] = None
     login_label: Annotated[str | None, Field(alias="loginLabel")] = None

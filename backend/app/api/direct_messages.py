@@ -4,6 +4,7 @@ import subprocess
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -22,6 +23,7 @@ from app.models.task import (
 )
 from app.schemas.dm import (
     DmAccountCreate,
+    DmAccountDesktopLoginCheck,
     DmAccountLoginSession,
     DmAccountLoginWindow,
     DmAccountRead,
@@ -39,7 +41,7 @@ from app.schemas.dm import (
     DmTemplateRead,
 )
 from app.schemas.task import TaskRead
-from app.services.dm_browser_profile import normalize_account_state, profile_has_session_artifacts
+from app.services.dm_browser_profile import PLATFORM_SESSION_DOMAINS, normalize_account_state, profile_has_session_artifacts
 from app.services.dm_gateway import BrowserAutomationDmGateway
 from app.services.dm_listener import sync_dm_replies as sync_dm_replies_service
 from app.services.dm_policy import SUPPORTED_DM_PLATFORM_ORDER, SUPPORTED_DM_PLATFORMS, UNSUPPORTED_DM_PLATFORM_REASONS
@@ -113,7 +115,7 @@ def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
             else:
                 account.status = "待登录"
                 account.session_status = "未登录"
-                account.last_error = "请先打开真实平台登录页，完成登录后点击检测"
+                account.last_error = "请先在客户端内置登录区完成登录后点击检测"
             changed = True
         elif account.status == "可用" and account.session_status != "已登录":
             if profile_has_session_artifacts(account, include_existing=True):
@@ -123,7 +125,7 @@ def _seed_default_accounts(db: Session) -> list[DirectMessageAccount]:
             else:
                 account.status = "待登录"
                 account.session_status = "未登录"
-                account.last_error = "请先打开真实平台登录页，完成登录后点击检测"
+                account.last_error = "请先在客户端内置登录区完成登录后点击检测"
             changed = True
         if account.login_label in {"待绑定真实平台账号", "待绑定商家号", ""} or not account.login_label:
             account.login_label = "待绑定个人号"
@@ -247,6 +249,12 @@ def _login_session_payload(account: DirectMessageAccount, login_url: str) -> dic
     }
 
 
+def _host_matches_platform(platform_name: str, url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower().lstrip(".")
+    domains = PLATFORM_SESSION_DOMAINS.get(platform_name, ())
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in domains)
+
+
 def _chrome_executable() -> str | None:
     system = platform.system()
     candidates: list[str] = []
@@ -308,7 +316,7 @@ def _launch_isolated_login_window(login_url: str, profile_path: str) -> tuple[bo
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return True, "已打开该平台真实登录页，并使用这个个人号的独立 Profile。请完成登录后回到客户端点击“登录后检测”。"
+    return True, "已打开该平台登录页，并使用这个个人号的独立 Profile。请完成登录后回到客户端点击“登录后检测”。"
 
 
 def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[DirectMessageAccount, str]:
@@ -329,7 +337,7 @@ def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[
     if account.session_status != "已登录":
         account.status = "待登录"
         account.session_status = "未登录"
-        account.last_error = "隔离登录会话已创建，请打开平台真实登录页完成登录后点击检测"
+        account.last_error = "隔离登录会话已创建，请在客户端内置登录区完成登录后点击检测"
     db.commit()
     db.refresh(account)
     return account, login_url
@@ -471,6 +479,47 @@ def open_dm_account_login_window(account_id: str, db: Session = Depends(get_db))
     }
 
 
+@router.post("/accounts/{account_id}/desktop-login-check", response_model=DmAccountRead)
+def complete_dm_account_desktop_login_check(
+    account_id: str,
+    payload: DmAccountDesktopLoginCheck,
+    db: Session = Depends(get_db),
+) -> DirectMessageAccount:
+    account = db.get(DirectMessageAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="平台个人号不存在")
+
+    normalize_account_state(account)
+    if _apply_dm_account_support_status(account):
+        db.commit()
+        db.refresh(account)
+        return account
+
+    account.last_login_check_at = datetime.utcnow()
+    has_platform_page = _host_matches_platform(account.platform, payload.url)
+    has_login_evidence = (
+        payload.has_cookie_evidence
+        or payload.has_storage_evidence
+        or payload.has_page_login_signal
+        or profile_has_session_artifacts(account, include_existing=True)
+    )
+
+    if has_platform_page and has_login_evidence:
+        account.status = "可用"
+        account.session_status = "已登录"
+        account.risk_status = "正常"
+        account.last_error = None
+    else:
+        account.status = "待登录"
+        account.session_status = "未登录"
+        account.risk_status = "正常"
+        account.last_error = "内置登录区未检测到真实平台登录态，请在当前页面完成登录后再次点击检测。"
+
+    db.commit()
+    db.refresh(account)
+    return account
+
+
 @router.post("/accounts/{account_id}/preflight", response_model=DmAccountRead)
 def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> DirectMessageAccount:
     account = db.get(DirectMessageAccount, account_id)
@@ -496,7 +545,7 @@ def preflight_dm_account(account_id: str, db: Session = Depends(get_db)) -> Dire
             account.status = "待登录"
             account.session_status = "未登录"
             account.risk_status = "正常"
-            account.last_error = "未检测到真实平台登录态，请先打开平台真实登录页完成登录。"
+            account.last_error = "未检测到真实平台登录态，请先在客户端内置登录区完成登录。"
     elif settings.dm_gateway_mode == "browser":
         config = _platform_config(db, account.platform)
         result = BrowserAutomationDmGateway().preflight_account(account, config)
