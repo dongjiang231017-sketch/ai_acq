@@ -1243,6 +1243,8 @@ function App() {
   const [dmLoginMessage, setDmLoginMessage] = useState("");
   const [dmLoginEntryReady, setDmLoginEntryReady] = useState(false);
   const [isPreparingDmLogin, setIsPreparingDmLogin] = useState(false);
+  const [isCheckingDmLogin, setIsCheckingDmLogin] = useState(false);
+  const [checkingDmAccountId, setCheckingDmAccountId] = useState<string | null>(null);
   const [isDesktopClient, setIsDesktopClient] = useState(false);
   const [selectedDmLoginAccountId, setSelectedDmLoginAccountId] = useState<string | null>(null);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
@@ -1333,6 +1335,13 @@ function App() {
         ? "客户端内置个人号入口"
         : "客户端内置个人号入口"
     : "选择平台个人号";
+  const dmLoginFeedbackTone = isCheckingDmLogin
+    ? "is-loading"
+    : dmLoginMessage.includes("检测通过") || dmLoginMessage.includes("已加入")
+      ? "is-success"
+      : dmLoginMessage.includes("失败") || dmLoginMessage.includes("未检测") || dmLoginMessage.includes("还未")
+        ? "is-warning"
+        : "";
   const dmRotationRows = useMemo(
     () =>
       dmAccountPlatforms.map((platformName) => {
@@ -1422,6 +1431,7 @@ function App() {
     if (!viewport) return;
 
     viewport.replaceChildren();
+    if (activeModule !== "dm" || !["私信总览", "账号管理"].includes(activeDmTab)) return;
     if (!isDesktopClient || !dmLoginEntryReady || !activeLoginSession || !activeLoginAccount || !activeLoginUrl) return;
 
     const webview = document.createElement("webview") as DmLoginWebviewElement;
@@ -1452,7 +1462,7 @@ function App() {
       webview.remove();
       if (nativeLoginWebviewRef.current === webview) nativeLoginWebviewRef.current = null;
     };
-  }, [activeLoginAccount, activeLoginUrl, activeLoginSession, dmLoginEntryReady, isDesktopClient]);
+  }, [activeDmTab, activeLoginAccount, activeLoginUrl, activeLoginSession, activeModule, dmLoginEntryReady, isDesktopClient]);
 
   async function loadData() {
     setIsLoading(true);
@@ -1919,9 +1929,14 @@ function App() {
   }
 
   async function preflightDmAccount(accountId: string) {
+    const account = dmAccounts.find((item) => item.id === accountId);
+    setSelectedDmLoginAccountId(accountId);
+    setIsCheckingDmLogin(true);
+    setCheckingDmAccountId(accountId);
+    setDmLoginMessage(`正在检测${account ? `「${account.accountName}」` : "当前个人号"}的真实登录态，请稍等...`);
+    revealDmLoginWorkbench();
     try {
       let updated: DmAccount;
-      const account = dmAccounts.find((item) => item.id === accountId);
       const webview = nativeLoginWebviewRef.current;
       const webContentsId = webview?.getWebContentsId?.();
       if (isDesktopClient && account && activeLoginAccount?.id === accountId && webContentsId) {
@@ -1937,11 +1952,14 @@ function App() {
       setDmAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
       setDmLoginMessage(
         isDmLoginReadyStatus(updated.sessionStatus)
-          ? "登录态检测通过，当前个人号可用于同平台商家私信任务。"
+          ? `检测通过，${updated.accountName} 已加入已登录个人号列表，可用于同平台商家私信任务。`
           : updated.lastError || "还未检测到真实平台登录态，请先在客户端内置登录区完成登录。",
       );
     } catch (error) {
       setDmLoginMessage(error instanceof Error ? error.message : "登录检测失败");
+    } finally {
+      setIsCheckingDmLogin(false);
+      setCheckingDmAccountId(null);
     }
   }
 
@@ -4296,30 +4314,6 @@ function App() {
                   </button>
                 ))}
               </div>
-              <div className="logged-account-board">
-                <div className="section-caption">
-                  <strong>已登录个人号</strong>
-                  <small>{dmLoggedInAccounts.length} 个可参与轮换 · 剩余额度 {dmLoggedInRemainingQuota}</small>
-                </div>
-                {dmLoggedInAccounts.length === 0 ? (
-                  <div className="empty-state compact">暂无已登录账号。先在下方登录工作台完成个人号登录，再回到这里查看。</div>
-                ) : (
-                  <div className="logged-account-grid">
-                    {dmLoggedInAccounts.map((account) => (
-                      <article className="logged-account-card" key={account.id}>
-                        <div>
-                          <span>{account.platform}</span>
-                          <strong>{account.accountName}</strong>
-                          <small>{accountLoginLabel(account)}</small>
-                        </div>
-                        <em>
-                          {Math.max(0, account.dailyLimit - account.sentToday)} 条可发 · {account.minSendIntervalSeconds ?? 0} 秒/条
-                        </em>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </div>
               <form className="form-grid" onSubmit={submitDmAccount}>
                 <label>
                   平台
@@ -4374,47 +4368,44 @@ function App() {
             <article className="panel">
               <div className="panel-title">
                 <div>
-                  <p>Status</p>
-                  <h2>个人号额度和登录状态</h2>
+                  <p>Logged In</p>
+                  <h2>登录账号列表</h2>
                 </div>
                 <ShieldAlert size={22} />
               </div>
-              <div className="account-list">
-                {dmSupportedAccounts.map((account) => (
-                  <article className="account-row" key={account.id}>
-                    <div className="account-row-head">
-                      <div>
-                        <strong>{account.accountName}</strong>
-                        <small>{account.platform} · {accountLoginLabel(account)} · 独立登录环境</small>
-                        {account.lastError && <small className="error-text">{account.lastError}</small>}
-                      </div>
-                      <em>
-                        {account.sentToday}/{account.dailyLimit} · {account.minSendIntervalSeconds ?? 0}s
-                      </em>
-                    </div>
-                    <div className="account-row-meta">
-                      <span>{account.status}</span>
-                      <span>{displayDmLoginStatus(account.sessionStatus)}</span>
-                      <span>{account.riskStatus ?? "正常"}</span>
-                    </div>
-                    <div className="account-row-actions">
+              <div className="logged-account-panel">
+                <div className="logged-account-summary">
+                  <strong>{dmLoggedInAccounts.length}</strong>
+                  <span>个已登录个人号</span>
+                  <small>剩余额度 {dmLoggedInRemainingQuota} · 自动按同平台轮换</small>
+                </div>
+                {dmLoggedInAccounts.length === 0 ? (
+                  <div className="empty-state compact">暂无已登录账号。请在下方登录工作台完成真实平台登录，再点击“登录后检测”。</div>
+                ) : (
+                  <div className="logged-account-list">
+                    {dmLoggedInAccounts.map((account) => (
                       <button
-                        className="row-action is-primary"
-                        disabled={isPreparingDmLogin}
-                        onClick={() => openRealDmLogin(account.id)}
+                        className={`logged-account-item ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
+                        key={account.id}
+                        onClick={() => selectDmLoginAccount(account.id)}
                         type="button"
                       >
-                        {isPreparingDmLogin ? "打开中" : "进入登录"}
+                        <div>
+                          <span>{account.platform}</span>
+                          <strong>{account.accountName}</strong>
+                          <small>{accountLoginLabel(account)} · {account.riskStatus ?? "正常"}</small>
+                        </div>
+                        <em>
+                          {Math.max(0, account.dailyLimit - account.sentToday)} 条可发 · {account.minSendIntervalSeconds ?? 0} 秒/条
+                        </em>
+                        <small className="logged-account-view">查看账号</small>
                       </button>
-                      <button className="row-action" onClick={() => preflightDmAccount(account.id)} type="button">
-                        检测
-                      </button>
-                      <button className="row-action" onClick={() => prepareNewDmAccount(account.platform, account)} type="button">
-                        添加同平台号
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                    ))}
+                  </div>
+                )}
+                <div className="logged-account-footnote">
+                  这里只展示已通过检测的个人号；待登录账号在下方登录工作台处理。
+                </div>
               </div>
             </article>
 
@@ -4511,7 +4502,7 @@ function App() {
                           </div>
                         )}
                       </div>
-                      <div className="real-login-note">
+                      <div className={`real-login-note ${dmLoginFeedbackTone}`}>
                         <strong>{activeLoginAccount ? activeLoginAccount.accountName : "平台个人号"}</strong>
                         <span>
                           {dmLoginMessage ||
@@ -4547,12 +4538,12 @@ function App() {
                   <div className="button-row login-actions">
                     <button
                       className="secondary-button"
-                      disabled={!activeLoginAccount}
+                      disabled={!activeLoginAccount || isCheckingDmLogin}
                       onClick={() => activeLoginAccount && preflightDmAccount(activeLoginAccount.id)}
                       type="button"
                     >
                       <RefreshCw size={16} />
-                      登录后检测
+                      {isCheckingDmLogin && checkingDmAccountId === activeLoginAccount?.id ? "检测中..." : "登录后检测"}
                     </button>
                   </div>
                 </section>

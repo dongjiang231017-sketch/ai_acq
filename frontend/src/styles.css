@@ -1422,6 +1422,107 @@ button:disabled {
   font-weight: 850;
 }
 
+.logged-account-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.logged-account-summary {
+  min-height: 78px;
+  border: 1px solid #dbe8fb;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f8fbff, #eef6ff);
+  padding: 14px;
+  display: grid;
+  gap: 4px;
+}
+
+.logged-account-summary strong {
+  color: #14233c;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.logged-account-summary span {
+  color: #25344d;
+  font-weight: 950;
+}
+
+.logged-account-summary small,
+.logged-account-footnote {
+  color: #718198;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.logged-account-list {
+  display: grid;
+  gap: 10px;
+}
+
+.logged-account-item {
+  width: 100%;
+  min-height: 96px;
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+  background: #fbfdff;
+  color: #25344d;
+  padding: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.logged-account-item.is-selected {
+  border-color: #8db7ff;
+  background: #edf5ff;
+  box-shadow: inset 0 0 0 1px rgba(36, 115, 246, 0.14);
+}
+
+.logged-account-item div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.logged-account-item span {
+  width: fit-content;
+  border-radius: 999px;
+  background: #e6f8f1;
+  color: #0f9f70;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.logged-account-item strong,
+.logged-account-item small,
+.logged-account-item em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.logged-account-item strong {
+  color: #17233a;
+  font-size: 15px;
+}
+
+.logged-account-item small,
+.logged-account-item em {
+  color: #6d7d93;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.logged-account-view {
+  grid-column: 1 / -1;
+  color: #2473f6 !important;
+}
+
 .dm-conversation,
 .message-bubble,
 .account-row,
@@ -2071,6 +2172,30 @@ button:disabled {
   line-height: 1.45;
 }
 
+.real-login-note.is-loading {
+  background: #eef5ff;
+}
+
+.real-login-note.is-success {
+  background: #ecfdf5;
+  border-top-color: #bbf7d0;
+}
+
+.real-login-note.is-success strong,
+.real-login-note.is-success span {
+  color: #087247;
+}
+
+.real-login-note.is-warning {
+  background: #fff8e7;
+  border-top-color: #fed7aa;
+}
+
+.real-login-note.is-warning strong,
+.real-login-note.is-warning span {
+  color: #915f10;
+}
+
 .login-qr-mark {
   width: 72px;
   height: 72px;
@@ -2314,6 +2439,7 @@ button:disabled {
   .logged-account-grid,
   .rotation-rule-grid,
   .rotation-pool-row,
+  .logged-account-item,
   .rotation-setting-row,
   .real-login-steps,
   .profile-grid {
