@@ -28,6 +28,27 @@ type AiAcqDesktopCommentCaptureResult = {
   error?: string;
 };
 
+type AiAcqDesktopAutomationStep = {
+  name: string;
+  status: string;
+  message: string;
+  [key: string]: unknown;
+};
+
+type AiAcqDesktopDmAction = {
+  authorName: string;
+  profileUrl: string;
+  status: string;
+  sent: boolean;
+  message: string;
+  url?: string;
+};
+
+type AiAcqDesktopCommentAutomationResult = AiAcqDesktopCommentCaptureResult & {
+  steps: AiAcqDesktopAutomationStep[];
+  dmActions: AiAcqDesktopDmAction[];
+};
+
 interface Window {
   aiAcqDesktop?: {
     isDesktopClient: boolean;
@@ -36,5 +57,16 @@ interface Window {
       webContentsId: number;
       platform: string;
     }) => Promise<AiAcqDesktopCommentCaptureResult>;
+    runCommentInterceptAutomation: (payload: {
+      webContentsId: number;
+      platform: string;
+      keyword?: string;
+      sourceUrl?: string;
+      sourceType?: string;
+      scrollRounds?: number;
+      maxAuthors?: number;
+      dmMessage?: string;
+      allowSend?: boolean;
+    }) => Promise<AiAcqDesktopCommentAutomationResult>;
   };
 }

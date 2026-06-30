@@ -1094,6 +1094,41 @@ button:disabled {
   padding: 12px;
 }
 
+.comment-automation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.comment-automation-grid label {
+  display: grid;
+  gap: 7px;
+  color: #64758e;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.comment-automation-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.comment-automation-grid textarea {
+  min-height: 84px;
+}
+
+.checkbox-field {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px !important;
+}
+
+.checkbox-field span {
+  color: #42526c;
+  line-height: 1.45;
+}
+
 .comment-capture-shell {
   display: grid;
   grid-template-columns: 210px minmax(0, 1fr);
@@ -1130,6 +1165,43 @@ button:disabled {
   margin-top: 0;
 }
 
+.automation-trace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.automation-step {
+  max-width: 100%;
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  background: #fff;
+  color: #4b5d76;
+  font-size: 12px;
+  font-weight: 780;
+  line-height: 1.35;
+  padding: 6px 9px;
+  overflow-wrap: anywhere;
+}
+
+.automation-step.is-done,
+.automation-step.is-draft-ready,
+.automation-step.is-sent {
+  border-color: #bfe3cf;
+  background: #f2fff6;
+  color: #277044;
+}
+
+.automation-step.is-warning,
+.automation-step.is-failed,
+.automation-step.is-no-input,
+.automation-step.is-send-button-missing {
+  border-color: #f1cf92;
+  background: #fff8e9;
+  color: #8a5c10;
+}
+
 .intercept-source-card {
   display: flex;
   align-items: center;
@@ -1155,6 +1227,14 @@ button:disabled {
 .intercept-source-card small {
   color: #73839a;
   font-weight: 850;
+}
+
+.source-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .comment-table-wrap td {
@@ -3007,6 +3087,14 @@ button:disabled {
 	  .login-account-rail,
 	  .voice-library-grid {
     grid-template-columns: 1fr;
+  }
+
+  .comment-automation-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .source-card-actions {
+    justify-content: flex-start;
   }
 
   .voice-default-summary {

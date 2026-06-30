@@ -131,6 +131,32 @@ function commentCaptureScript(platform) {
       const firstShortLine = lines.find((line) => line.length > 0 && line.length <= 24 && !actionPattern.test(line) && !uiPattern.test(line));
       return firstShortLine ? firstShortLine.slice(0, 60) : "";
     };
+    const profileUrlFrom = (element) => {
+      const anchors = [
+        element.closest("a[href]"),
+        ...Array.from(element.querySelectorAll("a[href]")),
+        ...Array.from(element.parentElement?.querySelectorAll("a[href]") || []),
+      ].filter(Boolean);
+      const profilePattern = /(user|profile|author|creator|homepage|channel|个人主页|主页|sec_uid|web_rid|wxid|finder)/i;
+      const blockedPattern = /(login|passport|comment|reply|share|javascript:|#)$/i;
+      const videoPattern = /(\\/video\\/|aweme|modal_id|item|note|play|detail|search)/i;
+      const scored = anchors
+        .map((anchor) => {
+          const href = cleanText(anchor.href || anchor.getAttribute("href"));
+          const label = cleanText(anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "");
+          const info = descriptor(anchor);
+          if (!href || blockedPattern.test(href)) return null;
+          if (videoPattern.test(href) && !profilePattern.test(href) && !profilePattern.test(info)) return null;
+          const score = (profilePattern.test(href) ? 3 : 0)
+            + (profilePattern.test(info) ? 2 : 0)
+            + (label.length > 0 && label.length <= 40 ? 1 : 0)
+            + (/douyin\\.com|channels\\.weixin\\.qq\\.com|weixin\\.qq\\.com|wx\\.qq\\.com/i.test(href) ? 1 : 0);
+          return score >= 2 ? { href, score } : null;
+        })
+        .filter(Boolean)
+        .sort((left, right) => right.score - left.score);
+      return scored[0]?.href || "";
+    };
     const contentFrom = (lines, author) => {
       const meaningful = lines
         .filter((line) => line !== author)
@@ -180,7 +206,7 @@ function commentCaptureScript(platform) {
       comments.push({
         externalCommentId: externalIdFrom(element),
         authorName,
-        authorProfileUrl: "",
+        authorProfileUrl: profileUrlFrom(element),
         content,
         videoUrl: window.location.href,
         likeCount: readCount(text, ["赞", "点赞", "like"]),
@@ -202,6 +228,487 @@ function commentCaptureScript(platform) {
       comments,
     };
   })()`;
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function platformSearchUrl(platform, keyword) {
+  const query = String(keyword || "").trim();
+  if (!query) return "";
+  if (platform === "抖音") return `https://www.douyin.com/search/${encodeURIComponent(query)}?type=video`;
+  return "";
+}
+
+function waitForWebContentsIdle(targetContents, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      targetContents.removeListener("did-stop-loading", onStop);
+      targetContents.removeListener("did-fail-load", onFail);
+      resolve();
+    };
+    const onStop = () => setTimeout(finish, 800);
+    const onFail = () => setTimeout(finish, 800);
+    const timer = setTimeout(finish, timeoutMs);
+    targetContents.once("did-stop-loading", onStop);
+    targetContents.once("did-fail-load", onFail);
+    if (!targetContents.isLoading()) setTimeout(finish, 800);
+  });
+}
+
+function searchCurrentPageScript(keyword) {
+  return `(() => {
+    const keyword = ${JSON.stringify(keyword)};
+    const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const descriptor = (element) => [
+      element.tagName,
+      element.id,
+      typeof element.className === "string" ? element.className : "",
+      element.getAttribute("role") || "",
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("placeholder") || "",
+      element.getAttribute("title") || "",
+    ].join(" ");
+    const searchPattern = /(搜索|搜一搜|search|keyword|query)/i;
+    const setNativeValue = (element, value) => {
+      if (element.isContentEditable) {
+        element.focus();
+        element.textContent = value;
+        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        return;
+      }
+      const prototype = Object.getPrototypeOf(element);
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      if (setter) setter.call(element, value);
+      else element.value = value;
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const candidates = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"], [role="searchbox"], [role="textbox"]'))
+      .filter(isVisible)
+      .map((element) => {
+        const info = descriptor(element);
+        const score = (searchPattern.test(info) ? 4 : 0)
+          + (element.tagName === "INPUT" ? 1 : 0)
+          + (element.getAttribute("type") === "search" ? 3 : 0);
+        return { element, score, info: cleanText(info).slice(0, 120) };
+      })
+      .sort((left, right) => right.score - left.score);
+    const target = candidates[0]?.element;
+    if (!target) {
+      const button = Array.from(document.querySelectorAll("button, a, [role='button']")).find((element) => {
+        if (!isVisible(element)) return false;
+        return searchPattern.test(descriptor(element)) || searchPattern.test(cleanText(element.textContent));
+      });
+      if (button) {
+        button.scrollIntoView({ block: "center", inline: "center" });
+        button.click();
+        return { ok: false, clickedSearchButton: true, message: "已打开搜索入口，请确认页面是否出现搜索框。" };
+      }
+      return { ok: false, message: "当前页未找到可填写的搜索框。" };
+    }
+    target.scrollIntoView({ block: "center", inline: "center" });
+    setNativeValue(target, keyword);
+    target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+    target.dispatchEvent(new KeyboardEvent("keypress", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+    target.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+    const form = target.closest("form");
+    if (form) form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    return { ok: true, message: "已填写关键词并触发搜索。", target: candidates[0]?.info || "" };
+  })()`;
+}
+
+function openFirstVideoResultScript(platform) {
+  return `(() => {
+    const platform = ${JSON.stringify(platform)};
+    const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const descriptor = (element) => [
+      element.tagName,
+      element.id,
+      typeof element.className === "string" ? element.className : "",
+      element.getAttribute("role") || "",
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("title") || "",
+      Object.keys(element.dataset || {}).join(" "),
+    ].join(" ");
+    const blockedPattern = /(login|passport|download|协议|隐私|帮助|setting|message|chat|inbox)/i;
+    const videoPattern = /(\\/video\\/|modal_id|aweme|item|note|detail|play|feed|video|作品|播放|评论|点赞)/i;
+    const elements = Array.from(document.querySelectorAll("a[href], article, li, section, div[role='button'], button, [data-e2e], [data-testid]"));
+    const candidates = elements
+      .filter(isVisible)
+      .map((element) => {
+        const anchor = element.matches?.("a[href]") ? element : element.querySelector?.("a[href]");
+        const href = cleanText(anchor?.href || element.getAttribute?.("href") || "");
+        const text = cleanText(element.innerText || element.textContent).slice(0, 220);
+        const info = descriptor(element);
+        if (blockedPattern.test(href) || blockedPattern.test(info)) return null;
+        const hasMedia = Boolean(element.querySelector?.("video, img, canvas, picture")) || /VIDEO|IMG/.test(element.tagName);
+        const score = (videoPattern.test(href) ? 5 : 0)
+          + (videoPattern.test(info) ? 3 : 0)
+          + (videoPattern.test(text) ? 2 : 0)
+          + (hasMedia ? 2 : 0)
+          + (href && /douyin\\.com|channels\\.weixin\\.qq\\.com|weixin\\.qq\\.com|wx\\.qq\\.com/i.test(href) ? 1 : 0)
+          + (text.length > 8 && text.length < 220 ? 1 : 0);
+        return score >= 4 ? { element, anchor, href, text, score } : null;
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score);
+    const selected = candidates[0];
+    if (!selected) return { ok: false, message: "没有找到可打开的视频搜索结果。", platform };
+    const clickable = selected.anchor || selected.element;
+    clickable.scrollIntoView({ block: "center", inline: "center" });
+    const beforeUrl = window.location.href;
+    clickable.click();
+    return {
+      ok: true,
+      message: "已打开搜索结果视频。",
+      platform,
+      beforeUrl,
+      href: selected.href || "",
+      text: selected.text.slice(0, 120),
+      score: selected.score,
+    };
+  })()`;
+}
+
+function scrollCommentsScript(rounds) {
+  return `(async () => {
+    const rounds = ${rounds};
+    const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clickExpandButtons = () => {
+      const pattern = /(展开|更多评论|查看回复|加载更多|全部回复|more|reply|comments?)/i;
+      let clicked = 0;
+      for (const element of Array.from(document.querySelectorAll("button, a, [role='button'], span, div"))) {
+        if (clicked >= 8) break;
+        if (!isVisible(element)) continue;
+        const text = cleanText(element.innerText || element.textContent || element.getAttribute("aria-label") || element.getAttribute("title"));
+        if (!text || text.length > 24 || !pattern.test(text)) continue;
+        element.scrollIntoView({ block: "center", inline: "center" });
+        element.click();
+        clicked += 1;
+      }
+      return clicked;
+    };
+    const scrollTargets = () => {
+      const targetPattern = /(comment|reply|review|list|feed|评论|回复|留言|互动)/i;
+      return Array.from(document.querySelectorAll("main, section, aside, div, ul"))
+        .filter((element) => isVisible(element) && element.scrollHeight > element.clientHeight + 80)
+        .map((element) => {
+          const info = [
+            element.id,
+            typeof element.className === "string" ? element.className : "",
+            element.getAttribute("role") || "",
+            element.getAttribute("aria-label") || "",
+            cleanText(element.innerText || "").slice(0, 80),
+          ].join(" ");
+          const score = (targetPattern.test(info) ? 3 : 0) + Math.min(3, Math.floor((element.scrollHeight - element.clientHeight) / 600));
+          return { element, score };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, 4)
+        .map((item) => item.element);
+    };
+    let expandClicks = 0;
+    for (let index = 0; index < rounds; index += 1) {
+      expandClicks += clickExpandButtons();
+      const targets = scrollTargets();
+      for (const target of targets) target.scrollBy({ top: Math.max(360, target.clientHeight * 0.85), behavior: "instant" });
+      window.scrollBy({ top: Math.max(520, window.innerHeight * 0.75), behavior: "instant" });
+      await wait(750);
+    }
+    return {
+      ok: true,
+      rounds,
+      expandClicks,
+      url: window.location.href,
+      title: document.title,
+      scrollY: window.scrollY,
+      height: document.documentElement.scrollHeight,
+    };
+  })()`;
+}
+
+function fillDirectMessageScript(message, allowSend) {
+  return `(async () => {
+    const message = ${JSON.stringify(message)};
+    const allowSend = ${allowSend ? "true" : "false"};
+    const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const descriptor = (element) => [
+      element.tagName,
+      element.id,
+      typeof element.className === "string" ? element.className : "",
+      element.getAttribute("role") || "",
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("placeholder") || "",
+      element.getAttribute("title") || "",
+      cleanText(element.textContent || "").slice(0, 40),
+    ].join(" ");
+    const notDisabled = (element) => !element.disabled && element.getAttribute("aria-disabled") !== "true";
+    const clickByPattern = (pattern) => {
+      const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], div, span"))
+        .filter((element) => isVisible(element) && notDisabled(element))
+        .map((element) => ({ element, text: cleanText(descriptor(element)) }))
+        .filter((item) => pattern.test(item.text))
+        .sort((left, right) => left.text.length - right.text.length);
+      const selected = candidates[0]?.element;
+      if (!selected) return false;
+      selected.scrollIntoView({ block: "center", inline: "center" });
+      selected.click();
+      return true;
+    };
+    const setNativeValue = (element, value) => {
+      element.focus();
+      if (element.isContentEditable) {
+        element.textContent = value;
+        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        return;
+      }
+      const prototype = Object.getPrototypeOf(element);
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      if (setter) setter.call(element, value);
+      else element.value = value;
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const openedMessageEntry = clickByPattern(/(私信|发消息|发送消息|联系|聊天|message|chat|dm)/i);
+    if (openedMessageEntry) await wait(1200);
+    const input = Array.from(document.querySelectorAll("textarea, input, [contenteditable='true'], [role='textbox']"))
+      .filter((element) => isVisible(element) && notDisabled(element))
+      .map((element) => {
+        const info = descriptor(element);
+        const score = (/(私信|消息|输入|回复|message|chat|send|textarea)/i.test(info) ? 4 : 0)
+          + (element.isContentEditable ? 2 : 0)
+          + (element.tagName === "TEXTAREA" ? 3 : 0)
+          + (element.tagName === "INPUT" ? 1 : 0);
+        return { element, score, info };
+      })
+      .sort((left, right) => right.score - left.score)[0]?.element;
+    if (!input) {
+      return {
+        ok: false,
+        status: "no-input",
+        openedMessageEntry,
+        message: openedMessageEntry ? "已打开私信入口，但未找到可填写的输入框。" : "未找到私信入口或输入框。",
+        url: window.location.href,
+        title: document.title,
+      };
+    }
+    setNativeValue(input, message);
+    await wait(500);
+    if (!allowSend) {
+      return {
+        ok: true,
+        status: "draft-ready",
+        openedMessageEntry,
+        filled: true,
+        sent: false,
+        message: "已填写私信草稿，按安全策略停在发送前。",
+        url: window.location.href,
+        title: document.title,
+      };
+    }
+    const sent = clickByPattern(/^(button.*)?(发送|send)$/i);
+    return {
+      ok: sent,
+      status: sent ? "sent" : "send-button-missing",
+      openedMessageEntry,
+      filled: true,
+      sent,
+      message: sent ? "已点击发送按钮。" : "已填写草稿，但未找到发送按钮。",
+      url: window.location.href,
+      title: document.title,
+    };
+  })()`;
+}
+
+async function runCommentAutomation(payload) {
+  const targetContents = webContents.fromId(Number(payload?.webContentsId));
+  const platform = String(payload?.platform || "");
+  const keyword = String(payload?.keyword || "").trim();
+  const sourceUrl = String(payload?.sourceUrl || "").trim();
+  const sourceType = String(payload?.sourceType || "").trim();
+  const dmMessage = String(payload?.dmMessage || "").trim();
+  const scrollRounds = clampInteger(payload?.scrollRounds, 6, 1, 20);
+  const maxAuthors = clampInteger(payload?.maxAuthors, 3, 0, 12);
+  const allowSend = Boolean(payload?.allowSend);
+  const steps = [];
+  const dmActions = [];
+  const addStep = (name, status, message, extra = {}) => {
+    steps.push({ name, status, message, ...extra });
+  };
+
+  if (!targetContents) {
+    return {
+      url: "",
+      title: "",
+      platform,
+      comments: [],
+      steps,
+      dmActions,
+      error: "未找到客户端内置登录页，请先打开平台登录页。",
+    };
+  }
+
+  try {
+    const canLoadSourceUrl = isHttpUrl(sourceUrl);
+    if (canLoadSourceUrl) {
+      await targetContents.loadURL(sourceUrl);
+      await waitForWebContentsIdle(targetContents);
+      addStep("open_source", "done", "已打开配置的来源页面。", { url: sourceUrl });
+    } else if (keyword) {
+      const searchUrl = platformSearchUrl(platform, keyword);
+      if (searchUrl) {
+        await targetContents.loadURL(searchUrl);
+        await waitForWebContentsIdle(targetContents);
+        addStep("search_keyword", "done", "已打开平台关键词搜索页。", { keyword, url: searchUrl });
+      } else {
+        const searchResult = await targetContents.executeJavaScript(searchCurrentPageScript(keyword), true);
+        await delay(1800);
+        await waitForWebContentsIdle(targetContents, 8000);
+        addStep("search_keyword", searchResult?.ok ? "done" : "warning", searchResult?.message || "已尝试在当前页搜索关键词。", {
+          keyword,
+        });
+      }
+    } else {
+      addStep("search_keyword", "skipped", "未填写关键词或来源 URL，沿用当前内置页。");
+    }
+
+    if ((!canLoadSourceUrl && keyword) || (sourceType && sourceType !== "视频链接" && sourceType !== "视频")) {
+      const openResult = await targetContents.executeJavaScript(openFirstVideoResultScript(platform), true);
+      await delay(1800);
+      await waitForWebContentsIdle(targetContents, 10000);
+      addStep("open_video", openResult?.ok ? "done" : "warning", openResult?.message || "已尝试打开第一个视频结果。", {
+        href: openResult?.href || "",
+        text: openResult?.text || "",
+      });
+    } else {
+      addStep("open_video", "skipped", canLoadSourceUrl ? "已直接打开配置的视频/主页 URL。" : "当前页作为采集页。");
+    }
+
+    const scrollResult = await targetContents.executeJavaScript(scrollCommentsScript(scrollRounds), true);
+    addStep("scroll_comments", "done", `已滚动加载评论 ${scrollRounds} 轮。`, {
+      expandClicks: scrollResult?.expandClicks || 0,
+      url: scrollResult?.url || targetContents.getURL(),
+    });
+
+    const capture = await targetContents.executeJavaScript(commentCaptureScript(platform), true);
+    const comments = Array.isArray(capture?.comments) ? capture.comments.slice(0, 120) : [];
+    addStep("capture_comments", "done", `已从当前内置页识别 ${comments.length} 条评论。`);
+
+    const profileTargets = [];
+    const seenProfiles = new Set();
+    for (const comment of comments) {
+      const profileUrl = String(comment?.authorProfileUrl || "").trim();
+      const authorName = String(comment?.authorName || "评论用户").trim();
+      if (!profileUrl || seenProfiles.has(profileUrl) || !isHttpUrl(profileUrl)) continue;
+      seenProfiles.add(profileUrl);
+      profileTargets.push({ authorName, profileUrl });
+      if (profileTargets.length >= maxAuthors) break;
+    }
+
+    if (!dmMessage || maxAuthors <= 0) {
+      addStep("prepare_dm", "skipped", "未配置私信文案或作者数为 0，跳过主页/私信自动化。");
+    } else if (profileTargets.length === 0) {
+      addStep("prepare_dm", "warning", "当前评论 DOM 未识别到作者主页链接，无法自动进入主页私信。");
+    } else {
+      for (const target of profileTargets) {
+        try {
+          await targetContents.loadURL(target.profileUrl);
+          await waitForWebContentsIdle(targetContents, 10000);
+          await delay(900);
+          const dmResult = await targetContents.executeJavaScript(fillDirectMessageScript(dmMessage, allowSend), true);
+          dmActions.push({
+            authorName: target.authorName,
+            profileUrl: target.profileUrl,
+            status: dmResult?.status || "unknown",
+            sent: Boolean(dmResult?.sent),
+            message: dmResult?.message || "",
+            url: dmResult?.url || targetContents.getURL(),
+          });
+        } catch (error) {
+          dmActions.push({
+            authorName: target.authorName,
+            profileUrl: target.profileUrl,
+            status: "failed",
+            sent: false,
+            message: error instanceof Error ? error.message : "进入作者主页或填写私信失败",
+            url: targetContents.getURL(),
+          });
+        }
+      }
+      const sentCount = dmActions.filter((action) => action.sent).length;
+      const draftCount = dmActions.filter((action) => action.status === "draft-ready").length;
+      addStep(
+        "prepare_dm",
+        dmActions.some((action) => action.status === "failed") ? "warning" : "done",
+        allowSend
+          ? `已处理 ${dmActions.length} 个作者主页，点击发送 ${sentCount} 条。`
+          : `已处理 ${dmActions.length} 个作者主页，填好 ${draftCount} 条草稿并停在发送前。`,
+      );
+    }
+
+    return {
+      url: capture?.url || targetContents.getURL(),
+      title: capture?.title || targetContents.getTitle(),
+      platform,
+      comments,
+      steps,
+      dmActions,
+    };
+  } catch (error) {
+    return {
+      url: targetContents.getURL(),
+      title: targetContents.getTitle(),
+      platform,
+      comments: [],
+      steps,
+      dmActions,
+      error: error instanceof Error ? error.message : "自动化执行失败",
+    };
+  }
 }
 
 ipcMain.handle("dm-login:inspect", async (_event, payload) => {
@@ -264,6 +771,8 @@ ipcMain.handle("comment-intercept:capture", async (_event, payload) => {
     };
   }
 });
+
+ipcMain.handle("comment-intercept:automate", async (_event, payload) => runCommentAutomation(payload));
 
 function createWindow() {
   const window = new BrowserWindow({

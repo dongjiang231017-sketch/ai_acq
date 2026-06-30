@@ -1261,6 +1261,8 @@ function App() {
   );
   const [isSyncingComments, setIsSyncingComments] = useState(false);
   const [isCapturingBrowserComments, setIsCapturingBrowserComments] = useState(false);
+  const [isRunningCommentAutomation, setIsRunningCommentAutomation] = useState(false);
+  const [lastCommentAutomationResult, setLastCommentAutomationResult] = useState<AiAcqDesktopCommentAutomationResult | null>(null);
   const [isConvertingComments, setIsConvertingComments] = useState(false);
   const [lastCommentConvertResult, setLastCommentConvertResult] = useState<CommentConvertResult | null>(null);
   const [intentOverview, setIntentOverview] = useState<IntentOverview>(fallbackIntentOverview);
@@ -1383,6 +1385,12 @@ function App() {
     videoTitle: "",
     syncFrequencyMinutes: 120,
     keywordRules: "合作,价格,报名,入驻,求资料,想了解,加我",
+  });
+  const [commentAutomationForm, setCommentAutomationForm] = useState({
+    scrollRounds: 6,
+    maxAuthors: 3,
+    dmMessage: "您好，看到您在评论区关注本地生活团购获客，想和您沟通一个本地商家增长方案，可以交流一下吗？",
+    allowLiveSend: false,
   });
   const [dmLoginSession, setDmLoginSession] = useState<DmLoginSession | null>(null);
   const [dmLoginMessage, setDmLoginMessage] = useState("");
@@ -2136,6 +2144,10 @@ function App() {
       setCommentInterceptMessage("请先填写截流来源名称。");
       return;
     }
+    if (!isDesktopClient) {
+      setCommentInterceptMessage("自动搜索和私信准备需要桌面客户端内置登录页，请打开桌面客户端后再添加并执行。");
+      return;
+    }
     try {
       const created = await api.createCommentInterceptSource({
         ...commentSourceForm,
@@ -2145,8 +2157,8 @@ function App() {
         humanConfirmRequired: true,
       });
       setCommentSources((current) => [created, ...current.filter((source) => source.id !== created.id)]);
-      setCommentInterceptMessage(`已添加「${created.name}」，准备从客户端内置登录页采集当前页面评论...`);
-      await captureCommentsFromEmbeddedPage(created.id, created);
+      setCommentInterceptMessage(`已添加「${created.name}」，准备启动内置页自动搜索、滚动采集和私信草稿链路...`);
+      await runCommentAutomationForSource(created.id, created);
     } catch (error) {
       setCommentInterceptMessage(error instanceof Error ? error.message : "添加评论截流来源失败");
     }
@@ -2188,15 +2200,14 @@ function App() {
     }
   }
 
-  async function captureCommentsFromEmbeddedPage(sourceId: string, sourceOverride?: CommentInterceptSource) {
-    const source = sourceOverride ?? commentSources.find((item) => item.id === sourceId);
+  async function prepareCommentCaptureWebview(source: CommentInterceptSource, actionLabel: string) {
     if (!source) {
       setCommentInterceptMessage("评论截流来源不存在，请刷新后重试。");
-      return;
+      return null;
     }
     if (!isCommentCapturePlatform(source.platform)) {
       setCommentInterceptMessage(`${source.platform}暂未开放浏览器登录评论采集。`);
-      return;
+      return null;
     }
 
     const captureAccount =
@@ -2206,28 +2217,41 @@ function App() {
     if (!captureAccount) {
       setCommentInterceptMessage(`请先在账号管理里添加一个${source.platform}个人号，再使用内置登录页采集评论。`);
       setActiveDmTab("账号管理");
-      return;
+      return null;
     }
 
     if (!isDesktopClient) {
       setSelectedDmLoginAccountId(captureAccount.id);
-      setCommentInterceptMessage("当前是网页预览，不能读取内置登录页。请用桌面客户端打开后再采集当前页评论。");
-      return;
+      setCommentInterceptMessage(`当前是网页预览，不能${actionLabel}。请用桌面客户端打开后再执行。`);
+      return null;
     }
 
     if (activeLoginAccount?.id !== captureAccount.id) {
       await openRealDmLogin(captureAccount.id);
-      setCommentInterceptMessage(`已切换到${captureAccount.platform}内置登录页。请完成登录并打开目标视频/主页后，再点击“采集当前内置页”。`);
-      return;
+      setCommentInterceptMessage(`已切换到${captureAccount.platform}内置登录页。请完成登录后再次点击“${actionLabel}”。`);
+      return null;
     }
 
     const webview = nativeLoginWebviewRef.current;
     const webContentsId = webview?.getWebContentsId?.();
     if (!dmLoginEntryReady || !webContentsId) {
       await openRealDmLogin(captureAccount.id);
-      setCommentInterceptMessage(`已打开${captureAccount.platform}内置登录页。请登录并进入目标视频/主页后，再点击“采集当前内置页”。`);
+      setCommentInterceptMessage(`已打开${captureAccount.platform}内置登录页。请登录后再次点击“${actionLabel}”。`);
+      return null;
+    }
+
+    return { captureAccount, webContentsId };
+  }
+
+  async function captureCommentsFromEmbeddedPage(sourceId: string, sourceOverride?: CommentInterceptSource) {
+    const source = sourceOverride ?? commentSources.find((item) => item.id === sourceId);
+    if (!source) {
+      setCommentInterceptMessage("评论截流来源不存在，请刷新后重试。");
       return;
     }
+    const prepared = await prepareCommentCaptureWebview(source, "采集当前内置页");
+    if (!prepared) return;
+    const { captureAccount, webContentsId } = prepared;
 
     setIsCapturingBrowserComments(true);
     setCommentInterceptMessage(`正在读取${captureAccount.platform}内置页 DOM，并导入当前页面评论...`);
@@ -2253,6 +2277,79 @@ function App() {
       setCommentInterceptMessage(error instanceof Error ? error.message : "采集当前内置页评论失败");
     } finally {
       setIsCapturingBrowserComments(false);
+    }
+  }
+
+  async function runCommentAutomationForSource(sourceId: string, sourceOverride?: CommentInterceptSource) {
+    const source = sourceOverride ?? commentSources.find((item) => item.id === sourceId);
+    if (!source) {
+      setCommentInterceptMessage("评论截流来源不存在，请刷新后重试。");
+      return;
+    }
+    const prepared = await prepareCommentCaptureWebview(source, "自动搜索并执行");
+    if (!prepared) return;
+    const { captureAccount, webContentsId } = prepared;
+
+    let allowSend = false;
+    let sendGateMessage = "私信动作将停在草稿/确认前。";
+    if (commentAutomationForm.allowLiveSend) {
+      if (!isSupportedDmPlatform(source.platform)) {
+        sendGateMessage = `${source.platform}当前未接入自动私信发送，只会填草稿。`;
+      } else {
+        try {
+          const dmConfig = await api.dmConfig();
+          if (dmConfig.browserLiveSendEnabled) {
+            allowSend = window.confirm(
+              "确认要在真实平台自动点击发送私信？这会使用当前内置登录账号对评论作者发出消息。",
+            );
+            sendGateMessage = allowSend ? "已确认真实发送闸门。" : "已取消真实发送，改为只填草稿。";
+          } else {
+            sendGateMessage = "后台未开启 browserLiveSendEnabled，只会填草稿。";
+          }
+        } catch {
+          sendGateMessage = "未能读取私信发送配置，只会填草稿。";
+        }
+      }
+    }
+
+    setIsRunningCommentAutomation(true);
+    setLastCommentAutomationResult(null);
+    setCommentInterceptMessage(`正在用${captureAccount.platform}内置页执行自动搜索、打开视频、滚动评论和私信准备。${sendGateMessage}`);
+    try {
+      const automation = await window.aiAcqDesktop!.runCommentInterceptAutomation({
+        webContentsId,
+        platform: source.platform,
+        keyword: source.keyword || commentSourceForm.keyword,
+        sourceUrl: source.videoUrl || commentSourceForm.videoUrl,
+        sourceType: source.sourceType || commentSourceForm.sourceType,
+        scrollRounds: Number(commentAutomationForm.scrollRounds) || 6,
+        maxAuthors: Number(commentAutomationForm.maxAuthors) || 0,
+        dmMessage: commentAutomationForm.dmMessage,
+        allowSend,
+      });
+      setLastCommentAutomationResult(automation);
+      if (automation.error) {
+        throw new Error(automation.error);
+      }
+      const result = await api.captureCommentInterceptFromBrowser(source.id, {
+        platform: source.platform,
+        pageUrl: automation.url,
+        pageTitle: automation.title,
+        comments: automation.comments as BrowserCapturedComment[],
+      });
+      const commentsData = await refreshCommentInterceptData();
+      selectHighIntentCommentRows(commentsData);
+      const draftCount = automation.dmActions.filter((action) => action.status === "draft-ready").length;
+      const sentCount = automation.dmActions.filter((action) => action.sent).length;
+      const failedCount = automation.dmActions.filter((action) => ["failed", "no-input", "send-button-missing"].includes(action.status)).length;
+      setCommentInterceptMessage(
+        `${result.message} 自动化完成：${automation.steps.length} 步，处理作者 ${automation.dmActions.length} 个，草稿 ${draftCount} 条，已发送 ${sentCount} 条，异常 ${failedCount} 个。`,
+      );
+    } catch (error) {
+      await refreshCommentInterceptData().catch(() => undefined);
+      setCommentInterceptMessage(error instanceof Error ? error.message : "自动搜索采集链路执行失败");
+    } finally {
+      setIsRunningCommentAutomation(false);
     }
   }
 
@@ -5026,9 +5123,13 @@ function App() {
                     onChange={(event) => setCommentSourceForm({ ...commentSourceForm, keywordRules: event.target.value })}
                   />
                 </label>
-                <button className="primary-button" disabled={isSyncingComments || isCapturingBrowserComments} type="submit">
+                <button
+                  className="primary-button"
+                  disabled={!isDesktopClient || isSyncingComments || isCapturingBrowserComments || isRunningCommentAutomation}
+                  type="submit"
+                >
                   <Plus size={16} />
-                  {isCapturingBrowserComments ? "采集中" : "添加并采集"}
+                  {!isDesktopClient ? "桌面客户端执行" : isRunningCommentAutomation ? "自动执行中" : "添加并自动执行"}
                 </button>
               </form>
 
@@ -5047,6 +5148,46 @@ function App() {
                     >
                       {isPreparingDmLogin ? "加载中" : "打开内置页"}
                     </button>
+                  </div>
+                  <div className="comment-automation-grid">
+                    <label>
+                      滚动轮次
+                      <input
+                        min={1}
+                        max={20}
+                        type="number"
+                        value={commentAutomationForm.scrollRounds}
+                        onChange={(event) =>
+                          setCommentAutomationForm({ ...commentAutomationForm, scrollRounds: Number(event.target.value) })
+                        }
+                      />
+                    </label>
+                    <label>
+                      作者主页数
+                      <input
+                        min={0}
+                        max={12}
+                        type="number"
+                        value={commentAutomationForm.maxAuthors}
+                        onChange={(event) => setCommentAutomationForm({ ...commentAutomationForm, maxAuthors: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label className="wide">
+                      私信草稿文案
+                      <textarea
+                        rows={3}
+                        value={commentAutomationForm.dmMessage}
+                        onChange={(event) => setCommentAutomationForm({ ...commentAutomationForm, dmMessage: event.target.value })}
+                      />
+                    </label>
+                    <label className="checkbox-field wide">
+                      <input
+                        checked={commentAutomationForm.allowLiveSend}
+                        onChange={(event) => setCommentAutomationForm({ ...commentAutomationForm, allowLiveSend: event.target.checked })}
+                        type="checkbox"
+                      />
+                      <span>允许真实点击发送，执行前还会二次确认</span>
+                    </label>
                   </div>
                   <div className="comment-capture-shell">
                     <aside className="login-account-rail comment-capture-account-rail">
@@ -5095,7 +5236,7 @@ function App() {
                           </div>
                           <div className="real-login-note">
                             <strong>{activeCommentCaptureAccount?.accountName ?? "抖音/视频号个人号"}</strong>
-                            <span>这里只读取当前页面可见评论并导入评论池；不会自动评论、不会自动私信。</span>
+                            <span>自动链路会搜索、开视频、滚评论、导入评论，并按安全闸门填好私信草稿。</span>
                           </div>
                         </div>
                         <div className="button-row comment-capture-actions">
@@ -5110,7 +5251,18 @@ function App() {
                           </button>
                           <button
                             className="primary-button"
-                            disabled={!activeBrowserCaptureSource || isCapturingBrowserComments}
+                            disabled={!isDesktopClient || !activeBrowserCaptureSource || isRunningCommentAutomation || isCapturingBrowserComments}
+                            onClick={() =>
+                              activeBrowserCaptureSource && runCommentAutomationForSource(activeBrowserCaptureSource.id, activeBrowserCaptureSource)
+                            }
+                            type="button"
+                          >
+                            <Zap size={16} />
+                            {isRunningCommentAutomation ? "自动执行中" : "自动搜索并执行"}
+                          </button>
+                          <button
+                            className="secondary-button"
+                            disabled={!isDesktopClient || !activeBrowserCaptureSource || isCapturingBrowserComments || isRunningCommentAutomation}
                             onClick={() =>
                               activeBrowserCaptureSource && captureCommentsFromEmbeddedPage(activeBrowserCaptureSource.id, activeBrowserCaptureSource)
                             }
@@ -5120,6 +5272,20 @@ function App() {
                             {isCapturingBrowserComments ? "采集中" : "采集当前内置页"}
                           </button>
                         </div>
+                        {lastCommentAutomationResult && (
+                          <div className="automation-trace">
+                            {lastCommentAutomationResult.steps.slice(0, 6).map((step) => (
+                              <span className={`automation-step is-${step.status}`} key={`${step.name}-${step.message}`}>
+                                {step.message}
+                              </span>
+                            ))}
+                            {lastCommentAutomationResult.dmActions.slice(0, 4).map((action) => (
+                              <span className={`automation-step is-${action.status}`} key={`${action.profileUrl}-${action.status}`}>
+                                {action.authorName}：{action.message || action.status}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </section>
                   </div>
@@ -5136,14 +5302,24 @@ function App() {
                       <small>{source.sourceType} · {source.syncStatus} · {source.lastSyncAt ? "已同步" : "未同步"}</small>
                       {source.lastError && <small className="error-text">{source.lastError}</small>}
                     </div>
-                    <button
-                      className="row-action"
-                      disabled={isCapturingBrowserComments}
-                      onClick={() => void captureCommentsFromEmbeddedPage(source.id, source)}
-                      type="button"
-                    >
-                      {isCapturingBrowserComments ? "采集中" : "采集当前内置页"}
-                    </button>
+                    <div className="source-card-actions">
+                      <button
+                        className="row-action is-primary"
+                        disabled={!isDesktopClient || isRunningCommentAutomation || isCapturingBrowserComments}
+                        onClick={() => void runCommentAutomationForSource(source.id, source)}
+                        type="button"
+                      >
+                        {isRunningCommentAutomation ? "执行中" : "自动执行"}
+                      </button>
+                      <button
+                        className="row-action"
+                        disabled={!isDesktopClient || isCapturingBrowserComments || isRunningCommentAutomation}
+                        onClick={() => void captureCommentsFromEmbeddedPage(source.id, source)}
+                        type="button"
+                      >
+                        {isCapturingBrowserComments ? "采集中" : "当前页采集"}
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
