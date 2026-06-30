@@ -208,6 +208,7 @@ def run_dm_task(task_id: str, db: Session, gateway: DirectMessageGateway | None 
             )
         )
         mark_account_sent(account, now)
+        db.flush()
 
         if result.reply_content:
             db.add(

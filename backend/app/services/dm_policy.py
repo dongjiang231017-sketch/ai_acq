@@ -79,6 +79,13 @@ def pick_dm_account(
         stmt = stmt.where(DirectMessageAccount.platform == target_platform)
 
     accounts = list(db.scalars(stmt).all())
+    accounts.sort(
+        key=lambda account: (
+            account.sent_today,
+            account.last_sent_at or datetime.min,
+            account.created_at or datetime.min,
+        )
+    )
     blocked_reasons: list[str] = []
     for account in accounts:
         check = account_send_check(account, now)

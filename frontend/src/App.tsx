@@ -4429,10 +4429,38 @@ function App() {
 
               <div className="lead-picker">
                 <div className="section-caption">
-                  <strong>{dmTaskPlatform} 私信对象</strong>
-                  <small>
-                    {selectedDmPlatformLeadIds.length} 个已选 · {dmPlatformLeads.length} 条可选 · 未选时默认取前 20 条
-                  </small>
+                  <div>
+                    <strong>{dmTaskPlatform} 私信对象</strong>
+                    <small>
+                      {selectedDmPlatformLeadIds.length} 个已选 · {dmPlatformLeads.length} 条可选 · 未选时默认取前 20 条
+                    </small>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      className="row-action"
+                      disabled={dmPlatformLeads.length === 0}
+                      onClick={() => {
+                        const nextLeadIds = new Set(selectedDmLeadIds);
+                        dmPlatformLeads.forEach((lead) => nextLeadIds.add(lead.id));
+                        setSelectedDmLeadIds(Array.from(nextLeadIds));
+                        setDmTaskMessage("");
+                      }}
+                      type="button"
+                    >
+                      全选当前平台
+                    </button>
+                    <button
+                      className="row-action"
+                      disabled={selectedDmPlatformLeadIds.length === 0}
+                      onClick={() => {
+                        setSelectedDmLeadIds((current) => current.filter((leadId) => !dmPlatformLeadIds.has(leadId)));
+                        setDmTaskMessage("");
+                      }}
+                      type="button"
+                    >
+                      清空选择
+                    </button>
+                  </div>
                 </div>
                 <div className="rotation-hint">
                   <CheckCircle2 size={16} />

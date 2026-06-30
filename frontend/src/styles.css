@@ -921,6 +921,12 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.section-caption > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
 .section-caption strong {
   color: #2d3d56;
 }
