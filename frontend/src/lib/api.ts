@@ -420,6 +420,7 @@ export type SystemVoice = {
   id: string;
   name: string;
   provider: string;
+  voiceParam: string;
   gender: string;
   style: string;
   scenario: string;

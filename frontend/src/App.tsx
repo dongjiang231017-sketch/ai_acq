@@ -689,6 +689,74 @@ const fallbackWorkOrders: FollowUpWorkOrder[] = [
   },
 ];
 
+const qwenTtsPresetVoices = [
+  { voiceParam: "Cherry", name: "芊悦", description: "阳光积极、亲切自然小姐姐（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Serena", name: "苏瑶", description: "温柔小姐姐（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Ethan", name: "晨煦", description: "标准普通话，带部分北方口音。阳光、温暖、活力、朝气（男性）", gender: "男声", style: "标准普通话", scenario: "默认外呼" },
+  { voiceParam: "Chelsie", name: "千雪", description: "二次元虚拟女友（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Momo", name: "茉兔", description: "撒娇搞怪，逗你开心（女性）", gender: "女声", style: "轻松亲和", scenario: "轻松互动" },
+  { voiceParam: "Vivian", name: "十三", description: "拽拽的、可爱的小暴躁（女性）", gender: "女声", style: "轻松亲和", scenario: "轻松互动" },
+  { voiceParam: "Moon", name: "月白", description: "率性帅气的月白（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Maia", name: "四月", description: "知性与温柔的碰撞（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Kai", name: "凯", description: "耳朵的一场 SPA（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Nofish", name: "不吃鱼", description: "不会翘舌音的设计师（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Bella", name: "萌宝", description: "喝酒不打醉拳的小萝莉（女性）", gender: "女声", style: "轻松亲和", scenario: "轻松互动" },
+  { voiceParam: "Jennifer", name: "詹妮弗", description: "品牌级、电影质感般美语女声（女性）", gender: "女声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Ryan", name: "甜茶", description: "节奏拉满，戏感炸裂，真实与张力共舞（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Katerina", name: "卡捷琳娜", description: "御姐音色，韵律回味十足（女性）", gender: "女声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Aiden", name: "艾登", description: "精通厨艺的美语大男孩（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Eldric Sage", name: "沧明子", description: "沉稳睿智的老者，沧桑如松却心明如镜（男性）", gender: "男声", style: "沉稳叙事", scenario: "方案说明" },
+  { voiceParam: "Mia", name: "乖小妹", description: "温顺如春水，乖巧如初雪（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Mochi", name: "沙小弥", description: "聪明伶俐的小大人，童真未泯却早慧如禅（男性）", gender: "男声", style: "轻松亲和", scenario: "轻松互动" },
+  { voiceParam: "Bellona", name: "燕铮莺", description: "声音洪亮，吐字清晰，人物鲜活，听得人热血沸腾；金戈铁马入梦来，字正腔圆间尽显千面人声的江湖（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Vincent", name: "田叔", description: "一口独特的沙哑烟嗓，一开口便道尽了千军万马与江湖豪情（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Bunny", name: "萌小姬", description: "“萌属性”爆棚的小萝莉（女性）", gender: "女声", style: "轻松亲和", scenario: "轻松互动" },
+  { voiceParam: "Neil", name: "阿闻", description: "平直的基线语调，字正腔圆的咬字发音，这就是最专业的新闻主持人（男性）", gender: "男声", style: "专业播报", scenario: "新闻播报" },
+  { voiceParam: "Elias", name: "墨讲师", description: "既保持学科严谨性，又通过叙事技巧将复杂知识转化为可消化的认知模块（女性）", gender: "女声", style: "知识讲解", scenario: "内容讲解" },
+  { voiceParam: "Arthur", name: "徐大爷", description: "被岁月和旱烟浸泡过的质朴嗓音，不疾不徐地摇开了满村的奇闻异事（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Nini", name: "邻家妹妹", description: "糯米糍一样又软又黏的嗓音，那一声声拉长了的“哥哥”，甜得能把人的骨头都叫酥了（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Seren", name: "小婉", description: "温和舒缓的声线，助你更快地进入睡眠，晚安，好梦（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Pip", name: "顽屁小孩", description: "调皮捣蛋却充满童真的他来了，这是你记忆中的小新吗（男性）", gender: "男声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Stella", name: "少女阿月", description: "平时是甜到发腻的迷糊少女音，但在喊出“代表月亮消灭你”时，瞬间充满不容置疑的爱与正义（女性）", gender: "女声", style: "自然对话", scenario: "客服外呼" },
+  { voiceParam: "Bodega", name: "博德加", description: "热情的西班牙大叔（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Sonrisa", name: "索尼莎", description: "热情开朗的拉美大姐（女性）", gender: "女声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Alek", name: "阿列克", description: "一开口，是战斗民族的冷，也是毛呢大衣下的暖（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Dolce", name: "多尔切", description: "慵懒的意大利大叔（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Sohee", name: "素熙", description: "温柔开朗，情绪丰富的韩国欧尼（女性）", gender: "女声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Ono Anna", name: "小野杏", description: "鬼灵精怪的青梅竹马（女性）", gender: "女声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Lenn", name: "莱恩", description: "理性是底色，叛逆藏在细节里——穿西装也听后朋克的德国青年（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Emilien", name: "埃米尔安", description: "浪漫的法国大哥哥（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Andre", name: "安德雷", description: "声音磁性，自然舒服、沉稳男生（男性）", gender: "男声", style: "沉稳叙事", scenario: "方案说明" },
+  { voiceParam: "Radio Gol", name: "拉迪奥·戈尔", description: "足球诗人 Rádio Gol！今天我要用名字为你们解说足球（男性）", gender: "男声", style: "多语种", scenario: "多语种触达" },
+  { voiceParam: "Jada", name: "上海-阿珍", description: "风风火火的沪上阿姐（女性）", gender: "女声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Dylan", name: "北京-晓东", description: "北京胡同里长大的少年（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Li", name: "南京-老李", description: "耐心的瑜伽老师（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Marcus", name: "陕西-秦川", description: "面宽话短，心实声沉——老陕的味道（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Roy", name: "闽南-阿杰", description: "诙谐直爽、市井活泼的台湾哥仔形象（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Peter", name: "天津-李彼得", description: "天津相声，专业捧哏（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Sunny", name: "四川-晴儿", description: "甜到你心里的川妹子（女性）", gender: "女声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Eric", name: "四川-程川", description: "一个跳脱市井的四川成都男子（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Rocky", name: "粤语-阿强", description: "幽默风趣的阿强，在线陪聊（男性）", gender: "男声", style: "地方方言", scenario: "本地触达" },
+  { voiceParam: "Kiki", name: "粤语-阿清", description: "甜美的港妹闺蜜（女性）", gender: "女声", style: "地方方言", scenario: "本地触达" },
+] as const;
+
+function qwenTtsVoiceId(voiceParam: string) {
+  return `qwen_tts_${voiceParam.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
+}
+
+const fallbackSystemVoices: SystemVoice[] = qwenTtsPresetVoices.map((voice) => ({
+  id: qwenTtsVoiceId(voice.voiceParam),
+  name: `${voice.name}（${voice.voiceParam}）`,
+  provider: "Qwen-TTS",
+  voiceParam: voice.voiceParam,
+  gender: voice.gender,
+  style: voice.style,
+  scenario: voice.scenario,
+  status: "可用",
+  isDefault: voice.voiceParam === "Ethan",
+  sampleText: voice.description,
+}));
+
 const fallbackVoiceOverview: VoiceOverview = {
   profiles: 1,
   usableProfiles: 0,
@@ -696,8 +764,8 @@ const fallbackVoiceOverview: VoiceOverview = {
   trainingJobs: 0,
   usageRecords: 1,
   fallbackUsage: 0,
-  systemVoices: 3,
-  defaultVoice: "标准AI音色",
+  systemVoices: fallbackSystemVoices.length,
+  defaultVoice: "晨煦（Ethan）",
   cloneTrainingEnabled: false,
   cloneEngineName: "",
   cloneEngineStatus: "未接入",
@@ -716,42 +784,6 @@ const fallbackVoiceProviderStatus: VoiceProviderStatus = {
   samplePublicBaseUrlConfigured: false,
 };
 
-const fallbackSystemVoices: SystemVoice[] = [
-  {
-    id: "system_standard_warm",
-    name: "标准AI音色",
-    provider: "模型内置TTS",
-    gender: "通用",
-    style: "稳重清晰",
-    scenario: "默认外呼",
-    status: "可用",
-    isDefault: true,
-    sampleText: "您好，我是本地生活服务顾问，想和您确认一下是否方便了解视频号团购获客。",
-  },
-  {
-    id: "system_female_service",
-    name: "温和女声",
-    provider: "模型内置TTS",
-    gender: "女声",
-    style: "亲和客服",
-    scenario: "首次触达、回访",
-    status: "可用",
-    isDefault: false,
-    sampleText: "您好，看到您店铺适合做本地生活曝光，我先简单介绍一下合作方式。",
-  },
-  {
-    id: "system_male_business",
-    name: "商务男声",
-    provider: "模型内置TTS",
-    gender: "男声",
-    style: "商务简洁",
-    scenario: "方案说明、资料跟进",
-    status: "可用",
-    isDefault: false,
-    sampleText: "我们可以先从基础方案试跑，再根据实际咨询量决定是否加大投放。",
-  },
-];
-
 const fallbackVoiceProfiles: VoiceProfile[] = [
   {
     id: "voice_2",
@@ -761,7 +793,7 @@ const fallbackVoiceProfiles: VoiceProfile[] = [
     status: "待授权",
     authorizationStatus: "待提交",
     sampleCount: 0,
-    fallbackVoice: "标准AI音色",
+    fallbackVoice: "晨煦（Ethan）",
     consentMaterial: "等待上传授权材料和样本元数据。",
     riskNote: "未授权前不可复刻、不可被任务选择。",
     createdAt: new Date().toISOString(),
@@ -782,7 +814,7 @@ const fallbackVoiceUsageRecords: VoiceUsageRecord[] = [
     taskId: null,
     merchantName: "模拟商家",
     scenario: "外呼",
-    result: "使用系统内置音色：标准AI音色",
+    result: "使用系统内置音色：晨煦（Ethan）",
     fallbackUsed: false,
     createdAt: new Date().toISOString(),
   },
@@ -1216,7 +1248,7 @@ function App() {
     scenario: "外呼",
     authorizationStatus: "待提交",
     sampleCount: 0,
-    fallbackVoice: "标准AI音色",
+    fallbackVoice: "晨煦（Ethan）",
     consentMaterial: "",
     riskNote: "未授权前不可复刻、不可被任务选择。",
   });
@@ -1512,7 +1544,7 @@ function App() {
           ? current
           : nextSystemVoices.find((voice) => voice.isDefault)?.id ?? nextSystemVoices[0]?.id ?? "",
       );
-      const defaultVoiceName = nextSystemVoices.find((voice) => voice.isDefault)?.name ?? nextSystemVoices[0]?.name ?? "标准AI音色";
+      const defaultVoiceName = nextSystemVoices.find((voice) => voice.isDefault)?.name ?? nextSystemVoices[0]?.name ?? "晨煦（Ethan）";
       setVoiceProfileForm((current) => ({ ...current, fallbackVoice: current.fallbackVoice || defaultVoiceName }));
     }
     if (results[22].status === "fulfilled") {
@@ -2051,7 +2083,7 @@ function App() {
         ...voiceProfileForm,
         status: "待授权",
         sampleCount: 0,
-        fallbackVoice: voiceProfileForm.fallbackVoice || activeSystemVoice?.name || defaultSystemVoice?.name || "标准AI音色",
+        fallbackVoice: voiceProfileForm.fallbackVoice || activeSystemVoice?.name || defaultSystemVoice?.name || "晨煦（Ethan）",
       });
       await api.uploadVoiceSample(created.id, voiceSampleFile, {
         uploadedBy: voiceProfileForm.ownerName,
@@ -2076,7 +2108,7 @@ function App() {
         scenario: "外呼",
         authorizationStatus: "待提交",
         sampleCount: 0,
-        fallbackVoice: activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "标准AI音色",
+        fallbackVoice: activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "晨煦（Ethan）",
         consentMaterial: "",
         riskNote: "未授权前不可复刻、不可被任务选择。",
       });
@@ -3049,7 +3081,7 @@ function App() {
                     </div>
                     <p>{voice.sampleText}</p>
                     <small>
-                      {voice.provider} · {voice.gender} · {voice.style} · {voice.scenario}
+                      {voice.provider} · {voice.voiceParam} · {voice.gender} · {voice.style} · {voice.scenario}
                     </small>
                     <div className="button-row card-actions">
                       <button

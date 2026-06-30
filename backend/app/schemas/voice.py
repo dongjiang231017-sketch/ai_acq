@@ -12,7 +12,7 @@ class VoiceOverview(BaseModel):
     usage_records: Annotated[int, Field(alias="usageRecords")]
     fallback_usage: Annotated[int, Field(alias="fallbackUsage")]
     system_voices: Annotated[int, Field(alias="systemVoices")] = 0
-    default_voice: Annotated[str, Field(alias="defaultVoice")] = "标准AI音色"
+    default_voice: Annotated[str, Field(alias="defaultVoice")] = "晨煦（Ethan）"
     clone_training_enabled: Annotated[bool, Field(alias="cloneTrainingEnabled")] = False
     clone_engine_name: Annotated[str, Field(alias="cloneEngineName")] = ""
     clone_engine_status: Annotated[str, Field(alias="cloneEngineStatus")] = "未接入"
@@ -25,6 +25,7 @@ class SystemVoiceRead(BaseModel):
     id: str
     name: str
     provider: str
+    voice_param: Annotated[str, Field(alias="voiceParam")]
     gender: str
     style: str
     scenario: str
@@ -56,7 +57,7 @@ class VoiceProfileCreate(BaseModel):
     status: str = "待授权"
     authorization_status: Annotated[str, Field(alias="authorizationStatus")] = "待提交"
     sample_count: Annotated[int, Field(alias="sampleCount", ge=0)] = 0
-    fallback_voice: Annotated[str, Field(alias="fallbackVoice")] = "标准AI音色"
+    fallback_voice: Annotated[str, Field(alias="fallbackVoice")] = "晨煦（Ethan）"
     consent_material: Annotated[str, Field(alias="consentMaterial")] = ""
     risk_note: Annotated[str, Field(alias="riskNote")] = ""
 
