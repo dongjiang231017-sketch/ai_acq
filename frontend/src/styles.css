@@ -1046,6 +1046,131 @@ button:disabled {
   font-weight: 800;
 }
 
+.comment-intercept-grid {
+  align-items: start;
+}
+
+.intercept-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.intercept-summary div {
+  min-height: 72px;
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+  background: #f8fbff;
+  padding: 12px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.intercept-summary strong {
+  color: #19263a;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.intercept-summary span {
+  color: #6b7c93;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.intercept-source-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.intercept-source-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #dfeafa;
+  border-radius: 14px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.intercept-source-card > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.intercept-source-card strong {
+  color: #24334a;
+  overflow-wrap: anywhere;
+}
+
+.intercept-source-card small {
+  color: #73839a;
+  font-weight: 850;
+}
+
+.comment-table-wrap td {
+  vertical-align: top;
+}
+
+.comment-content-cell {
+  max-width: 360px;
+  color: #3d4d63;
+  font-weight: 850;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.intent-pill {
+  display: inline-grid;
+  place-items: center;
+  min-width: 34px;
+  min-height: 28px;
+  border-radius: 999px;
+  background: #eaf3ff;
+  color: #2473f6;
+  font-weight: 950;
+  margin-right: 6px;
+}
+
+.intent-a {
+  background: #eafaf5;
+  color: #0f9f78;
+}
+
+.intent-b {
+  background: #fff5dc;
+  color: #bd7900;
+}
+
+.intent-c {
+  background: #eef5ff;
+  color: #2473f6;
+}
+
+.intent-d {
+  background: #f2f5f9;
+  color: #66758a;
+}
+
+.intercept-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.intercept-actions small {
+  color: #6f7f96;
+  font-weight: 850;
+}
+
 .script-card h3 {
   margin: 0 0 8px;
   font-size: 17px;
@@ -2721,6 +2846,7 @@ button:disabled {
   .rule-detail-grid,
   .record-grid,
   .dm-inbox-grid,
+  .intercept-summary,
   .account-isolation-summary,
   .platform-account-strip,
   .logged-account-grid,
@@ -2815,6 +2941,7 @@ button:disabled {
   .form-grid,
   .line-health-grid,
   .line-preflight-steps,
+  .intercept-summary,
   .realtime-pipeline-summary,
   .realtime-pipeline-steps,
   .realtime-event-list,

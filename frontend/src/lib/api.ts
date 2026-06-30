@@ -359,6 +359,68 @@ export type DmSyncResult = {
   needsHandoff: number;
 };
 
+export type CommentInterceptOverview = {
+  sources: number;
+  comments: number;
+  highIntentComments: number;
+  convertedLeads: number;
+};
+
+export type CommentInterceptSource = {
+  id: string;
+  platform: string;
+  sourceType: string;
+  name: string;
+  keyword: string;
+  videoUrl: string;
+  videoTitle: string;
+  ownerAccountId?: string | null;
+  syncStatus: string;
+  syncFrequencyMinutes: number;
+  keywordRules: string;
+  autoReplyEnabled: boolean;
+  humanConfirmRequired: boolean;
+  lastSyncAt?: string | null;
+  lastError?: string | null;
+  createdAt: string;
+};
+
+export type SocialComment = {
+  id: string;
+  sourceId: string;
+  platform: string;
+  externalCommentId: string;
+  videoUrl: string;
+  authorName: string;
+  authorProfileUrl: string;
+  content: string;
+  city: string;
+  category: string;
+  likeCount: number;
+  replyCount: number;
+  intentScore: number;
+  intentLevel: string;
+  status: string;
+  riskStatus: string;
+  commentedAt?: string | null;
+  createdAt: string;
+};
+
+export type CommentSyncResult = {
+  sourceId: string;
+  imported: number;
+  skipped: number;
+  totalComments: number;
+  message: string;
+};
+
+export type CommentConvertResult = {
+  converted: number;
+  skipped: number;
+  leadIds: string[];
+  message: string;
+};
+
 export type IntentOverview = {
   totalCustomers: number;
   highIntent: number;
@@ -882,6 +944,42 @@ export const api = {
     request<DmMessage[]>(
       conversationId ? `/direct-messages/messages?conversationId=${encodeURIComponent(conversationId)}` : "/direct-messages/messages",
     ),
+  commentInterceptOverview: () => request<CommentInterceptOverview>("/direct-messages/intercepts/overview"),
+  commentInterceptSources: () => request<CommentInterceptSource[]>("/direct-messages/intercepts/sources"),
+  createCommentInterceptSource: (source: {
+    platform: string;
+    sourceType: string;
+    name: string;
+    keyword: string;
+    videoUrl: string;
+    videoTitle: string;
+    ownerAccountId?: string | null;
+    syncFrequencyMinutes: number;
+    keywordRules: string;
+    autoReplyEnabled: boolean;
+    humanConfirmRequired: boolean;
+  }) =>
+    request<CommentInterceptSource>("/direct-messages/intercepts/sources", {
+      method: "POST",
+      body: JSON.stringify(source),
+    }),
+  syncCommentInterceptSource: (sourceId: string) =>
+    request<CommentSyncResult>(`/direct-messages/intercepts/sources/${sourceId}/sync`, {
+      method: "POST",
+    }),
+  socialComments: (params?: { sourceId?: string; platform?: string; status?: string; intentLevel?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.sourceId) query.set("sourceId", params.sourceId);
+    if (params?.platform) query.set("platform", params.platform);
+    if (params?.status) query.set("status", params.status);
+    if (params?.intentLevel) query.set("intentLevel", params.intentLevel);
+    return request<SocialComment[]>(`/direct-messages/intercepts/comments${query.toString() ? `?${query.toString()}` : ""}`);
+  },
+  convertCommentsToLeads: (payload: { commentIds: string[]; city?: string; category?: string; status?: string }) =>
+    request<CommentConvertResult>("/direct-messages/intercepts/comments/convert", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   intentOverview: () => request<IntentOverview>("/intent/overview"),
   intentCustomers: () => request<IntentCustomer[]>("/intent/customers"),
   updateIntentCustomer: (customerId: string, customer: Partial<IntentCustomer>) =>

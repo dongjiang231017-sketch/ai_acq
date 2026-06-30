@@ -13,7 +13,7 @@ from app.models.growth import (
     VoiceUsageRecord,
 )
 from app.models.operations import ReportExport, SystemAuditLog, SystemSetting
-from app.models.task import OutreachTask
+from app.models.task import CommentInterceptSource, CommentLeadConversion, OutreachTask, SocialComment
 
 __all__ = [
     "FollowUpWorkOrder",
@@ -23,8 +23,11 @@ __all__ = [
     "LearningExperiment",
     "LearningSuggestion",
     "MerchantLead",
+    "CommentInterceptSource",
+    "CommentLeadConversion",
     "OutreachTask",
     "ReportExport",
+    "SocialComment",
     "SystemAuditLog",
     "SystemSetting",
     "VoiceCloneRecord",

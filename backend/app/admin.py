@@ -25,6 +25,8 @@ from app.models.operations import ReportExport, SystemAuditLog, SystemSetting
 from app.models.task import (
     CallRecord,
     CallScript,
+    CommentInterceptSource,
+    CommentLeadConversion,
     DirectMessage,
     DirectMessageAccount,
     DirectMessageConversation,
@@ -32,6 +34,7 @@ from app.models.task import (
     DirectMessageTemplate,
     OutreachTask,
     RecallRule,
+    SocialComment,
 )
 
 
@@ -369,6 +372,105 @@ class DirectMessageAdmin(ModelView, model=DirectMessage):
         DirectMessage.external_message_id: "平台消息ID",
         DirectMessage.raw_payload: "原始事件",
         DirectMessage.created_at: "创建时间",
+    }
+
+
+class CommentInterceptSourceAdmin(ModelView, model=CommentInterceptSource):
+    name = "评论截流源"
+    name_plural = "评论截流源"
+    icon = "fa-solid fa-filter"
+
+    column_list = [
+        CommentInterceptSource.platform,
+        CommentInterceptSource.source_type,
+        CommentInterceptSource.name,
+        CommentInterceptSource.sync_status,
+        CommentInterceptSource.last_sync_at,
+        CommentInterceptSource.created_at,
+    ]
+    column_searchable_list = [CommentInterceptSource.platform, CommentInterceptSource.name, CommentInterceptSource.keyword]
+    column_sortable_list = [CommentInterceptSource.created_at, CommentInterceptSource.last_sync_at]
+    column_default_sort = [(CommentInterceptSource.created_at, True)]
+    column_labels = {
+        CommentInterceptSource.platform: "平台",
+        CommentInterceptSource.source_type: "来源类型",
+        CommentInterceptSource.name: "来源名称",
+        CommentInterceptSource.keyword: "关键词",
+        CommentInterceptSource.video_url: "视频URL",
+        CommentInterceptSource.video_title: "视频标题",
+        CommentInterceptSource.owner_account_id: "归属个人号",
+        CommentInterceptSource.sync_status: "同步状态",
+        CommentInterceptSource.sync_frequency_minutes: "同步间隔分钟",
+        CommentInterceptSource.keyword_rules: "意向关键词",
+        CommentInterceptSource.auto_reply_enabled: "自动回复",
+        CommentInterceptSource.human_confirm_required: "人工确认",
+        CommentInterceptSource.last_sync_at: "最近同步",
+        CommentInterceptSource.last_error: "错误原因",
+        CommentInterceptSource.created_at: "创建时间",
+    }
+
+
+class SocialCommentAdmin(ModelView, model=SocialComment):
+    name = "截流评论"
+    name_plural = "截流评论池"
+    icon = "fa-solid fa-comment-dots"
+
+    column_list = [
+        SocialComment.platform,
+        SocialComment.author_name,
+        SocialComment.intent_level,
+        SocialComment.intent_score,
+        SocialComment.status,
+        SocialComment.risk_status,
+        SocialComment.commented_at,
+        SocialComment.created_at,
+    ]
+    column_searchable_list = [SocialComment.platform, SocialComment.author_name, SocialComment.content]
+    column_sortable_list = [SocialComment.intent_score, SocialComment.created_at, SocialComment.commented_at]
+    column_default_sort = [(SocialComment.intent_score, True)]
+    column_labels = {
+        SocialComment.source_id: "截流源",
+        SocialComment.platform: "平台",
+        SocialComment.external_comment_id: "评论ID",
+        SocialComment.video_url: "视频URL",
+        SocialComment.author_name: "评论用户",
+        SocialComment.author_profile_url: "用户主页",
+        SocialComment.content: "评论内容",
+        SocialComment.city: "城市",
+        SocialComment.category: "品类",
+        SocialComment.like_count: "点赞",
+        SocialComment.reply_count: "回复",
+        SocialComment.intent_score: "意向分",
+        SocialComment.intent_level: "意向等级",
+        SocialComment.status: "状态",
+        SocialComment.risk_status: "风险",
+        SocialComment.raw_payload: "原始数据",
+        SocialComment.commented_at: "评论时间",
+        SocialComment.created_at: "创建时间",
+    }
+
+
+class CommentLeadConversionAdmin(ModelView, model=CommentLeadConversion):
+    name = "评论转线索"
+    name_plural = "评论转线索记录"
+    icon = "fa-solid fa-arrow-right-to-bracket"
+
+    column_list = [
+        CommentLeadConversion.comment_id,
+        CommentLeadConversion.lead_id,
+        CommentLeadConversion.action,
+        CommentLeadConversion.status,
+        CommentLeadConversion.created_at,
+    ]
+    column_searchable_list = [CommentLeadConversion.action, CommentLeadConversion.status, CommentLeadConversion.note]
+    column_sortable_list = [CommentLeadConversion.created_at]
+    column_labels = {
+        CommentLeadConversion.comment_id: "评论ID",
+        CommentLeadConversion.lead_id: "线索ID",
+        CommentLeadConversion.action: "动作",
+        CommentLeadConversion.status: "状态",
+        CommentLeadConversion.note: "备注",
+        CommentLeadConversion.created_at: "创建时间",
     }
 
 
@@ -821,6 +923,9 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(DirectMessageTemplateAdmin)
     admin.add_view(DirectMessageConversationAdmin)
     admin.add_view(DirectMessageAdmin)
+    admin.add_view(CommentInterceptSourceAdmin)
+    admin.add_view(SocialCommentAdmin)
+    admin.add_view(CommentLeadConversionAdmin)
     admin.add_view(IntentCustomerAdmin)
     admin.add_view(IntentEventAdmin)
     admin.add_view(FollowUpWorkOrderAdmin)

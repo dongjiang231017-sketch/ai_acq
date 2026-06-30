@@ -191,3 +191,69 @@ class DirectMessage(Base):
 
     def __repr__(self) -> str:
         return f"{self.direction} {self.status}"
+
+
+class CommentInterceptSource(Base):
+    __tablename__ = "comment_intercept_sources"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    platform: Mapped[str] = mapped_column(String(40), index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="视频链接", index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    keyword: Mapped[str] = mapped_column(String(160), default="")
+    video_url: Mapped[str] = mapped_column(Text, default="")
+    video_title: Mapped[str] = mapped_column(String(240), default="")
+    owner_account_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("dm_accounts.id"), nullable=True, index=True)
+    sync_status: Mapped[str] = mapped_column(String(40), default="待同步", index=True)
+    sync_frequency_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    keyword_rules: Mapped[str] = mapped_column(Text, default="合作,价格,报名,入驻,求资料,想了解,加我")
+    auto_reply_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    human_confirm_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"{self.platform} {self.name}"
+
+
+class SocialComment(Base):
+    __tablename__ = "social_comments"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    source_id: Mapped[str] = mapped_column(String(32), ForeignKey("comment_intercept_sources.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(40), index=True)
+    external_comment_id: Mapped[str] = mapped_column(String(120), index=True)
+    video_url: Mapped[str] = mapped_column(Text, default="")
+    author_name: Mapped[str] = mapped_column(String(120), index=True)
+    author_profile_url: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text)
+    city: Mapped[str] = mapped_column(String(40), default="待识别", index=True)
+    category: Mapped[str] = mapped_column(String(80), default="待识别", index=True)
+    like_count: Mapped[int] = mapped_column(Integer, default=0)
+    reply_count: Mapped[int] = mapped_column(Integer, default=0)
+    intent_score: Mapped[int] = mapped_column(Integer, default=60, index=True)
+    intent_level: Mapped[str] = mapped_column(String(20), default="C", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="待转线索", index=True)
+    risk_status: Mapped[str] = mapped_column(String(40), default="正常", index=True)
+    raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commented_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"{self.author_name}: {self.content[:20]}"
+
+
+class CommentLeadConversion(Base):
+    __tablename__ = "comment_lead_conversions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    comment_id: Mapped[str] = mapped_column(String(32), ForeignKey("social_comments.id"), index=True)
+    lead_id: Mapped[str] = mapped_column(String(32), ForeignKey("merchant_leads.id"), index=True)
+    action: Mapped[str] = mapped_column(String(40), default="转线索", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="已完成", index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"{self.action} {self.status}"

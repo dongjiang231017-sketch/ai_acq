@@ -28,6 +28,10 @@ import {
   CallRecord,
   CallScript,
   ChannelReport,
+  CommentConvertResult,
+  CommentInterceptOverview,
+  CommentInterceptSource,
+  CommentSyncResult,
   DmAccount,
   DmConversation,
   DmDesktopLoginEvidence,
@@ -52,6 +56,7 @@ import {
   RealtimeSession,
   RealtimeVoiceSelection,
   SalesPerformanceReport,
+  SocialComment,
   SystemVoice,
   TelephonyConfig,
   TelephonyHealth,
@@ -79,7 +84,7 @@ const fallbackModules: ModuleSummary[] = [
   { key: "collector", name: "线索采集", description: "采集任务、来源配置、清洗规则。", pageCount: 5, status: "ready" },
   { key: "leads", name: "商家线索库", description: "商家资料、电话库、主页和去重审核。", pageCount: 5, status: "ready" },
   { key: "outbound", name: "AI外呼系统", description: "外呼任务、话术流程、通话记录。", pageCount: 6, status: "ready" },
-  { key: "dm", name: "平台私信系统", description: "平台个人号、私信任务、模板和会话。", pageCount: 7, status: "ready" },
+  { key: "dm", name: "平台私信系统", description: "平台个人号、评论截流、私信任务和会话。", pageCount: 8, status: "ready" },
   { key: "intent", name: "意向客户池", description: "客户分级、工单跟进和分配规则。", pageCount: 4, status: "ready" },
   { key: "voice", name: "声音档案", description: "授权、音色复刻和使用记录。", pageCount: 4, status: "ready" },
   { key: "reports", name: "数据报表", description: "渠道、绩效和导出中心。", pageCount: 4, status: "ready" },
@@ -485,6 +490,97 @@ const fallbackDmSyncResult: DmSyncResult = {
   newReplies: 0,
   needsHandoff: 0,
 };
+
+const fallbackCommentInterceptOverview: CommentInterceptOverview = {
+  sources: 1,
+  comments: 3,
+  highIntentComments: 2,
+  convertedLeads: 0,
+};
+
+const fallbackCommentSources: CommentInterceptSource[] = [
+  {
+    id: "comment_source_1",
+    platform: "抖音",
+    sourceType: "视频链接",
+    name: "南昌团购招商视频评论",
+    keyword: "南昌 团购 入驻",
+    videoUrl: "https://www.douyin.com/",
+    videoTitle: "南昌本地生活团购招商",
+    ownerAccountId: "dm_account_3",
+    syncStatus: "待同步",
+    syncFrequencyMinutes: 120,
+    keywordRules: "合作,价格,报名,入驻,求资料,想了解,加我",
+    autoReplyEnabled: false,
+    humanConfirmRequired: true,
+    lastSyncAt: null,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+const fallbackSocialComments: SocialComment[] = [
+  {
+    id: "social_comment_1",
+    sourceId: "comment_source_1",
+    platform: "抖音",
+    externalCommentId: "sim-comment-1",
+    videoUrl: "https://www.douyin.com/",
+    authorName: "抖音评论用户-1",
+    authorProfileUrl: "https://www.douyin.com/#comment-author-1",
+    content: "南昌本地餐饮店怎么入驻团购？想了解一下价格",
+    city: "南昌",
+    category: "本地餐饮",
+    likeCount: 18,
+    replyCount: 0,
+    intentScore: 96,
+    intentLevel: "A",
+    status: "待转线索",
+    riskStatus: "正常",
+    commentedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "social_comment_2",
+    sourceId: "comment_source_1",
+    platform: "抖音",
+    externalCommentId: "sim-comment-2",
+    videoUrl: "https://www.douyin.com/",
+    authorName: "抖音评论用户-2",
+    authorProfileUrl: "https://www.douyin.com/#comment-author-2",
+    content: "我们是丽人美业，可以报名这个活动吗，求资料",
+    city: "南昌",
+    category: "丽人美业",
+    likeCount: 12,
+    replyCount: 0,
+    intentScore: 84,
+    intentLevel: "B",
+    status: "待转线索",
+    riskStatus: "正常",
+    commentedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "social_comment_3",
+    sourceId: "comment_source_1",
+    platform: "抖音",
+    externalCommentId: "sim-comment-3",
+    videoUrl: "https://www.douyin.com/",
+    authorName: "抖音评论用户-3",
+    authorProfileUrl: "https://www.douyin.com/#comment-author-3",
+    content: "先看看，后面有需要再联系",
+    city: "南昌",
+    category: "本地生活",
+    likeCount: 3,
+    replyCount: 0,
+    intentScore: 49,
+    intentLevel: "D",
+    status: "待转线索",
+    riskStatus: "正常",
+    commentedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  },
+];
 
 const platformLoginUrls: Record<string, string> = {
   美团: "https://passport.meituan.com/account/unitivelogin",
@@ -1100,7 +1196,7 @@ const fallbackSystemSettings: SystemSetting[] = [
 
 const outboundTabs = ["外呼总览", "任务列表", "话术流程", "通话记录", "重拨规则", "实时监听"] as const;
 type OutboundTab = (typeof outboundTabs)[number];
-const dmTabs = ["私信总览", "任务列表", "账号管理", "轮换规则", "消息模板", "会话记录", "回复监听"] as const;
+const dmTabs = ["私信总览", "评论截流", "任务列表", "账号管理", "轮换规则", "消息模板", "会话记录", "回复监听"] as const;
 type DmTab = (typeof dmTabs)[number];
 const intentTabs = ["客户池", "跟进工单", "客户详情", "分配规则"] as const;
 type IntentTab = (typeof intentTabs)[number];
@@ -1218,6 +1314,17 @@ function App() {
   const [dmMessages, setDmMessages] = useState<DmMessage[]>(fallbackDmMessages);
   const [dmPlatformConfigs, setDmPlatformConfigs] = useState<DmPlatformConfig[]>(fallbackDmPlatformConfigs);
   const [dmSyncResult, setDmSyncResult] = useState<DmSyncResult>(fallbackDmSyncResult);
+  const [commentInterceptOverview, setCommentInterceptOverview] =
+    useState<CommentInterceptOverview>(fallbackCommentInterceptOverview);
+  const [commentSources, setCommentSources] = useState<CommentInterceptSource[]>(fallbackCommentSources);
+  const [socialComments, setSocialComments] = useState<SocialComment[]>(fallbackSocialComments);
+  const [selectedCommentIds, setSelectedCommentIds] = useState<string[]>(
+    fallbackSocialComments.filter((comment) => ["A", "B"].includes(comment.intentLevel)).map((comment) => comment.id),
+  );
+  const [commentInterceptMessage, setCommentInterceptMessage] = useState("添加视频或关键词来源，同步评论后批量转入线索库。");
+  const [isSyncingComments, setIsSyncingComments] = useState(false);
+  const [isConvertingComments, setIsConvertingComments] = useState(false);
+  const [lastCommentConvertResult, setLastCommentConvertResult] = useState<CommentConvertResult | null>(null);
   const [intentOverview, setIntentOverview] = useState<IntentOverview>(fallbackIntentOverview);
   const [intentCustomers, setIntentCustomers] = useState<IntentCustomer[]>(fallbackIntentCustomers);
   const [intentEvents, setIntentEvents] = useState<IntentEvent[]>(fallbackIntentEvents);
@@ -1328,6 +1435,16 @@ function App() {
     platform: "通用",
     content: "您好，看到{商家名称}适合做视频号本地生活团购曝光，想了解下您是否考虑新增线上获客渠道？",
     isActive: true,
+  });
+  const [commentSourceForm, setCommentSourceForm] = useState({
+    platform: "抖音",
+    sourceType: "视频链接",
+    name: "抖音高意向评论截流",
+    keyword: "南昌 团购 入驻",
+    videoUrl: "",
+    videoTitle: "",
+    syncFrequencyMinutes: 120,
+    keywordRules: "合作,价格,报名,入驻,求资料,想了解,加我",
   });
   const [dmLoginSession, setDmLoginSession] = useState<DmLoginSession | null>(null);
   const [dmLoginMessage, setDmLoginMessage] = useState("");
@@ -1483,6 +1600,26 @@ function App() {
         };
       }),
     [dmAccountPlatforms, dmSupportedAccounts],
+  );
+  const highIntentComments = useMemo(
+    () => socialComments.filter((comment) => ["A", "B"].includes(comment.intentLevel)),
+    [socialComments],
+  );
+  const selectedSocialComments = useMemo(
+    () => socialComments.filter((comment) => selectedCommentIds.includes(comment.id)),
+    [selectedCommentIds, socialComments],
+  );
+  const selectedPendingComments = useMemo(
+    () => selectedSocialComments.filter((comment) => comment.status !== "已转线索"),
+    [selectedSocialComments],
+  );
+  const selectedCommentPlatforms = useMemo(
+    () => Array.from(new Set(selectedSocialComments.map((comment) => comment.platform))),
+    [selectedSocialComments],
+  );
+  const selectedSendableCommentCount = useMemo(
+    () => selectedSocialComments.filter((comment) => isSupportedDmPlatform(comment.platform)).length,
+    [selectedSocialComments],
   );
   const activeIntentCustomer =
     intentCustomers.find((customer) => customer.id === selectedIntentCustomerId) ?? intentCustomers[0];
@@ -1661,6 +1798,9 @@ function App() {
       api.telephonyHealth(),
       api.telephonyPreflight(),
       api.realtimePipeline(),
+      api.commentInterceptOverview(),
+      api.commentInterceptSources(),
+      api.socialComments(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -1783,6 +1923,13 @@ function App() {
       setTelephonyHealth(results[35].value.health);
     }
     if (results[36].status === "fulfilled") setRealtimePipeline(results[36].value);
+    if (results[37].status === "fulfilled") setCommentInterceptOverview(results[37].value);
+    if (results[38].status === "fulfilled") setCommentSources(results[38].value);
+    if (results[39].status === "fulfilled") {
+      const nextComments = results[39].value;
+      setSocialComments(nextComments);
+      setSelectedCommentIds((current) => current.filter((id) => nextComments.some((comment) => comment.id === id)));
+    }
     setIsLoading(false);
   }
 
@@ -2008,6 +2155,121 @@ function App() {
     } catch (error) {
       setDmTaskMessage(error instanceof Error ? error.message : "创建私信任务失败");
     }
+  }
+
+  async function submitCommentSource(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!commentSourceForm.name.trim()) {
+      setCommentInterceptMessage("请先填写截流来源名称。");
+      return;
+    }
+    try {
+      const created = await api.createCommentInterceptSource({
+        ...commentSourceForm,
+        ownerAccountId: null,
+        syncFrequencyMinutes: Number(commentSourceForm.syncFrequencyMinutes) || 120,
+        autoReplyEnabled: false,
+        humanConfirmRequired: true,
+      });
+      setCommentSources((current) => [created, ...current.filter((source) => source.id !== created.id)]);
+      setCommentInterceptMessage(`已添加「${created.name}」，可以同步评论并筛选高意向用户。`);
+    } catch (error) {
+      setCommentInterceptMessage(error instanceof Error ? error.message : "添加评论截流来源失败");
+    }
+  }
+
+  async function refreshCommentInterceptData() {
+    const [overviewData, sourcesData, commentsData] = await Promise.all([
+      api.commentInterceptOverview(),
+      api.commentInterceptSources(),
+      api.socialComments(),
+    ]);
+    setCommentInterceptOverview(overviewData);
+    setCommentSources(sourcesData);
+    setSocialComments(commentsData);
+    setSelectedCommentIds((current) => current.filter((id) => commentsData.some((comment) => comment.id === id)));
+    return commentsData;
+  }
+
+  async function syncCommentSource(sourceId: string) {
+    setIsSyncingComments(true);
+    setCommentInterceptMessage("正在同步评论...");
+    try {
+      const result: CommentSyncResult = await api.syncCommentInterceptSource(sourceId);
+      const commentsData = await refreshCommentInterceptData();
+      const newHighIntentIds = commentsData
+        .filter((comment) => ["A", "B"].includes(comment.intentLevel) && comment.status !== "已转线索")
+        .map((comment) => comment.id);
+      setSelectedCommentIds(newHighIntentIds);
+      setCommentInterceptMessage(result.message);
+    } catch (error) {
+      setCommentInterceptMessage(error instanceof Error ? error.message : "同步评论失败");
+    } finally {
+      setIsSyncingComments(false);
+    }
+  }
+
+  function toggleComment(commentId: string) {
+    setSelectedCommentIds((current) =>
+      current.includes(commentId) ? current.filter((id) => id !== commentId) : [...current, commentId],
+    );
+  }
+
+  function selectHighIntentComments() {
+    setSelectedCommentIds(highIntentComments.filter((comment) => comment.status !== "已转线索").map((comment) => comment.id));
+    setCommentInterceptMessage("已选择 A/B 级高意向评论。");
+  }
+
+  async function convertSelectedCommentsToLeads() {
+    if (selectedPendingComments.length === 0) {
+      setCommentInterceptMessage("请先选择待转线索的评论。");
+      return null;
+    }
+    setIsConvertingComments(true);
+    setCommentInterceptMessage("正在把评论转入线索库...");
+    try {
+      const firstComment = selectedPendingComments[0];
+      const result = await api.convertCommentsToLeads({
+        commentIds: selectedPendingComments.map((comment) => comment.id),
+        city: firstComment.city === "待识别" ? "待识别" : firstComment.city,
+        category: firstComment.category === "待识别" ? "待识别" : firstComment.category,
+        status: "待私信",
+      });
+      setLastCommentConvertResult(result);
+      const [leadData] = await Promise.all([api.leads(), refreshCommentInterceptData()]);
+      setLeads(leadData);
+      setSelectedDmLeadIds((current) => Array.from(new Set([...current, ...result.leadIds])));
+      setCommentInterceptMessage(result.message);
+      return result;
+    } catch (error) {
+      setCommentInterceptMessage(error instanceof Error ? error.message : "评论转线索失败");
+      return null;
+    } finally {
+      setIsConvertingComments(false);
+    }
+  }
+
+  async function prepareDmTaskFromComments() {
+    const result = await convertSelectedCommentsToLeads();
+    if (!result || result.leadIds.length === 0) return;
+
+    const leadData = await api.leads();
+    setLeads(leadData);
+    const convertedLeads = leadData.filter((lead) => result.leadIds.includes(lead.id) && isSupportedDmPlatform(lead.platform));
+    const nextPlatform = convertedLeads[0]?.platform;
+    if (!nextPlatform) {
+      setCommentInterceptMessage("评论已转线索；当前选中评论没有可自动私信的平台，可走评论回复、人工跟进或外呼。");
+      return;
+    }
+    const platformLeadIds = convertedLeads.filter((lead) => lead.platform === nextPlatform).map((lead) => lead.id);
+    setDmForm((current) => ({
+      ...current,
+      platform: nextPlatform,
+      name: `${nextPlatform}评论截流线索首轮私信`,
+    }));
+    setSelectedDmLeadIds(platformLeadIds);
+    setDmTaskMessage(`已带入 ${platformLeadIds.length} 条${nextPlatform}评论截流线索，创建后将使用已登录${nextPlatform}个人号轮换发送。`);
+    setActiveDmTab("任务列表");
   }
 
   async function startDmTask(taskId: string) {
@@ -4607,6 +4869,7 @@ function App() {
 
   function renderDmWorkspace() {
     const showOverview = activeDmTab === "私信总览";
+    const showIntercept = showOverview || activeDmTab === "评论截流";
     const showTasks = showOverview || activeDmTab === "任务列表";
     const showAccounts = showOverview || activeDmTab === "账号管理";
     const showRotation = showOverview || activeDmTab === "轮换规则";
@@ -4630,6 +4893,220 @@ function App() {
           <MetricCard icon={<Activity size={20} />} label="商家回复" value={dmOverview.replies} detail="今日回复" tone="amber" />
           <MetricCard icon={<Headphones size={20} />} label="需接管" value={dmOverview.needsHandoff} detail="人工跟进" tone="rose" />
         </section>
+
+        {showIntercept && (
+          <section className="content-grid lower comment-intercept-grid">
+            <article className="panel">
+              <div className="panel-title">
+                <div>
+                  <p>Intercept</p>
+                  <h2>评论截流来源</h2>
+                </div>
+                <Search size={22} />
+              </div>
+              <div className="intercept-summary">
+                <div>
+                  <strong>{commentInterceptOverview.sources}</strong>
+                  <span>截流来源</span>
+                </div>
+                <div>
+                  <strong>{commentInterceptOverview.comments}</strong>
+                  <span>评论总数</span>
+                </div>
+                <div>
+                  <strong>{commentInterceptOverview.highIntentComments}</strong>
+                  <span>A/B意向</span>
+                </div>
+                <div>
+                  <strong>{commentInterceptOverview.convertedLeads}</strong>
+                  <span>已转线索</span>
+                </div>
+              </div>
+
+              <form className="form-grid" onSubmit={submitCommentSource}>
+                <label>
+                  平台
+                  <select
+                    value={commentSourceForm.platform}
+                    onChange={(event) => setCommentSourceForm({ ...commentSourceForm, platform: event.target.value })}
+                  >
+                    <option value="抖音">抖音</option>
+                    <option value="视频号">视频号</option>
+                  </select>
+                </label>
+                <label>
+                  来源类型
+                  <select
+                    value={commentSourceForm.sourceType}
+                    onChange={(event) => setCommentSourceForm({ ...commentSourceForm, sourceType: event.target.value })}
+                  >
+                    <option value="视频链接">视频链接</option>
+                    <option value="关键词">关键词</option>
+                    <option value="账号主页">账号主页</option>
+                  </select>
+                </label>
+                <label className="wide">
+                  来源名称
+                  <input value={commentSourceForm.name} onChange={(event) => setCommentSourceForm({ ...commentSourceForm, name: event.target.value })} />
+                </label>
+                <label className="wide">
+                  视频或主页 URL
+                  <input
+                    placeholder="粘贴抖音/视频号视频链接，后续真实适配器会从这里同步评论"
+                    value={commentSourceForm.videoUrl}
+                    onChange={(event) => setCommentSourceForm({ ...commentSourceForm, videoUrl: event.target.value })}
+                  />
+                </label>
+                <label>
+                  关键词
+                  <input value={commentSourceForm.keyword} onChange={(event) => setCommentSourceForm({ ...commentSourceForm, keyword: event.target.value })} />
+                </label>
+                <label>
+                  同步间隔分钟
+                  <input
+                    min={5}
+                    type="number"
+                    value={commentSourceForm.syncFrequencyMinutes}
+                    onChange={(event) => setCommentSourceForm({ ...commentSourceForm, syncFrequencyMinutes: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="wide">
+                  高意向关键词
+                  <input
+                    value={commentSourceForm.keywordRules}
+                    onChange={(event) => setCommentSourceForm({ ...commentSourceForm, keywordRules: event.target.value })}
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  <Plus size={16} />
+                  添加截流来源
+                </button>
+              </form>
+
+              <div className="intercept-source-list">
+                {commentSources.length === 0 && <div className="empty-state">暂无评论来源，先添加一个抖音或视频号视频。</div>}
+                {commentSources.slice(0, 5).map((source) => (
+                  <article className="intercept-source-card" key={source.id}>
+                    <div>
+                      <span className="badge">{source.platform}</span>
+                      <strong>{source.name}</strong>
+                      <small>{source.sourceType} · {source.syncStatus} · {source.lastSyncAt ? "已同步" : "未同步"}</small>
+                    </div>
+                    <button className="row-action" disabled={isSyncingComments} onClick={() => void syncCommentSource(source.id)} type="button">
+                      {isSyncingComments ? "同步中" : "同步评论"}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </article>
+
+            <article className="panel span-2">
+              <div className="panel-title">
+                <div>
+                  <p>Comment Pool</p>
+                  <h2>评论线索池</h2>
+                </div>
+                <div className="button-row">
+                  <button className="secondary-button" onClick={selectHighIntentComments} type="button">
+                    <CheckCircle2 size={16} />
+                    选择高意向
+                  </button>
+                  <button className="secondary-button" onClick={() => void refreshCommentInterceptData()} type="button">
+                    <RefreshCw size={16} />
+                    刷新评论
+                  </button>
+                </div>
+              </div>
+              <div className="rotation-hint">
+                <CheckCircle2 size={16} />
+                <span>
+                  已选 {selectedSocialComments.length} 条评论，待转线索 {selectedPendingComments.length} 条，涉及平台
+                  {selectedCommentPlatforms.length > 0 ? ` ${selectedCommentPlatforms.join("、")}` : " 暂无"}；
+                  其中 {selectedSendableCommentCount} 条属于可自动私信平台。
+                </span>
+              </div>
+              <div className="rotation-hint is-warning">
+                <ShieldAlert size={16} />
+                <span>视频号评论可以截流和转线索，但视频号助手当前不支持主动私信商家，适合走评论回复、人工跟进或外呼。</span>
+              </div>
+              {commentInterceptMessage && <div className="form-result">{commentInterceptMessage}</div>}
+              <div className="table-wrap comment-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>选择</th>
+                      <th>评论用户</th>
+                      <th>评论内容</th>
+                      <th>平台</th>
+                      <th>意向</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {socialComments.length === 0 && (
+                      <tr>
+                        <td colSpan={6}>
+                          <span className="empty-state">暂无评论，先同步一个截流来源。</span>
+                        </td>
+                      </tr>
+                    )}
+                    {socialComments.map((comment) => (
+                      <tr key={comment.id}>
+                        <td>
+                          <input
+                            checked={selectedCommentIds.includes(comment.id)}
+                            disabled={comment.status === "已转线索"}
+                            onChange={() => toggleComment(comment.id)}
+                            type="checkbox"
+                          />
+                        </td>
+                        <td>
+                          <strong>{comment.authorName}</strong>
+                          <small>{comment.city} · {comment.category}</small>
+                        </td>
+                        <td className="comment-content-cell">{comment.content}</td>
+                        <td>{comment.platform}</td>
+                        <td>
+                          <span className={`intent-pill intent-${comment.intentLevel.toLowerCase()}`}>{comment.intentLevel}</span>
+                          <small>{comment.intentScore}</small>
+                        </td>
+                        <td>
+                          <span className="badge">{comment.status}</span>
+                          <small>{comment.riskStatus}</small>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="intercept-actions">
+                <button
+                  className="secondary-button"
+                  disabled={isConvertingComments || selectedPendingComments.length === 0}
+                  onClick={() => void convertSelectedCommentsToLeads()}
+                  type="button"
+                >
+                  <Upload size={16} />
+                  {isConvertingComments ? "转入中" : "转入线索库"}
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={isConvertingComments || selectedPendingComments.length === 0}
+                  onClick={() => void prepareDmTaskFromComments()}
+                  type="button"
+                >
+                  <MessageSquareText size={16} />
+                  转线索并去创建任务
+                </button>
+                {lastCommentConvertResult && (
+                  <small>
+                    最近转入：新增 {lastCommentConvertResult.converted} 条，复用/跳过 {lastCommentConvertResult.skipped} 条。
+                  </small>
+                )}
+              </div>
+            </article>
+          </section>
+        )}
 
         {showRealtime && (
           <section className="content-grid outbound-main">
