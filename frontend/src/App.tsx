@@ -1216,10 +1216,11 @@ function App() {
   const [isTestingTelephony, setIsTestingTelephony] = useState(false);
   const [dmForm, setDmForm] = useState({
     name: "美团高意向商家首轮私信",
-    accountId: "",
+    platform: "美团",
     templateId: "",
     scheduledAt: "",
   });
+  const [dmTaskMessage, setDmTaskMessage] = useState("");
   const [dmAccountForm, setDmAccountForm] = useState({
     platform: "美团",
     accountName: "",
@@ -1300,6 +1301,28 @@ function App() {
     [dmLoggedInAccounts],
   );
   const dmAccountPlatforms = supportedDmPlatforms;
+  const dmTaskPlatform = isSupportedDmPlatform(dmForm.platform) ? dmForm.platform : dmAccountPlatforms[0];
+  const dmPlatformLeads = useMemo(
+    () => dmReachableLeads.filter((lead) => lead.platform === dmTaskPlatform),
+    [dmReachableLeads, dmTaskPlatform],
+  );
+  const dmPlatformLeadIds = useMemo(() => new Set(dmPlatformLeads.map((lead) => lead.id)), [dmPlatformLeads]);
+  const selectedDmPlatformLeadIds = useMemo(
+    () => selectedDmLeadIds.filter((leadId) => dmPlatformLeadIds.has(leadId)),
+    [selectedDmLeadIds, dmPlatformLeadIds],
+  );
+  const dmPlatformLoggedInAccounts = useMemo(
+    () => dmLoggedInAccounts.filter((account) => account.platform === dmTaskPlatform),
+    [dmLoggedInAccounts, dmTaskPlatform],
+  );
+  const dmPlatformRemainingQuota = useMemo(
+    () =>
+      dmPlatformLoggedInAccounts.reduce(
+        (sum, account) => sum + Math.max(0, account.dailyLimit - account.sentToday),
+        0,
+      ),
+    [dmPlatformLoggedInAccounts],
+  );
   const dmAccountCountByPlatform = useMemo(
     () =>
       dmSupportedAccounts.reduce<Record<string, number>>((counts, account) => {
@@ -1546,10 +1569,7 @@ function App() {
       setDmAccounts(nextAccounts);
       setDmForm((current) => ({
         ...current,
-        accountId:
-          current.accountId && nextAccounts.some((account) => account.id === current.accountId && isSupportedDmAccount(account))
-            ? current.accountId
-            : "",
+        platform: isSupportedDmPlatform(current.platform) ? current.platform : supportedDmPlatforms[0],
       }));
     }
     const dmTemplatesResult = results[11];
@@ -1759,21 +1779,36 @@ function App() {
 
   async function submitDmTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const supportedLeadIds = new Set(dmReachableLeads.map((lead) => lead.id));
-    const selectedSupportedLeadIds = selectedDmLeadIds.filter((leadId) => supportedLeadIds.has(leadId));
-    const leadIds = selectedSupportedLeadIds.length > 0 ? selectedSupportedLeadIds : dmReachableLeads.slice(0, 20).map((lead) => lead.id);
-    if (!dmForm.name.trim() || leadIds.length === 0) return;
+    const leadIds =
+      selectedDmPlatformLeadIds.length > 0 ? selectedDmPlatformLeadIds : dmPlatformLeads.slice(0, 20).map((lead) => lead.id);
+    if (!dmForm.name.trim()) {
+      setDmTaskMessage("请先填写任务名称。");
+      return;
+    }
+    if (dmPlatformLoggedInAccounts.length === 0) {
+      setDmTaskMessage(`${dmTaskPlatform}暂无已登录可用个人号，请先到账号管理完成登录后检测。`);
+      return;
+    }
+    if (leadIds.length === 0) {
+      setDmTaskMessage(`${dmTaskPlatform}暂无可私信线索，请先在线索库导入该平台商家。`);
+      return;
+    }
 
-    const created = await api.createDmTask({
-      name: dmForm.name,
-      leadIds,
-      accountId: dmForm.accountId || null,
-      templateId: activeDmTemplate?.id ?? null,
-      scheduledAt: dmForm.scheduledAt || null,
-    });
-    setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
-    setActiveModule("dm");
-    setActiveDmTab("任务列表");
+    try {
+      const created = await api.createDmTask({
+        name: dmForm.name,
+        leadIds,
+        accountId: null,
+        templateId: activeDmTemplate?.id ?? null,
+        scheduledAt: dmForm.scheduledAt || null,
+      });
+      setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
+      setDmTaskMessage(`已创建${dmTaskPlatform}私信任务，将使用${dmPlatformLoggedInAccounts.length}个已登录个人号自动轮换。`);
+      setActiveModule("dm");
+      setActiveDmTab("任务列表");
+    } catch (error) {
+      setDmTaskMessage(error instanceof Error ? error.message : "创建私信任务失败");
+    }
   }
 
   async function startDmTask(taskId: string) {
@@ -1804,7 +1839,7 @@ function App() {
       minSendIntervalSeconds: Number(dmAccountForm.minSendIntervalSeconds),
     });
     setDmAccounts((current) => [created, ...current]);
-    setDmForm((current) => ({ ...current, accountId: "" }));
+    setDmForm((current) => ({ ...current, platform: created.platform }));
     setDmAccountForm({
       platform: "美团",
       accountName: "",
@@ -4321,12 +4356,25 @@ function App() {
                   <input value={dmForm.name} onChange={(event) => setDmForm({ ...dmForm, name: event.target.value })} />
                 </label>
                 <label>
-                  发送账号规则
-                  <select value={dmForm.accountId} onChange={(event) => setDmForm({ ...dmForm, accountId: event.target.value })}>
-                    <option value="">按商家平台自动轮换（推荐）</option>
-                    {dmSupportedAccounts.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        指定 {account.platform} · {account.accountName}
+                  私信平台
+                  <select
+                    value={dmTaskPlatform}
+                    onChange={(event) => {
+                      const nextPlatform = event.target.value;
+                      const nextPlatformLeadIds = new Set(
+                        dmReachableLeads.filter((lead) => lead.platform === nextPlatform).map((lead) => lead.id),
+                      );
+                      const nextName = dmAccountPlatforms.some((platformName) => dmForm.name.startsWith(platformName))
+                        ? dmForm.name.replace(/^(美团|饿了么|抖音)/, nextPlatform)
+                        : dmForm.name;
+                      setDmForm({ ...dmForm, platform: nextPlatform, name: nextName });
+                      setSelectedDmLeadIds((current) => current.filter((leadId) => nextPlatformLeadIds.has(leadId)));
+                      setDmTaskMessage("");
+                    }}
+                  >
+                    {dmAccountPlatforms.map((platformName) => (
+                      <option key={platformName} value={platformName}>
+                        {platformName}（已登录 {dmLoggedInAccounts.filter((account) => account.platform === platformName).length} 个号）
                       </option>
                     ))}
                   </select>
@@ -4354,15 +4402,32 @@ function App() {
                   创建私信任务
                 </button>
               </form>
+              {dmTaskMessage && (
+                <div className={`rotation-hint ${dmTaskMessage.includes("已创建") ? "" : "is-warning"}`}>
+                  {dmTaskMessage.includes("已创建") ? <CheckCircle2 size={16} /> : <ShieldAlert size={16} />}
+                  <span>{dmTaskMessage}</span>
+                </div>
+              )}
 
               <div className="lead-picker">
                 <div className="section-caption">
-                  <strong>筛选私信对象</strong>
-                  <small>{selectedDmLeadIds.filter((leadId) => dmReachableLeads.some((lead) => lead.id === leadId)).length} 个已选</small>
+                  <strong>{dmTaskPlatform} 私信对象</strong>
+                  <small>
+                    {selectedDmPlatformLeadIds.length} 个已选 · {dmPlatformLeads.length} 条可选 · 未选时默认取前 20 条
+                  </small>
                 </div>
                 <div className="rotation-hint">
                   <CheckCircle2 size={16} />
-                  <span>按线索平台自动分配同平台个人号：美团商家用美团号池，饿了么商家用饿了么号池，抖音商家用抖音号池。</span>
+                  <span>
+                    本任务只发送 {dmTaskPlatform} 线索，系统会从 {dmPlatformLoggedInAccounts.length} 个已登录
+                    {dmTaskPlatform}个人号中自动轮换，当前剩余额度 {dmPlatformRemainingQuota} 条。
+                  </span>
+                </div>
+                <div className="rotation-hint">
+                  <CheckCircle2 size={16} />
+                  <span>
+                    多账号会共同进入同平台账号池，系统按发送间隔、剩余额度和风控状态自动轮换，避免某个账号被集中消耗。
+                  </span>
                 </div>
                 {dmUnsupportedLeads.length > 0 && (
                   <div className="rotation-hint is-warning">
@@ -4373,7 +4438,7 @@ function App() {
                     </span>
                   </div>
                 )}
-                <LeadTable leads={dmReachableLeads} selectable selectedLeadIds={selectedDmLeadIds} onToggleLead={toggleDmLead} />
+                <LeadTable leads={dmPlatformLeads} selectable selectedLeadIds={selectedDmLeadIds} onToggleLead={toggleDmLead} />
               </div>
             </article>
 
