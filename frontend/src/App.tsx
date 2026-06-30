@@ -492,95 +492,14 @@ const fallbackDmSyncResult: DmSyncResult = {
 };
 
 const fallbackCommentInterceptOverview: CommentInterceptOverview = {
-  sources: 1,
-  comments: 3,
-  highIntentComments: 2,
+  sources: 0,
+  comments: 0,
+  highIntentComments: 0,
   convertedLeads: 0,
 };
 
-const fallbackCommentSources: CommentInterceptSource[] = [
-  {
-    id: "comment_source_1",
-    platform: "抖音",
-    sourceType: "视频链接",
-    name: "南昌团购招商视频评论",
-    keyword: "南昌 团购 入驻",
-    videoUrl: "https://www.douyin.com/",
-    videoTitle: "南昌本地生活团购招商",
-    ownerAccountId: "dm_account_3",
-    syncStatus: "待同步",
-    syncFrequencyMinutes: 120,
-    keywordRules: "合作,价格,报名,入驻,求资料,想了解,加我",
-    autoReplyEnabled: false,
-    humanConfirmRequired: true,
-    lastSyncAt: null,
-    lastError: null,
-    createdAt: new Date().toISOString(),
-  },
-];
-
-const fallbackSocialComments: SocialComment[] = [
-  {
-    id: "social_comment_1",
-    sourceId: "comment_source_1",
-    platform: "抖音",
-    externalCommentId: "sim-comment-1",
-    videoUrl: "https://www.douyin.com/",
-    authorName: "抖音评论用户-1",
-    authorProfileUrl: "https://www.douyin.com/#comment-author-1",
-    content: "南昌本地餐饮店怎么入驻团购？想了解一下价格",
-    city: "南昌",
-    category: "本地餐饮",
-    likeCount: 18,
-    replyCount: 0,
-    intentScore: 96,
-    intentLevel: "A",
-    status: "待转线索",
-    riskStatus: "正常",
-    commentedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "social_comment_2",
-    sourceId: "comment_source_1",
-    platform: "抖音",
-    externalCommentId: "sim-comment-2",
-    videoUrl: "https://www.douyin.com/",
-    authorName: "抖音评论用户-2",
-    authorProfileUrl: "https://www.douyin.com/#comment-author-2",
-    content: "我们是丽人美业，可以报名这个活动吗，求资料",
-    city: "南昌",
-    category: "丽人美业",
-    likeCount: 12,
-    replyCount: 0,
-    intentScore: 84,
-    intentLevel: "B",
-    status: "待转线索",
-    riskStatus: "正常",
-    commentedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "social_comment_3",
-    sourceId: "comment_source_1",
-    platform: "抖音",
-    externalCommentId: "sim-comment-3",
-    videoUrl: "https://www.douyin.com/",
-    authorName: "抖音评论用户-3",
-    authorProfileUrl: "https://www.douyin.com/#comment-author-3",
-    content: "先看看，后面有需要再联系",
-    city: "南昌",
-    category: "本地生活",
-    likeCount: 3,
-    replyCount: 0,
-    intentScore: 49,
-    intentLevel: "D",
-    status: "待转线索",
-    riskStatus: "正常",
-    commentedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  },
-];
+const fallbackCommentSources: CommentInterceptSource[] = [];
+const fallbackSocialComments: SocialComment[] = [];
 
 const platformLoginUrls: Record<string, string> = {
   美团: "https://passport.meituan.com/account/unitivelogin",
@@ -1321,7 +1240,9 @@ function App() {
   const [selectedCommentIds, setSelectedCommentIds] = useState<string[]>(
     fallbackSocialComments.filter((comment) => ["A", "B"].includes(comment.intentLevel)).map((comment) => comment.id),
   );
-  const [commentInterceptMessage, setCommentInterceptMessage] = useState("添加视频或关键词来源，同步评论后批量转入线索库。");
+  const [commentInterceptMessage, setCommentInterceptMessage] = useState(
+    "添加来源后会立即尝试真实平台同步；未接通时会显示阻断原因，不使用模拟评论。",
+  );
   const [isSyncingComments, setIsSyncingComments] = useState(false);
   const [isConvertingComments, setIsConvertingComments] = useState(false);
   const [lastCommentConvertResult, setLastCommentConvertResult] = useState<CommentConvertResult | null>(null);
@@ -2172,7 +2093,8 @@ function App() {
         humanConfirmRequired: true,
       });
       setCommentSources((current) => [created, ...current.filter((source) => source.id !== created.id)]);
-      setCommentInterceptMessage(`已添加「${created.name}」，可以同步评论并筛选高意向用户。`);
+      setCommentInterceptMessage(`已添加「${created.name}」，正在调用真实平台评论同步...`);
+      await syncCommentSource(created.id);
     } catch (error) {
       setCommentInterceptMessage(error instanceof Error ? error.message : "添加评论截流来源失败");
     }
@@ -2203,6 +2125,7 @@ function App() {
       setSelectedCommentIds(newHighIntentIds);
       setCommentInterceptMessage(result.message);
     } catch (error) {
+      await refreshCommentInterceptData().catch(() => undefined);
       setCommentInterceptMessage(error instanceof Error ? error.message : "同步评论失败");
     } finally {
       setIsSyncingComments(false);
@@ -4977,9 +4900,9 @@ function App() {
                     onChange={(event) => setCommentSourceForm({ ...commentSourceForm, keywordRules: event.target.value })}
                   />
                 </label>
-                <button className="primary-button" type="submit">
+                <button className="primary-button" disabled={isSyncingComments} type="submit">
                   <Plus size={16} />
-                  添加截流来源
+                  {isSyncingComments ? "同步中" : "添加并同步"}
                 </button>
               </form>
 
@@ -4991,6 +4914,7 @@ function App() {
                       <span className="badge">{source.platform}</span>
                       <strong>{source.name}</strong>
                       <small>{source.sourceType} · {source.syncStatus} · {source.lastSyncAt ? "已同步" : "未同步"}</small>
+                      {source.lastError && <small className="error-text">{source.lastError}</small>}
                     </div>
                     <button className="row-action" disabled={isSyncingComments} onClick={() => void syncCommentSource(source.id)} type="button">
                       {isSyncingComments ? "同步中" : "同步评论"}

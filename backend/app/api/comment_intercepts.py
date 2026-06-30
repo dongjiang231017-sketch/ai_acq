@@ -1,5 +1,4 @@
-import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -17,21 +16,12 @@ from app.schemas.comment_intercept import (
     CommentSyncResult,
     SocialCommentRead,
 )
+from app.services.comment_intercept_adapter import CommentInterceptAdapterUnavailable, sync_platform_comments
 
 router = APIRouter()
 
 INTENT_WORDS = ("合作", "价格", "报名", "入驻", "求资料", "想了解", "怎么做", "加我", "联系", "开通")
 RISK_WORDS = ("兼职", "刷单", "贷款", "博彩", "色情")
-SAMPLE_COMMENTS = [
-    ("南昌本地餐饮店怎么入驻团购？想了解一下价格", "南昌", "本地餐饮", 18),
-    ("我们是丽人美业，可以报名这个活动吗，求资料", "南昌", "丽人美业", 12),
-    ("这个团购合作怎么做？能不能加我聊一下", "南昌", "生活服务", 24),
-    ("先看看，后面有需要再联系", "南昌", "本地生活", 3),
-    ("宠物店能不能开通？老板想了解费用", "南昌", "宠物生活", 16),
-    ("我只想问下怎么收费，门店在青山湖", "南昌", "本地商家", 9),
-    ("这个视频讲得不错，收藏了", "待识别", "待识别", 1),
-    ("有招商联系方式吗？我们店有兴趣", "南昌", "招商商家", 21),
-]
 
 
 def _intent_score(content: str, like_count: int, keyword_rules: str) -> tuple[int, str]:
@@ -102,41 +92,51 @@ def sync_comment_source(source_id: str, db: Session = Depends(get_db)) -> dict[s
     if not source:
         raise HTTPException(status_code=404, detail="评论截流来源不存在")
 
+    try:
+        platform_comments = sync_platform_comments(source)
+    except CommentInterceptAdapterUnavailable as exc:
+        source.sync_status = "未接通"
+        source.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        source.sync_status = "同步失败"
+        source.last_error = f"评论同步失败：{exc}"
+        db.commit()
+        raise HTTPException(status_code=502, detail=source.last_error) from exc
+
     imported = 0
     skipped = 0
     now = datetime.utcnow()
-    for index, (content, city, category, likes) in enumerate(SAMPLE_COMMENTS, start=1):
-        external_comment_id = f"sim-{source.id}-{index}"
+    for platform_comment in platform_comments:
         existing = db.scalar(
             select(SocialComment).where(
                 SocialComment.source_id == source.id,
-                SocialComment.external_comment_id == external_comment_id,
+                SocialComment.external_comment_id == platform_comment.external_comment_id,
             )
         )
         if existing:
             skipped += 1
             continue
-        score, level = _intent_score(content, likes, source.keyword_rules)
-        author_name = f"{source.platform}评论用户-{index}"
-        profile_url = f"{source.video_url or source.platform}#comment-author-{index}"
+        score, level = _intent_score(platform_comment.content, platform_comment.like_count, source.keyword_rules)
         comment = SocialComment(
             source_id=source.id,
             platform=source.platform,
-            external_comment_id=external_comment_id,
-            video_url=source.video_url,
-            author_name=author_name,
-            author_profile_url=profile_url,
-            content=content,
-            city=city,
-            category=category,
-            like_count=likes,
-            reply_count=0,
+            external_comment_id=platform_comment.external_comment_id,
+            video_url=platform_comment.video_url,
+            author_name=platform_comment.author_name,
+            author_profile_url=platform_comment.author_profile_url,
+            content=platform_comment.content,
+            city=platform_comment.city,
+            category=platform_comment.category,
+            like_count=platform_comment.like_count,
+            reply_count=platform_comment.reply_count,
             intent_score=score,
             intent_level=level,
             status="待转线索",
-            risk_status=_risk_status(content),
-            raw_payload=json.dumps({"simulated": True, "sourceName": source.name}, ensure_ascii=False),
-            commented_at=now - timedelta(minutes=index * 9),
+            risk_status=_risk_status(platform_comment.content),
+            raw_payload=platform_comment.raw_payload,
+            commented_at=platform_comment.commented_at,
         )
         db.add(comment)
         imported += 1
@@ -151,7 +151,7 @@ def sync_comment_source(source_id: str, db: Session = Depends(get_db)) -> dict[s
         "imported": imported,
         "skipped": skipped,
         "totalComments": int(total_comments),
-        "message": f"已同步 {imported} 条评论，跳过 {skipped} 条重复评论。",
+        "message": f"真实平台同步完成：新增 {imported} 条评论，跳过 {skipped} 条重复评论。",
     }
 
 

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     dm_browser_timeout_ms: int = 15000
     dm_browser_slow_mo_ms: int = 0
     dm_browser_live_send_enabled: bool = False
+    comment_intercept_live_sync_enabled: bool = False
+    comment_intercept_adapter_mode: str = "disabled"
     voice_sample_storage_root: str = ".voice_samples"
     voice_output_storage_root: str = ".voice_outputs"
     voice_clone_training_enabled: bool = False
