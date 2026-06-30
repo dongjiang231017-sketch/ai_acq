@@ -46,6 +46,20 @@ def _bool_value(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _status_for_setting_value(group_key: str, item_key: str, value: str) -> str:
+    if item_key == "gateway_mode":
+        return "模拟模式" if value == "simulator" else "已启用"
+    if item_key in {"queue_enabled", "dnc_enabled", "refusal_stop_enabled"}:
+        return "已启用" if value == "true" else "未启用"
+    if item_key == "live_send_enabled":
+        return "已启用" if value == "true" else "受控"
+    if item_key == "trunk_name":
+        return "已配置" if value.strip() else "待配置"
+    if group_key == "model":
+        return "待配置" if value.startswith("secret:") else "已启用"
+    return "已启用" if value else "待配置"
+
+
 def _default_settings() -> list[dict[str, object]]:
     return [
         {
@@ -205,6 +219,11 @@ def _seed_settings(db: Session) -> None:
                 exists.value = str(item["value"])
                 exists.status = str(item["status"])
                 changed = True
+            if _is_client_visible(exists):
+                next_status = _status_for_setting_value(exists.group_key, exists.item_key, exists.value)
+                if exists.status != next_status:
+                    exists.status = next_status
+                    changed = True
             continue
         db.add(SystemSetting(**item))
         changed = True
@@ -278,6 +297,8 @@ def update_system_setting(setting_id: str, payload: SystemSettingUpdate, db: Ses
     for field, value in values.items():
         if value is not None:
             setattr(setting, field, value)
+    if "value" in values and "status" not in values:
+        setting.status = _status_for_setting_value(setting.group_key, setting.item_key, setting.value)
     setting.updated_by = payload.actor
     setting.updated_at = datetime.utcnow()
     after = "[masked]" if setting.sensitive else setting.value

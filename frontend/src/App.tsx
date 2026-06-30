@@ -1014,6 +1014,8 @@ function App() {
   const [selectedReportExportId, setSelectedReportExportId] = useState<string>(fallbackReportExports[0]?.id ?? "");
   const [selectedSystemSettingId, setSelectedSystemSettingId] = useState<string>(fallbackSystemSettings[0]?.id ?? "");
   const [settingDraft, setSettingDraft] = useState(fallbackSystemSettings[0]?.value ?? "");
+  const [settingsMessage, setSettingsMessage] = useState("请选择左侧配置项，修改后点击保存设置。");
+  const [isSavingSetting, setIsSavingSetting] = useState(false);
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [selectedDmLeadIds, setSelectedDmLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
   const [leadForm, setLeadForm] = useState({
@@ -1087,6 +1089,7 @@ function App() {
   const [voiceSampleFile, setVoiceSampleFile] = useState<File | null>(null);
   const [voiceSampleMessage, setVoiceSampleMessage] = useState("");
   const [isUploadingVoiceSample, setIsUploadingVoiceSample] = useState(false);
+  const settingsEditorRef = useRef<HTMLElement | null>(null);
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
 
   const active = useMemo(
@@ -1873,20 +1876,33 @@ function App() {
     setSelectedSystemSettingId(setting.id);
     setSettingDraft(setting.value);
     setActiveSettingsTab(clientSettingGroupLabels[setting.groupKey] ?? "设置总览");
+    setSettingsMessage(`已选中「${setting.label}」，右侧可以调整并保存。`);
+    setTimeout(() => settingsEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 0);
   }
 
   async function saveSelectedSetting(event?: React.FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    if (!activeSystemSetting) return;
-    const updated = await api.updateSystemSetting(activeSystemSetting.id, {
-      value: settingDraft,
-      actor: "运营管理员",
-    });
-    setSystemSettings((current) => current.map((setting) => (setting.id === updated.id ? updated : setting)));
-    setSelectedSystemSettingId(updated.id);
-    setSettingDraft(updated.value);
-    const overviewData = await api.settingsOverview();
-    setSettingsOverview(overviewData);
+    if (!activeSystemSetting) {
+      setSettingsMessage("请先选择一个配置项。");
+      return;
+    }
+    setIsSavingSetting(true);
+    try {
+      const updated = await api.updateSystemSetting(activeSystemSetting.id, {
+        value: settingDraft,
+        actor: "运营管理员",
+      });
+      setSystemSettings((current) => current.map((setting) => (setting.id === updated.id ? updated : setting)));
+      setSelectedSystemSettingId(updated.id);
+      setSettingDraft(updated.value);
+      const overviewData = await api.settingsOverview();
+      setSettingsOverview(overviewData);
+      setSettingsMessage(`已保存「${updated.label}」：${formatSettingValue(updated)}。`);
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "保存设置失败，请稍后重试。");
+    } finally {
+      setIsSavingSetting(false);
+    }
   }
 
   function toggleLead(leadId: string) {
@@ -2236,9 +2252,14 @@ function App() {
   }
 
   function renderSettingControl(setting: SystemSetting) {
+    const updateSettingDraft = (value: string) => {
+      setSettingDraft(value);
+      setSettingsMessage(`已修改为「${formatSettingValue(setting, value)}」，点击保存设置后生效。`);
+    };
+
     if (setting.valueType === "boolean") {
       return (
-        <select value={settingDraft} onChange={(event) => setSettingDraft(event.target.value)}>
+        <select value={settingDraft} onChange={(event) => updateSettingDraft(event.target.value)}>
           <option value="true">开启</option>
           <option value="false">关闭</option>
         </select>
@@ -2246,7 +2267,7 @@ function App() {
     }
     if (setting.valueType.startsWith("select:")) {
       return (
-        <select value={settingDraft} onChange={(event) => setSettingDraft(event.target.value)}>
+        <select value={settingDraft} onChange={(event) => updateSettingDraft(event.target.value)}>
           {setting.valueType
             .replace("select:", "")
             .split(",")
@@ -2259,9 +2280,9 @@ function App() {
       );
     }
     if (setting.valueType === "number") {
-      return <input type="number" value={settingDraft} onChange={(event) => setSettingDraft(event.target.value)} />;
+      return <input type="number" value={settingDraft} onChange={(event) => updateSettingDraft(event.target.value)} />;
     }
-    return <textarea value={settingDraft} onChange={(event) => setSettingDraft(event.target.value)} rows={4} />;
+    return <textarea value={settingDraft} onChange={(event) => updateSettingDraft(event.target.value)} rows={4} />;
   }
 
   function renderSettingsWorkspace() {
@@ -2296,7 +2317,15 @@ function App() {
       <>
         <section className="outbound-tabs" aria-label="系统设置模块页面">
           {settingsTabs.map((tab) => (
-            <button className={tab === activeSettingsTab ? "is-active" : ""} key={tab} onClick={() => setActiveSettingsTab(tab)} type="button">
+            <button
+              className={tab === activeSettingsTab ? "is-active" : ""}
+              key={tab}
+              onClick={() => {
+                setActiveSettingsTab(tab);
+                setSettingsMessage(tab === "设置总览" ? "已切换到设置总览，请选择要调整的业务配置。" : `已切换到「${tab}」，请选择下方配置项。`);
+              }}
+              type="button"
+            >
               {tab}
             </button>
           ))}
@@ -2328,6 +2357,7 @@ function App() {
                       const firstSetting = settingGroups[group.groupKey]?.[0];
                       setActiveSettingsTab(clientSettingGroupLabels[group.groupKey] ?? "设置总览");
                       if (firstSetting) selectSystemSetting(firstSetting);
+                      setSettingsMessage(`已进入「${group.label}」，右侧已选中第一个可调整配置。`);
                     }}
                     type="button"
                   >
@@ -2396,7 +2426,7 @@ function App() {
             </div>
           </article>
 
-          <article className="panel">
+          <article className="panel" ref={settingsEditorRef}>
             <div className="panel-title">
               <div>
                 <p>Change</p>
@@ -2426,13 +2456,17 @@ function App() {
                   更新人
                   <input value={activeSystemSetting.updatedBy} readOnly />
                 </label>
-                <button className="primary-button" type="submit">
+                <div className="form-result">{settingsMessage}</div>
+                <button className="primary-button" disabled={isSavingSetting} type="submit">
                   <CheckCircle2 size={16} />
-                  保存设置
+                  {isSavingSetting ? "保存中..." : "保存设置"}
                 </button>
               </form>
             ) : (
-              <p className="empty-state">请选择一个配置项。</p>
+              <>
+                <p className="empty-state">请选择一个配置项。</p>
+                <div className="form-result">{settingsMessage}</div>
+              </>
             )}
           </article>
         </section>
@@ -4215,6 +4249,7 @@ function App() {
       return;
     }
     if (activeModule === "settings") {
+      settingsEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       void saveSelectedSetting();
       return;
     }

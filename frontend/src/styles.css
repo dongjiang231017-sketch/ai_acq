@@ -243,6 +243,21 @@ button {
   box-shadow: 0 14px 28px rgba(36, 115, 246, 0.25);
 }
 
+.secondary-button:active,
+.primary-button:active,
+.row-action:active,
+.clickable-card:active {
+  transform: translateY(1px);
+}
+
+.secondary-button:disabled,
+.primary-button:disabled,
+.row-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+  box-shadow: none;
+}
+
 .icon-only {
   width: 48px;
   padding: 0;
@@ -843,6 +858,25 @@ button:disabled {
   padding: 10px 12px;
   font-weight: 800;
   overflow-wrap: anywhere;
+}
+
+.form-result {
+  min-height: 42px;
+  border: 1px solid #cfe0f7;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  background: #f3f8ff;
+  color: #2c5ea8;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.form-result.wide {
+  grid-column: 1 / -1;
 }
 
 .dm-inbox-grid {
