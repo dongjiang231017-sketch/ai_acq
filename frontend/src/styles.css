@@ -14,6 +14,9 @@
 body {
   margin: 0;
   min-width: 320px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
   background:
     linear-gradient(90deg, rgba(216, 234, 255, 0.86), rgba(246, 250, 255, 0.78) 24%, rgba(246, 250, 255, 0.78) 76%, rgba(222, 236, 255, 0.9)),
     #eef6ff;
@@ -167,8 +170,8 @@ button {
 .panel-title p {
   margin: 0 0 4px;
   color: #6f7f96;
-  font-size: 13px;
-  font-weight: 800;
+  font-size: 12px;
+  font-weight: 720;
 }
 
 .topbar h1,
@@ -177,8 +180,16 @@ button {
 }
 
 .topbar h1 {
-  font-size: 27px;
+  font-size: 26px;
+  font-weight: 760;
   letter-spacing: 0;
+}
+
+.panel-title h2 {
+  color: #162238;
+  font-size: 21px;
+  font-weight: 760;
+  line-height: 1.25;
 }
 
 .topbar-actions {
@@ -299,11 +310,12 @@ button {
 .metric-card small {
   color: #6f7f96;
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 720;
 }
 
 .metric-card strong {
-  font-size: 31px;
+  font-size: 30px;
+  font-weight: 760;
   line-height: 1;
 }
 
@@ -422,7 +434,7 @@ button {
   gap: 7px;
   color: #64758e;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
 }
 
 .form-grid .wide,
@@ -499,12 +511,14 @@ td {
 th {
   color: #6f7f96;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
   background: #f6f9fd;
 }
 
 td {
   color: #33445f;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .clickable-row,
@@ -531,6 +545,11 @@ td small {
 td small {
   margin-top: 3px;
   color: #78879d;
+  font-weight: 650;
+}
+
+td strong {
+  font-weight: 720;
 }
 
 .badge,
@@ -568,7 +587,8 @@ td small {
   justify-content: center;
   color: #6f7f96;
   background: #f8fbff;
-  font-weight: 900;
+  font-size: 13px;
+  font-weight: 720;
 }
 
 .task-list {
@@ -596,12 +616,16 @@ td small {
   background: #e9f2ff;
   color: #2473f6;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
 }
 
 .task-row strong,
 .task-row small {
   display: block;
+}
+
+.task-row strong {
+  font-weight: 720;
 }
 
 .task-row small,
@@ -1041,19 +1065,23 @@ button:disabled {
 
 .voice-default-copy strong {
   color: #162238;
-  font-size: 18px;
+  font-size: 17px;
+  font-weight: 760;
+  line-height: 1.3;
 }
 
 .voice-default-copy p {
   margin: 0;
   color: #53647e;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 650;
   line-height: 1.55;
 }
 
 .voice-default-copy small {
   color: #7b8aa0;
-  font-weight: 900;
+  font-size: 12px;
+  font-weight: 650;
   overflow-wrap: anywhere;
 }
 
@@ -1099,13 +1127,15 @@ button:disabled {
   gap: 6px;
   padding: 0 12px;
   color: #667892;
-  font-weight: 900;
+  font-size: 13px;
+  font-weight: 720;
   white-space: nowrap;
 }
 
 .voice-library-stats strong {
   color: #162238;
   font-size: 18px;
+  font-weight: 760;
 }
 
 .voice-library-grid {
@@ -1135,14 +1165,16 @@ button:disabled {
 .voice-library-section-head p {
   margin: 0 0 3px;
   color: #71839b;
-  font-size: 13px;
-  font-weight: 900;
+  font-size: 12px;
+  font-weight: 720;
 }
 
 .voice-library-section-head h3 {
   margin: 0;
   color: #162238;
-  font-size: 20px;
+  font-size: 18px;
+  font-weight: 760;
+  line-height: 1.3;
 }
 
 .voice-library-section-head > span {
@@ -1154,7 +1186,7 @@ button:disabled {
   align-items: center;
   padding: 0 10px;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
   white-space: nowrap;
 }
 
@@ -1185,7 +1217,17 @@ button:disabled {
 .clone-voice-card p strong {
   color: #25344d;
   font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.clone-voice-card p span {
+  display: block;
+  color: #7d8ca1;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
 }
 
 .voice-option-card.is-selected {
@@ -1208,12 +1250,16 @@ button:disabled {
 
 .voice-option-top strong {
   color: #162238;
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 760;
+  line-height: 1.3;
 }
 
 .voice-option-top small {
   color: #7b8aa0;
-  font-weight: 900;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
@@ -1226,7 +1272,7 @@ button:disabled {
   color: #2473f6;
   padding: 0 8px;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
   white-space: nowrap;
 }
 
@@ -1238,13 +1284,14 @@ button:disabled {
   justify-content: center;
   padding: 0 10px;
   font-size: 13px;
-  font-weight: 900;
+  font-weight: 720;
 }
 
 .voice-option-card p {
   margin: 0;
   color: #5e6f87;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 650;
   line-height: 1.55;
 }
 
@@ -1263,7 +1310,7 @@ button:disabled {
   color: #53647e;
   padding: 0 8px;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 650;
 }
 
 .voice-preview-message {
@@ -1272,7 +1319,7 @@ button:disabled {
   color: #2c5ea8;
   padding: 8px 10px;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 650;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -1296,7 +1343,7 @@ button:disabled {
   color: #25344d;
   padding: 8px 9px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.45;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -1304,7 +1351,7 @@ button:disabled {
 
 .muted-cell {
   color: #8897ad;
-  font-weight: 900;
+  font-weight: 650;
 }
 
 .voice-record-status {
@@ -1317,7 +1364,7 @@ button:disabled {
   color: #53647e;
   padding: 0 9px;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
   white-space: nowrap;
 }
 
@@ -1335,7 +1382,8 @@ button:disabled {
   min-width: 260px;
   max-width: 420px;
   color: #53647e;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 650;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -1397,7 +1445,7 @@ button:disabled {
   background: #f3f8ff;
   color: #2c5ea8;
   font-size: 13px;
-  font-weight: 900;
+  font-weight: 720;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -1695,6 +1743,7 @@ button:disabled {
 .account-row strong,
 .template-card strong {
   color: #25344d;
+  font-weight: 720;
 }
 
 .dm-conversation span,
@@ -1715,7 +1764,7 @@ button:disabled {
   margin: 9px 0 0;
   color: #5f7088;
   line-height: 1.55;
-  font-weight: 800;
+  font-weight: 650;
 }
 
 .dm-conversation small,
@@ -1728,7 +1777,7 @@ button:disabled {
   color: #7b8aa0;
   font-style: normal;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 650;
 }
 
 .message-bubble {
