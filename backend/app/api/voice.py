@@ -20,6 +20,7 @@ from app.schemas.voice import (
     VoiceProviderStatusRead,
     VoiceSampleRead,
     SystemVoiceRead,
+    SystemVoicePreviewRead,
     VoiceTrainingJobCreate,
     VoiceTrainingJobRead,
     VoiceUsageRecordRead,
@@ -28,6 +29,7 @@ from app.services.dashscope_voice import (
     VoiceProviderError,
     create_dashscope_voice_clone,
     dashscope_provider_status,
+    synthesize_qwen_system_voice_preview,
 )
 
 router = APIRouter()
@@ -268,6 +270,27 @@ def voice_overview(db: Session = Depends(get_db)) -> dict[str, int]:
 @router.get("/system-voices", response_model=list[SystemVoiceRead])
 def list_system_voices() -> list[dict[str, str | bool]]:
     return SYSTEM_VOICES
+
+
+@router.post("/system-voices/{voice_id}/preview", response_model=SystemVoicePreviewRead)
+def preview_system_voice(voice_id: str) -> dict[str, str]:
+    voice = next((item for item in SYSTEM_VOICES if item["id"] == voice_id), None)
+    if not voice:
+        raise HTTPException(status_code=404, detail="系统音色不存在")
+
+    preview_text = settings.dashscope_system_tts_preview_text.strip() or str(voice["sampleText"])
+    try:
+        result = synthesize_qwen_system_voice_preview(str(voice["voiceParam"]), preview_text)
+    except VoiceProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "voiceId": str(voice["id"]),
+        "voiceParam": str(voice["voiceParam"]),
+        "audioUrl": result.audio_url,
+        "previewText": preview_text,
+        "message": result.message,
+    }
 
 
 @router.get("/provider/status", response_model=VoiceProviderStatusRead)

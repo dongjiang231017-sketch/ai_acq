@@ -36,6 +36,16 @@ class SystemVoiceRead(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SystemVoicePreviewRead(BaseModel):
+    voice_id: Annotated[str, Field(alias="voiceId")]
+    voice_param: Annotated[str, Field(alias="voiceParam")]
+    audio_url: Annotated[str, Field(alias="audioUrl")]
+    preview_text: Annotated[str, Field(alias="previewText")]
+    message: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class VoiceProviderStatusRead(BaseModel):
     provider: str
     configured: bool

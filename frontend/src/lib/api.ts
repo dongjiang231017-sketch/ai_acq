@@ -429,6 +429,14 @@ export type SystemVoice = {
   sampleText: string;
 };
 
+export type SystemVoicePreview = {
+  voiceId: string;
+  voiceParam: string;
+  audioUrl: string;
+  previewText: string;
+  message: string;
+};
+
 export type VoiceProviderStatus = {
   provider: string;
   configured: boolean;
@@ -805,6 +813,7 @@ export const api = {
   voiceOverview: () => request<VoiceOverview>("/voice/overview"),
   voiceProviderStatus: (probe = false) => request<VoiceProviderStatus>(`/voice/provider/status${probe ? "?probe=true" : ""}`),
   systemVoices: () => request<SystemVoice[]>("/voice/system-voices"),
+  systemVoicePreview: (voiceId: string) => request<SystemVoicePreview>(`/voice/system-voices/${voiceId}/preview`, { method: "POST" }),
   voiceProfiles: () => request<VoiceProfile[]>("/voice/profiles"),
   createVoiceProfile: (profile: Omit<VoiceProfile, "id" | "createdAt" | "updatedAt">) =>
     request<VoiceProfile>("/voice/profiles", {

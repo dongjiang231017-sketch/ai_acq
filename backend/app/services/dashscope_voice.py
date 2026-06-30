@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
+import dashscope
 from dashscope.audio.tts_v2 import SpeechSynthesizer, VoiceEnrollmentService
 from dashscope.audio.tts_v2.enrollment import VoiceEnrollmentException
 from dashscope.audio.tts_v2.speech_synthesizer import AudioFormat
@@ -34,6 +35,12 @@ class VoiceProviderStatus:
 class VoiceCloneResult:
     external_voice_id: str
     preview_audio_path: str
+    message: str
+
+
+@dataclass(frozen=True)
+class SystemVoicePreviewResult:
+    audio_url: str
     message: str
 
 
@@ -183,6 +190,56 @@ def synthesize_dashscope_preview(profile_id: str, record_id: str, voice_id: str)
         raise VoiceProviderError("音色已创建，但 DashScope 未返回试听音频。")
     output_path.write_bytes(audio)
     return output_path
+
+
+def synthesize_qwen_system_voice_preview(voice_param: str, preview_text: str) -> SystemVoicePreviewResult:
+    if not _api_key():
+        raise VoiceProviderError("缺少 DASHSCOPE_API_KEY，不能生成系统内置音色试听。")
+
+    try:
+        response = dashscope.MultiModalConversation.call(
+            api_key=_api_key(),
+            model=settings.dashscope_system_tts_model,
+            text=preview_text,
+            voice=voice_param,
+            language_type=settings.dashscope_system_tts_language_type,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise VoiceProviderError(f"Qwen-TTS 试听生成失败：{_safe_provider_error(exc)}") from exc
+
+    status_code = _nested_response_value(response, "status_code")
+    if status_code and int(status_code) >= 400:
+        message = _nested_response_value(response, "message") or _nested_response_value(response, "code") or "provider error"
+        raise VoiceProviderError(f"Qwen-TTS 试听生成失败：{_safe_provider_error(Exception(str(message)))}")
+
+    audio_url = _nested_response_value(response, "output", "audio", "url")
+    if not isinstance(audio_url, str) or not audio_url:
+        raise VoiceProviderError("Qwen-TTS 未返回可播放的试听音频 URL。")
+
+    return SystemVoicePreviewResult(
+        audio_url=audio_url,
+        message=f"Qwen-TTS 已生成 {voice_param} 的试听音频。",
+    )
+
+
+def _nested_response_value(response: object, *keys: str) -> object | None:
+    current: object | None = response
+    for key in keys:
+        if current is None:
+            return None
+        if isinstance(current, dict):
+            current = current.get(key)
+            continue
+        if hasattr(current, "to_dict"):
+            try:
+                current = current.to_dict()
+            except Exception:  # noqa: BLE001
+                pass
+            if isinstance(current, dict):
+                current = current.get(key)
+                continue
+        current = getattr(current, key, None)
+    return current
 
 
 def _safe_provider_error(exc: Exception) -> str:

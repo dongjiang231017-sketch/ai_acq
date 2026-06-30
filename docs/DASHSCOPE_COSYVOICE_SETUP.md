@@ -13,6 +13,8 @@ VOICE_CLONE_ENGINE_NAME=DashScope CosyVoice
 DASHSCOPE_API_KEY=your-dashscope-api-key
 DASHSCOPE_VOICE_CLONE_MODEL=cosyvoice-v2
 DASHSCOPE_TTS_MODEL=cosyvoice-v2
+DASHSCOPE_SYSTEM_TTS_MODEL=qwen3-tts-flash
+DASHSCOPE_SYSTEM_TTS_LANGUAGE_TYPE=Chinese
 DASHSCOPE_VOICE_PREFIX=aiacq
 DASHSCOPE_VOICE_LANGUAGE_HINTS=zh
 VOICE_SAMPLE_PUBLIC_BASE_URL=https://your-public-api-host
@@ -39,3 +41,5 @@ curl "http://127.0.0.1:8017/api/voice/provider/status?probe=true"
 5. 后端调用 CosyVoice TTS 生成一段试听音频，写入克隆语音记录。
 
 试听音频保存在 `.voice_outputs/`，录音样本保存在 `.voice_samples/`，二者都被 `.gitignore` 忽略。
+
+系统内置音色试听使用 Qwen-TTS 预置音色，点击试听时会调用 `DASHSCOPE_SYSTEM_TTS_MODEL` 配置的模型并使用该音色的官方 `voice` 参数生成音频 URL；默认按中文文本传入 `DASHSCOPE_SYSTEM_TTS_LANGUAGE_TYPE=Chinese`。

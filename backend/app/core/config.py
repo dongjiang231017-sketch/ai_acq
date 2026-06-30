@@ -29,9 +29,12 @@ class Settings(BaseSettings):
     dashscope_workspace: str = ""
     dashscope_voice_clone_model: str = "cosyvoice-v2"
     dashscope_tts_model: str = "cosyvoice-v2"
+    dashscope_system_tts_model: str = "qwen3-tts-flash"
+    dashscope_system_tts_language_type: str = "Chinese"
     dashscope_voice_prefix: str = "aiacq"
     dashscope_voice_language_hints: str = "zh"
     dashscope_preview_text: str = "您好，我是本地生活服务顾问，想和您确认一下是否方便了解视频号团购获客。"
+    dashscope_system_tts_preview_text: str = "您好，我是本地生活服务顾问，想和您确认一下是否方便了解视频号团购获客。"
     telephony_gateway_mode: str = "simulator"
     asterisk_host: str = "127.0.0.1"
     asterisk_ami_port: int = 5038

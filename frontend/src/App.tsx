@@ -1151,6 +1151,11 @@ function App() {
   const [voiceSamples, setVoiceSamples] = useState<VoiceSample[]>(fallbackVoiceSamples);
   const [voiceCloneRecords, setVoiceCloneRecords] = useState<VoiceCloneRecord[]>(fallbackVoiceCloneRecords);
   const [voiceUsageRecords, setVoiceUsageRecords] = useState<VoiceUsageRecord[]>(fallbackVoiceUsageRecords);
+  const [isSystemVoiceLibraryOpen, setIsSystemVoiceLibraryOpen] = useState(false);
+  const [systemVoiceSearch, setSystemVoiceSearch] = useState("");
+  const [systemVoicePreviewState, setSystemVoicePreviewState] = useState<
+    Record<string, { audioUrl?: string; loading?: boolean; error?: string; message?: string }>
+  >({});
   const [reportOverview, setReportOverview] = useState<ReportOverview>(fallbackReportOverview);
   const [channelReports, setChannelReports] = useState<ChannelReport[]>(fallbackChannelReports);
   const [salesReports, setSalesReports] = useState<SalesPerformanceReport[]>(fallbackSalesReports);
@@ -1364,6 +1369,16 @@ function App() {
     : [];
   const defaultSystemVoice = systemVoices.find((voice) => voice.isDefault) ?? systemVoices[0];
   const activeSystemVoice = systemVoices.find((voice) => voice.id === selectedSystemVoiceId) ?? defaultSystemVoice;
+  const filteredSystemVoices = useMemo(() => {
+    const keyword = systemVoiceSearch.trim().toLowerCase();
+    if (!keyword) return systemVoices;
+    return systemVoices.filter((voice) =>
+      [voice.name, voice.voiceParam, voice.gender, voice.style, voice.scenario, voice.sampleText]
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword),
+    );
+  }, [systemVoiceSearch, systemVoices]);
   const customerVoiceProfiles = useMemo(
     () => voiceProfiles.filter((profile) => profile.authorizationStatus !== "系统内置" && profile.ownerName !== "系统"),
     [voiceProfiles],
@@ -1987,6 +2002,39 @@ function App() {
   function selectSystemVoice(voice: SystemVoice) {
     setSelectedSystemVoiceId(voice.id);
     setVoiceProfileForm((current) => ({ ...current, fallbackVoice: voice.name }));
+  }
+
+  async function previewSystemVoice(voice: SystemVoice) {
+    const existing = systemVoicePreviewState[voice.id];
+    if (existing?.audioUrl) {
+      const audio = new Audio(apiAssetUrl(existing.audioUrl));
+      void audio.play().catch(() => undefined);
+      return;
+    }
+
+    setSystemVoicePreviewState((current) => ({
+      ...current,
+      [voice.id]: { ...current[voice.id], loading: true, error: "", message: "" },
+    }));
+    try {
+      const preview = await api.systemVoicePreview(voice.id);
+      const audioUrl = apiAssetUrl(preview.audioUrl);
+      setSystemVoicePreviewState((current) => ({
+        ...current,
+        [voice.id]: { audioUrl, loading: false, message: preview.message },
+      }));
+      const audio = new Audio(audioUrl);
+      void audio.play().catch(() => undefined);
+    } catch (error) {
+      setSystemVoicePreviewState((current) => ({
+        ...current,
+        [voice.id]: {
+          ...current[voice.id],
+          loading: false,
+          error: error instanceof Error ? error.message : "试听生成失败",
+        },
+      }));
+    }
   }
 
   function voiceLabelForUsage(profileId?: string | null) {
@@ -3045,7 +3093,15 @@ function App() {
       <>
         <section className="outbound-tabs" aria-label="声音档案模块页面">
           {voiceTabs.map((tab) => (
-            <button className={tab === activeVoiceTab ? "is-active" : ""} key={tab} onClick={() => setActiveVoiceTab(tab)} type="button">
+            <button
+              className={tab === activeVoiceTab ? "is-active" : ""}
+              key={tab}
+              onClick={() => {
+                setActiveVoiceTab(tab);
+                if (tab !== "声音档案") setIsSystemVoiceLibraryOpen(false);
+              }}
+              type="button"
+            >
               {tab}
             </button>
           ))}
@@ -3058,46 +3114,131 @@ function App() {
           <MetricCard icon={<Activity size={20} />} label="使用记录" value={voiceOverview.usageRecords} detail="审计留痕" tone="rose" />
         </section>
 
-        {showProfiles && (
+        {showProfiles && isSystemVoiceLibraryOpen && (
           <section className="content-grid lower">
-            <article className="panel span-2">
+            <article className="panel span-2 voice-library-panel">
+              <div className="panel-title voice-library-header">
+                <div>
+                  <p>Qwen-TTS Voice Library</p>
+                  <h2>系统音色库</h2>
+                </div>
+                <div className="button-row">
+                  <button className="row-action" onClick={() => setIsSystemVoiceLibraryOpen(false)} type="button">
+                    返回
+                  </button>
+                  <button className="row-action is-primary" onClick={() => activeSystemVoice && void previewSystemVoice(activeSystemVoice)} type="button">
+                    试听当前默认
+                  </button>
+                </div>
+              </div>
+              <div className="voice-library-toolbar">
+                <label className="search-box voice-search-box">
+                  <Search size={18} />
+                  <input
+                    onChange={(event) => setSystemVoiceSearch(event.target.value)}
+                    placeholder="搜索音色、voice 参数、风格或场景"
+                    value={systemVoiceSearch}
+                  />
+                </label>
+                <div className="voice-library-stats">
+                  <strong>{filteredSystemVoices.length}</strong>
+                  <span>/ {systemVoices.length} 个可选音色</span>
+                </div>
+              </div>
+              <div className="voice-library-grid">
+                {filteredSystemVoices.map((voice) => {
+                  const preview = systemVoicePreviewState[voice.id] ?? {};
+                  return (
+                    <article
+                      className={voice.id === activeSystemVoice?.id ? "voice-option-card is-selected" : "voice-option-card"}
+                      key={voice.id}
+                      onClick={() => selectSystemVoice(voice)}
+                    >
+                      <div className="voice-option-top">
+                        <div>
+                          <strong>{voice.name}</strong>
+                          <small>{voice.provider} · {voice.voiceParam}</small>
+                        </div>
+                        <span>{voice.id === activeSystemVoice?.id ? "默认" : voice.status}</span>
+                      </div>
+                      <p>{voice.sampleText}</p>
+                      <div className="voice-tags">
+                        {[voice.gender, voice.style, voice.scenario].map((item) => (
+                          <span key={item}>{item}</span>
+                        ))}
+                      </div>
+                      <div className="voice-preview-actions">
+                        <button
+                          className="row-action"
+                          disabled={Boolean(preview.loading)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void previewSystemVoice(voice);
+                          }}
+                          type="button"
+                        >
+                          {preview.loading ? "生成中" : preview.audioUrl ? "重新试听" : "试听"}
+                        </button>
+                        <button
+                          className={voice.id === activeSystemVoice?.id ? "row-action is-primary" : "row-action"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            selectSystemVoice(voice);
+                          }}
+                          type="button"
+                        >
+                          {voice.id === activeSystemVoice?.id ? "当前默认" : "设为默认"}
+                        </button>
+                      </div>
+                      {preview.audioUrl && <audio controls src={preview.audioUrl} />}
+                      {preview.error && <div className="voice-preview-message is-error">{preview.error}</div>}
+                      {!preview.error && preview.message && <div className="voice-preview-message">{preview.message}</div>}
+                    </article>
+                  );
+                })}
+              </div>
+            </article>
+          </section>
+        )}
+
+        {showProfiles && !isSystemVoiceLibraryOpen && (
+          <section className="content-grid lower">
+            <article className="panel span-2 voice-default-panel">
               <div className="panel-title">
                 <div>
-                  <p>Built-in Voices</p>
-                  <h2>系统内置音色 / 默认音色</h2>
+                  <p>Default Voice</p>
+                  <h2>当前系统默认音色</h2>
                 </div>
                 <Radio size={22} />
               </div>
-              <div className="record-grid">
-                {systemVoices.map((voice) => (
-                  <article
-                    className={voice.id === activeSystemVoice?.id ? "record-card clickable-card is-selected" : "record-card clickable-card"}
-                    key={voice.id}
-                    onClick={() => selectSystemVoice(voice)}
-                  >
-                    <div>
-                      <strong>{voice.name}</strong>
-                      <span>{voice.id === activeSystemVoice?.id ? "当前默认" : voice.status}</span>
-                    </div>
-                    <p>{voice.sampleText}</p>
-                    <small>
-                      {voice.provider} · {voice.voiceParam} · {voice.gender} · {voice.style} · {voice.scenario}
-                    </small>
-                    <div className="button-row card-actions">
-                      <button
-                        className={voice.id === activeSystemVoice?.id ? "row-action is-primary" : "row-action"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          selectSystemVoice(voice);
-                        }}
-                        type="button"
-                      >
-                        {voice.id === activeSystemVoice?.id ? "默认音色" : "设为默认"}
-                      </button>
-                    </div>
-                  </article>
-                ))}
+              <div className="voice-default-summary">
+                <div className="voice-default-icon">
+                  <Radio size={24} />
+                </div>
+                <div className="voice-default-copy">
+                  <strong>{activeSystemVoice?.name ?? voiceOverview.defaultVoice}</strong>
+                  <p>{activeSystemVoice?.sampleText ?? "用于系统内置 TTS 回退和默认外呼试听。"}</p>
+                  <small>
+                    {activeSystemVoice
+                      ? `${activeSystemVoice.provider} · ${activeSystemVoice.voiceParam} · ${activeSystemVoice.gender} · ${activeSystemVoice.style} · ${activeSystemVoice.scenario}`
+                      : `${systemVoices.length || voiceOverview.systemVoices} 个系统音色可用`}
+                  </small>
+                </div>
+                <div className="voice-default-actions">
+                  <button className="row-action" onClick={() => activeSystemVoice && void previewSystemVoice(activeSystemVoice)} type="button">
+                    试听
+                  </button>
+                  <button className="row-action is-primary" onClick={() => setIsSystemVoiceLibraryOpen(true)} type="button">
+                    进入音色库
+                  </button>
+                </div>
               </div>
+              {activeSystemVoice && systemVoicePreviewState[activeSystemVoice.id]?.audioUrl && (
+                <audio controls src={systemVoicePreviewState[activeSystemVoice.id].audioUrl} />
+              )}
+              {activeSystemVoice && systemVoicePreviewState[activeSystemVoice.id]?.error && (
+                <div className="voice-preview-message is-error">{systemVoicePreviewState[activeSystemVoice.id].error}</div>
+              )}
             </article>
 
             <article className="panel">
