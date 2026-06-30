@@ -28,6 +28,7 @@ import {
   CallRecord,
   CallScript,
   ChannelReport,
+  BrowserCapturedComment,
   CommentConvertResult,
   CommentInterceptOverview,
   CommentInterceptSource,
@@ -505,9 +506,12 @@ const platformLoginUrls: Record<string, string> = {
   美团: "https://passport.meituan.com/account/unitivelogin",
   饿了么: "https://h5.ele.me/login/",
   抖音: "https://www.douyin.com/",
+  视频号: "https://channels.weixin.qq.com/",
 };
 
 const supportedDmPlatforms = ["美团", "饿了么", "抖音"] as const;
+const loginCapablePlatforms = ["美团", "饿了么", "抖音", "视频号"] as const;
+const commentCapturePlatforms = ["抖音", "视频号"] as const;
 const unsupportedDmPlatformTips: Record<string, string> = {
   视频号: "视频号助手当前不支持主动私信商家，可改用外呼或其他合规触达方式。",
 };
@@ -516,8 +520,20 @@ function isSupportedDmPlatform(platform: string) {
   return supportedDmPlatforms.includes(platform as (typeof supportedDmPlatforms)[number]);
 }
 
+function isLoginCapablePlatform(platform: string) {
+  return loginCapablePlatforms.includes(platform as (typeof loginCapablePlatforms)[number]);
+}
+
+function isCommentCapturePlatform(platform: string) {
+  return commentCapturePlatforms.includes(platform as (typeof commentCapturePlatforms)[number]);
+}
+
 function isSupportedDmAccount(account: DmAccount) {
   return isSupportedDmPlatform(account.platform) && account.status !== "不支持私信";
+}
+
+function isLoginCapableAccount(account: DmAccount) {
+  return isLoginCapablePlatform(account.platform);
 }
 
 function isLegacyBusinessBackendUrl(platform: string, url?: string | null) {
@@ -1241,9 +1257,10 @@ function App() {
     fallbackSocialComments.filter((comment) => ["A", "B"].includes(comment.intentLevel)).map((comment) => comment.id),
   );
   const [commentInterceptMessage, setCommentInterceptMessage] = useState(
-    "添加来源后会立即尝试真实平台同步；未接通时会显示阻断原因，不使用模拟评论。",
+    "在桌面客户端打开抖音/视频号内置登录页，进入目标视频或主页后采集当前页评论；不会生成模拟评论。",
   );
   const [isSyncingComments, setIsSyncingComments] = useState(false);
+  const [isCapturingBrowserComments, setIsCapturingBrowserComments] = useState(false);
   const [isConvertingComments, setIsConvertingComments] = useState(false);
   const [lastCommentConvertResult, setLastCommentConvertResult] = useState<CommentConvertResult | null>(null);
   const [intentOverview, setIntentOverview] = useState<IntentOverview>(fallbackIntentOverview);
@@ -1413,6 +1430,11 @@ function App() {
   const activeRule = recallRules[0];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
   const dmSupportedAccounts = useMemo(() => dmAccounts.filter(isSupportedDmAccount), [dmAccounts]);
+  const dmLoginAccounts = useMemo(() => dmAccounts.filter(isLoginCapableAccount), [dmAccounts]);
+  const commentCaptureAccounts = useMemo(
+    () => dmLoginAccounts.filter((account) => isCommentCapturePlatform(account.platform)),
+    [dmLoginAccounts],
+  );
   const dmLoggedInAccounts = useMemo(
     () =>
       dmSupportedAccounts.filter(
@@ -1452,23 +1474,31 @@ function App() {
   );
   const dmAccountCountByPlatform = useMemo(
     () =>
-      dmSupportedAccounts.reduce<Record<string, number>>((counts, account) => {
+      dmLoginAccounts.reduce<Record<string, number>>((counts, account) => {
         counts[account.platform] = (counts[account.platform] ?? 0) + 1;
         return counts;
       }, {}),
-    [dmSupportedAccounts],
+    [dmLoginAccounts],
   );
   const isolatedDmAccountCount = useMemo(
-    () => dmSupportedAccounts.filter((account) => Boolean(account.browserProfileKey || account.browserProfilePath)).length,
-    [dmSupportedAccounts],
+    () => dmLoginAccounts.filter((account) => Boolean(account.browserProfileKey || account.browserProfilePath)).length,
+    [dmLoginAccounts],
   );
   const activeLoginAccount = useMemo(() => {
     return (
-      dmSupportedAccounts.find((account) => account.id === selectedDmLoginAccountId) ??
-      dmSupportedAccounts.find((account) => account.id === dmLoginSession?.accountId) ??
-      dmSupportedAccounts[0]
+      dmLoginAccounts.find((account) => account.id === selectedDmLoginAccountId) ??
+      dmLoginAccounts.find((account) => account.id === dmLoginSession?.accountId) ??
+      dmLoginAccounts[0]
     );
-  }, [dmSupportedAccounts, dmLoginSession, selectedDmLoginAccountId]);
+  }, [dmLoginAccounts, dmLoginSession, selectedDmLoginAccountId]);
+  const activeCommentCaptureAccount = useMemo(() => {
+    if (activeLoginAccount && isCommentCapturePlatform(activeLoginAccount.platform)) return activeLoginAccount;
+    return commentCaptureAccounts.find((account) => account.platform === commentSourceForm.platform) ?? commentCaptureAccounts[0];
+  }, [activeLoginAccount, commentCaptureAccounts, commentSourceForm.platform]);
+  const activeBrowserCaptureSource = useMemo(() => {
+    const platform = activeCommentCaptureAccount?.platform ?? commentSourceForm.platform;
+    return commentSources.find((source) => source.platform === platform) ?? commentSources[0];
+  }, [activeCommentCaptureAccount, commentSourceForm.platform, commentSources]);
   const activeLoginConfig = useMemo(() => {
     if (!activeLoginAccount) return null;
     return dmPlatformConfigs.find((config) => config.platform === activeLoginAccount.platform) ?? null;
@@ -1478,6 +1508,16 @@ function App() {
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginSession?.loginUrl) ||
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginConfig?.homeUrl) ||
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginAccount ? platformLoginUrls[activeLoginAccount.platform] : "") ||
+    "";
+  const activeCommentCaptureConfig = activeCommentCaptureAccount
+    ? dmPlatformConfigs.find((config) => config.platform === activeCommentCaptureAccount.platform)
+    : null;
+  const activeCommentCaptureSession =
+    dmLoginSession?.accountId === activeCommentCaptureAccount?.id ? dmLoginSession : null;
+  const activeCommentCaptureUrl =
+    personalLoginUrl(activeCommentCaptureAccount?.platform ?? "", activeCommentCaptureSession?.loginUrl) ||
+    personalLoginUrl(activeCommentCaptureAccount?.platform ?? "", activeCommentCaptureConfig?.homeUrl) ||
+    personalLoginUrl(activeCommentCaptureAccount?.platform ?? "", activeCommentCaptureAccount ? platformLoginUrls[activeCommentCaptureAccount.platform] : "") ||
     "";
   const activeLoginEntryText = activeLoginAccount
     ? activeLoginConfig
@@ -1641,12 +1681,24 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (activeModule !== "dm" || activeDmTab !== "评论截流") return;
+    if (!activeCommentCaptureAccount || activeLoginAccount?.id === activeCommentCaptureAccount.id) return;
+    if (activeLoginAccount && isCommentCapturePlatform(activeLoginAccount.platform)) return;
+    setSelectedDmLoginAccountId(activeCommentCaptureAccount.id);
+    if (dmLoginSession?.accountId !== activeCommentCaptureAccount.id) {
+      setDmLoginEntryReady(false);
+      setDmLoginSession(null);
+    }
+  }, [activeCommentCaptureAccount, activeDmTab, activeLoginAccount, activeModule, dmLoginSession]);
+
+  useEffect(() => {
     const viewport = nativeLoginViewportRef.current;
     nativeLoginWebviewRef.current = null;
     if (!viewport) return;
 
     viewport.replaceChildren();
-    if (activeModule !== "dm" || !["私信总览", "账号管理"].includes(activeDmTab)) return;
+    if (activeModule !== "dm" || !["私信总览", "账号管理", "评论截流"].includes(activeDmTab)) return;
+    if (activeDmTab === "评论截流" && activeLoginAccount && !isCommentCapturePlatform(activeLoginAccount.platform)) return;
     if (!isDesktopClient || !dmLoginEntryReady || !activeLoginSession || !activeLoginAccount || !activeLoginUrl) return;
 
     const webview = document.createElement("webview") as DmLoginWebviewElement;
@@ -2093,8 +2145,8 @@ function App() {
         humanConfirmRequired: true,
       });
       setCommentSources((current) => [created, ...current.filter((source) => source.id !== created.id)]);
-      setCommentInterceptMessage(`已添加「${created.name}」，正在调用真实平台评论同步...`);
-      await syncCommentSource(created.id);
+      setCommentInterceptMessage(`已添加「${created.name}」，准备从客户端内置登录页采集当前页面评论...`);
+      await captureCommentsFromEmbeddedPage(created.id, created);
     } catch (error) {
       setCommentInterceptMessage(error instanceof Error ? error.message : "添加评论截流来源失败");
     }
@@ -2113,22 +2165,94 @@ function App() {
     return commentsData;
   }
 
+  function selectHighIntentCommentRows(commentsData: SocialComment[]) {
+    const newHighIntentIds = commentsData
+      .filter((comment) => ["A", "B"].includes(comment.intentLevel) && comment.status !== "已转线索")
+      .map((comment) => comment.id);
+    setSelectedCommentIds(newHighIntentIds);
+  }
+
   async function syncCommentSource(sourceId: string) {
     setIsSyncingComments(true);
     setCommentInterceptMessage("正在同步评论...");
     try {
       const result: CommentSyncResult = await api.syncCommentInterceptSource(sourceId);
       const commentsData = await refreshCommentInterceptData();
-      const newHighIntentIds = commentsData
-        .filter((comment) => ["A", "B"].includes(comment.intentLevel) && comment.status !== "已转线索")
-        .map((comment) => comment.id);
-      setSelectedCommentIds(newHighIntentIds);
+      selectHighIntentCommentRows(commentsData);
       setCommentInterceptMessage(result.message);
     } catch (error) {
       await refreshCommentInterceptData().catch(() => undefined);
       setCommentInterceptMessage(error instanceof Error ? error.message : "同步评论失败");
     } finally {
       setIsSyncingComments(false);
+    }
+  }
+
+  async function captureCommentsFromEmbeddedPage(sourceId: string, sourceOverride?: CommentInterceptSource) {
+    const source = sourceOverride ?? commentSources.find((item) => item.id === sourceId);
+    if (!source) {
+      setCommentInterceptMessage("评论截流来源不存在，请刷新后重试。");
+      return;
+    }
+    if (!isCommentCapturePlatform(source.platform)) {
+      setCommentInterceptMessage(`${source.platform}暂未开放浏览器登录评论采集。`);
+      return;
+    }
+
+    const captureAccount =
+      activeLoginAccount?.platform === source.platform
+        ? activeLoginAccount
+        : commentCaptureAccounts.find((account) => account.platform === source.platform);
+    if (!captureAccount) {
+      setCommentInterceptMessage(`请先在账号管理里添加一个${source.platform}个人号，再使用内置登录页采集评论。`);
+      setActiveDmTab("账号管理");
+      return;
+    }
+
+    if (!isDesktopClient) {
+      setSelectedDmLoginAccountId(captureAccount.id);
+      setCommentInterceptMessage("当前是网页预览，不能读取内置登录页。请用桌面客户端打开后再采集当前页评论。");
+      return;
+    }
+
+    if (activeLoginAccount?.id !== captureAccount.id) {
+      await openRealDmLogin(captureAccount.id);
+      setCommentInterceptMessage(`已切换到${captureAccount.platform}内置登录页。请完成登录并打开目标视频/主页后，再点击“采集当前内置页”。`);
+      return;
+    }
+
+    const webview = nativeLoginWebviewRef.current;
+    const webContentsId = webview?.getWebContentsId?.();
+    if (!dmLoginEntryReady || !webContentsId) {
+      await openRealDmLogin(captureAccount.id);
+      setCommentInterceptMessage(`已打开${captureAccount.platform}内置登录页。请登录并进入目标视频/主页后，再点击“采集当前内置页”。`);
+      return;
+    }
+
+    setIsCapturingBrowserComments(true);
+    setCommentInterceptMessage(`正在读取${captureAccount.platform}内置页 DOM，并导入当前页面评论...`);
+    try {
+      const capture = await window.aiAcqDesktop!.captureCommentIntercept({
+        webContentsId,
+        platform: source.platform,
+      });
+      if (capture.error) {
+        throw new Error(capture.error);
+      }
+      const result = await api.captureCommentInterceptFromBrowser(source.id, {
+        platform: source.platform,
+        pageUrl: capture.url,
+        pageTitle: capture.title,
+        comments: capture.comments as BrowserCapturedComment[],
+      });
+      const commentsData = await refreshCommentInterceptData();
+      selectHighIntentCommentRows(commentsData);
+      setCommentInterceptMessage(result.message);
+    } catch (error) {
+      await refreshCommentInterceptData().catch(() => undefined);
+      setCommentInterceptMessage(error instanceof Error ? error.message : "采集当前内置页评论失败");
+    } finally {
+      setIsCapturingBrowserComments(false);
     }
   }
 
@@ -2215,7 +2339,7 @@ function App() {
 
   async function submitDmAccount(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!dmAccountForm.accountName.trim() || !isSupportedDmPlatform(dmAccountForm.platform)) return;
+    if (!dmAccountForm.accountName.trim() || !isLoginCapablePlatform(dmAccountForm.platform)) return;
 
     const created = await api.createDmAccount({
       ...dmAccountForm,
@@ -2223,7 +2347,9 @@ function App() {
       minSendIntervalSeconds: Number(dmAccountForm.minSendIntervalSeconds),
     });
     setDmAccounts((current) => [created, ...current]);
-    setDmForm((current) => ({ ...current, platform: created.platform }));
+    if (isSupportedDmPlatform(created.platform)) {
+      setDmForm((current) => ({ ...current, platform: created.platform }));
+    }
     setDmAccountForm({
       platform: "美团",
       accountName: "",
@@ -2238,7 +2364,7 @@ function App() {
   }
 
   function prepareNewDmAccount(platform: string, source?: DmAccount) {
-    if (!isSupportedDmPlatform(platform)) return;
+    if (!isLoginCapablePlatform(platform)) return;
 
     const nextIndex = (dmAccountCountByPlatform[platform] ?? 0) + 1;
     setDmAccountForm({
@@ -4875,7 +5001,7 @@ function App() {
                 <label className="wide">
                   视频或主页 URL
                   <input
-                    placeholder="粘贴抖音/视频号视频链接，后续真实适配器会从这里同步评论"
+                    placeholder="粘贴抖音/视频号视频或主页链接；桌面客户端会从当前内置页采集评论"
                     value={commentSourceForm.videoUrl}
                     onChange={(event) => setCommentSourceForm({ ...commentSourceForm, videoUrl: event.target.value })}
                   />
@@ -4900,11 +5026,105 @@ function App() {
                     onChange={(event) => setCommentSourceForm({ ...commentSourceForm, keywordRules: event.target.value })}
                   />
                 </label>
-                <button className="primary-button" disabled={isSyncingComments} type="submit">
+                <button className="primary-button" disabled={isSyncingComments || isCapturingBrowserComments} type="submit">
                   <Plus size={16} />
-                  {isSyncingComments ? "同步中" : "添加并同步"}
+                  {isCapturingBrowserComments ? "采集中" : "添加并采集"}
                 </button>
               </form>
+
+              {activeDmTab === "评论截流" && (
+                <div className="comment-capture-workbench">
+                  <div className="section-caption">
+                    <div>
+                      <strong>内置登录页采集</strong>
+                      <small>登录后打开目标视频或主页，再读取当前页评论</small>
+                    </div>
+                    <button
+                      className="row-action is-primary"
+                      disabled={!activeCommentCaptureAccount || isPreparingDmLogin || !isDesktopClient}
+                      onClick={() => activeCommentCaptureAccount && openRealDmLogin(activeCommentCaptureAccount.id)}
+                      type="button"
+                    >
+                      {isPreparingDmLogin ? "加载中" : "打开内置页"}
+                    </button>
+                  </div>
+                  <div className="comment-capture-shell">
+                    <aside className="login-account-rail comment-capture-account-rail">
+                      {commentCaptureAccounts.length === 0 && <div className="empty-state compact">暂无抖音/视频号个人号。</div>}
+                      {commentCaptureAccounts.map((account) => (
+                        <button
+                          className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
+                          disabled={isPreparingDmLogin}
+                          key={account.id}
+                          onClick={() => selectDmLoginAccount(account.id)}
+                          type="button"
+                        >
+                          <span>{account.platform}</span>
+                          <strong>{account.accountName}</strong>
+                          <small>{displayDmLoginStatus(account.sessionStatus)} · 当前页采集</small>
+                        </button>
+                      ))}
+                    </aside>
+                    <section className="embedded-login-frame comment-capture-frame">
+                      <div className="embedded-browser-bar">
+                        <span className="status-dot" />
+                        <strong>{activeCommentCaptureAccount ? `${activeCommentCaptureAccount.platform} 内置页` : "选择采集账号"}</strong>
+                        <em>{loginEntryHost(activeCommentCaptureUrl)}</em>
+                      </div>
+                      <div className={`embedded-login-body ${dmLoginEntryReady ? "is-open" : ""}`}>
+                        <div className={`login-preview has-real-login ${isDesktopClient ? "is-desktop-client" : "is-browser-preview"}`}>
+                          <div className={`real-login-panel ${isDesktopClient && dmLoginEntryReady ? "has-native-webview" : ""}`}>
+                            <div
+                              className={`native-login-viewport ${isDesktopClient && dmLoginEntryReady ? "is-visible" : ""}`}
+                              ref={nativeLoginViewportRef}
+                            />
+                            {(!isDesktopClient || !dmLoginEntryReady) && (
+                              <div className="real-login-placeholder">
+                                <div className="real-login-mark">
+                                  <KeyRound size={30} />
+                                </div>
+                                <span>{activeCommentCaptureAccount?.platform ?? "平台"}</span>
+                                <strong>客户端内置登录采集</strong>
+                                <p>
+                                  {isDesktopClient
+                                    ? "先加载内置页并登录，再在里面打开目标视频或主页。"
+                                    : "网页预览不能读取内置登录页，请打开桌面客户端。"}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                          <div className="real-login-note">
+                            <strong>{activeCommentCaptureAccount?.accountName ?? "抖音/视频号个人号"}</strong>
+                            <span>这里只读取当前页面可见评论并导入评论池；不会自动评论、不会自动私信。</span>
+                          </div>
+                        </div>
+                        <div className="button-row comment-capture-actions">
+                          <button
+                            className="secondary-button"
+                            disabled={!activeCommentCaptureAccount || isCheckingDmLogin}
+                            onClick={() => activeCommentCaptureAccount && preflightDmAccount(activeCommentCaptureAccount.id)}
+                            type="button"
+                          >
+                            <RefreshCw size={16} />
+                            {isCheckingDmLogin && checkingDmAccountId === activeCommentCaptureAccount?.id ? "检测中" : "登录后检测"}
+                          </button>
+                          <button
+                            className="primary-button"
+                            disabled={!activeBrowserCaptureSource || isCapturingBrowserComments}
+                            onClick={() =>
+                              activeBrowserCaptureSource && captureCommentsFromEmbeddedPage(activeBrowserCaptureSource.id, activeBrowserCaptureSource)
+                            }
+                            type="button"
+                          >
+                            <Search size={16} />
+                            {isCapturingBrowserComments ? "采集中" : "采集当前内置页"}
+                          </button>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              )}
 
               <div className="intercept-source-list">
                 {commentSources.length === 0 && <div className="empty-state">暂无评论来源，先添加一个抖音或视频号视频。</div>}
@@ -4916,8 +5136,13 @@ function App() {
                       <small>{source.sourceType} · {source.syncStatus} · {source.lastSyncAt ? "已同步" : "未同步"}</small>
                       {source.lastError && <small className="error-text">{source.lastError}</small>}
                     </div>
-                    <button className="row-action" disabled={isSyncingComments} onClick={() => void syncCommentSource(source.id)} type="button">
-                      {isSyncingComments ? "同步中" : "同步评论"}
+                    <button
+                      className="row-action"
+                      disabled={isCapturingBrowserComments}
+                      onClick={() => void captureCommentsFromEmbeddedPage(source.id, source)}
+                      type="button"
+                    >
+                      {isCapturingBrowserComments ? "采集中" : "采集当前内置页"}
                     </button>
                   </article>
                 ))}
@@ -4968,11 +5193,11 @@ function App() {
                   </thead>
                   <tbody>
                     {socialComments.length === 0 && (
-                      <tr>
-                        <td colSpan={6}>
-                          <span className="empty-state">暂无评论，先同步一个截流来源。</span>
-                        </td>
-                      </tr>
+	                      <tr>
+	                        <td colSpan={6}>
+	                          <span className="empty-state">暂无评论，先用客户端内置页采集一个截流来源。</span>
+	                        </td>
+	                      </tr>
                     )}
                     {socialComments.map((comment) => (
                       <tr key={comment.id}>
@@ -5240,7 +5465,7 @@ function App() {
               </div>
               <div className="account-isolation-summary">
                 <div>
-                  <strong>{dmSupportedAccounts.length}</strong>
+                  <strong>{dmLoginAccounts.length}</strong>
                   <span>已配置个人号</span>
                 </div>
                 <div>
@@ -5250,7 +5475,7 @@ function App() {
                 <p>每个个人号独立登录、独立额度、独立风控状态，可按平台添加多个账号轮流触达。</p>
               </div>
               <div className="platform-account-strip" aria-label="按平台添加个人号">
-                {dmAccountPlatforms.map((platform) => (
+                {loginCapablePlatforms.map((platform) => (
                   <button key={platform} onClick={() => prepareNewDmAccount(platform)} type="button">
                     <span>{platform}</span>
                     <strong>{dmAccountCountByPlatform[platform] ?? 0} 个号</strong>
@@ -5260,12 +5485,12 @@ function App() {
               </div>
               <form className="form-grid" onSubmit={submitDmAccount}>
                 <label>
-                  平台
-                  <select value={dmAccountForm.platform} onChange={(event) => setDmAccountForm({ ...dmAccountForm, platform: event.target.value })}>
-                    {dmAccountPlatforms.map((platform) => (
-                      <option key={platform}>{platform}</option>
-                    ))}
-                  </select>
+	                  平台
+	                  <select value={dmAccountForm.platform} onChange={(event) => setDmAccountForm({ ...dmAccountForm, platform: event.target.value })}>
+                    {loginCapablePlatforms.map((platform) => (
+	                      <option key={platform}>{platform}</option>
+	                    ))}
+	                  </select>
                 </label>
                 <label>
                   个人号名称
@@ -5364,8 +5589,8 @@ function App() {
 
               <div className="login-shell">
                 <aside className="login-account-rail">
-                  {dmSupportedAccounts.length === 0 && <div className="empty-state">暂无可登录的平台个人号。</div>}
-                  {dmSupportedAccounts.map((account) => (
+                  {dmLoginAccounts.length === 0 && <div className="empty-state">暂无可登录的平台个人号。</div>}
+                  {dmLoginAccounts.map((account) => (
                     <button
                       className={`login-account-chip ${account.id === activeLoginAccount?.id ? "is-selected" : ""}`}
                       disabled={isPreparingDmLogin}
@@ -5475,7 +5700,11 @@ function App() {
                       </div>
                       <div>
                         <span>发送规则</span>
-                        <strong>只给同平台商家发送</strong>
+                        <strong>
+                          {activeLoginAccount && !isSupportedDmPlatform(activeLoginAccount.platform)
+                            ? "仅用于登录采集"
+                            : "只给同平台商家发送"}
+                        </strong>
                       </div>
                     </div>
                   </div>

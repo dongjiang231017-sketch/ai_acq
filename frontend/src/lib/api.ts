@@ -414,6 +414,20 @@ export type CommentSyncResult = {
   message: string;
 };
 
+export type BrowserCapturedComment = {
+  externalCommentId?: string;
+  authorName: string;
+  authorProfileUrl?: string;
+  content: string;
+  videoUrl?: string;
+  city?: string;
+  category?: string;
+  likeCount?: number;
+  replyCount?: number;
+  commentedAt?: string | null;
+  rawPayload?: Record<string, unknown> | null;
+};
+
 export type CommentConvertResult = {
   converted: number;
   skipped: number;
@@ -966,6 +980,19 @@ export const api = {
   syncCommentInterceptSource: (sourceId: string) =>
     request<CommentSyncResult>(`/direct-messages/intercepts/sources/${sourceId}/sync`, {
       method: "POST",
+    }),
+  captureCommentInterceptFromBrowser: (
+    sourceId: string,
+    payload: {
+      platform: string;
+      pageUrl: string;
+      pageTitle: string;
+      comments: BrowserCapturedComment[];
+    },
+  ) =>
+    request<CommentSyncResult>(`/direct-messages/intercepts/sources/${sourceId}/browser-capture`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
   socialComments: (params?: { sourceId?: string; platform?: string; status?: string; intentLevel?: string }) => {
     const query = new URLSearchParams();

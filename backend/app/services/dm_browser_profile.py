@@ -11,6 +11,7 @@ PLATFORM_SESSION_DOMAINS = {
     "美团": ("meituan.com",),
     "饿了么": ("ele.me", "eleme.cn", "eleme.io"),
     "抖音": ("douyin.com", "bytedance.com", "snssdk.com"),
+    "视频号": ("channels.weixin.qq.com", "weixin.qq.com", "wx.qq.com"),
 }
 
 SESSION_MARKERS = (

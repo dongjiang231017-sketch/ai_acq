@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -59,6 +59,31 @@ class CommentSyncResult(BaseModel):
     skipped: int
     total_comments: Annotated[int, Field(alias="totalComments")]
     message: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BrowserCapturedComment(BaseModel):
+    external_comment_id: Annotated[str | None, Field(alias="externalCommentId", max_length=120)] = None
+    author_name: Annotated[str, Field(alias="authorName", min_length=1, max_length=120)]
+    author_profile_url: Annotated[str, Field(alias="authorProfileUrl")] = ""
+    content: str = Field(min_length=1, max_length=1200)
+    video_url: Annotated[str, Field(alias="videoUrl")] = ""
+    city: str = "待识别"
+    category: str = "待识别"
+    like_count: Annotated[int, Field(alias="likeCount", ge=0)] = 0
+    reply_count: Annotated[int, Field(alias="replyCount", ge=0)] = 0
+    commented_at: Annotated[datetime | None, Field(alias="commentedAt")] = None
+    raw_payload: Annotated[dict[str, Any] | None, Field(alias="rawPayload")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BrowserCommentCaptureRequest(BaseModel):
+    platform: str = Field(min_length=1, max_length=40)
+    page_url: Annotated[str, Field(alias="pageUrl")] = ""
+    page_title: Annotated[str, Field(alias="pageTitle", max_length=240)] = ""
+    comments: list[BrowserCapturedComment] = Field(default_factory=list, max_length=200)
 
     model_config = ConfigDict(populate_by_name=True)
 

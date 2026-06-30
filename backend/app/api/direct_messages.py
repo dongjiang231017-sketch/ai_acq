@@ -54,12 +54,16 @@ PLATFORM_LOGIN_URLS = {
     "美团": "https://passport.meituan.com/account/unitivelogin",
     "饿了么": "https://h5.ele.me/login/",
     "抖音": "https://www.douyin.com/",
+    "视频号": "https://channels.weixin.qq.com/",
 }
+LOGIN_PLATFORM_ORDER = ("美团", "饿了么", "抖音", "视频号")
+LOGIN_PLATFORMS = set(LOGIN_PLATFORM_ORDER)
 
 DEFAULT_DM_ACCOUNTS = [
     {"platform": "美团", "account_name": "美团个人号-南昌本地生活", "daily_limit": 200, "min_send_interval_seconds": 45},
     {"platform": "饿了么", "account_name": "饿了么个人号-餐饮招商", "daily_limit": 150, "min_send_interval_seconds": 45},
     {"platform": "抖音", "account_name": "抖音个人号-团购拓客", "daily_limit": 120, "min_send_interval_seconds": 60},
+    {"platform": "视频号", "account_name": "视频号个人号-本地生活采集", "daily_limit": 80, "min_send_interval_seconds": 60},
 ]
 
 LEGACY_BUSINESS_BACKEND_URLS = {
@@ -80,7 +84,13 @@ def _unsupported_platform_reason(platform_name: str) -> str:
 
 
 def _apply_dm_account_support_status(account: DirectMessageAccount) -> bool:
-    if account.platform in SUPPORTED_DM_PLATFORMS:
+    if account.platform in LOGIN_PLATFORMS:
+        if account.status == "不支持私信":
+            account.status = "待登录"
+            account.session_status = "未登录"
+            account.risk_status = "正常"
+            account.last_error = None
+            return True
         return False
 
     updates = {
@@ -225,7 +235,7 @@ def _platform_config(db: Session, platform: str) -> DirectMessagePlatformConfig 
 
 
 def _login_url_for_account(db: Session, account: DirectMessageAccount) -> str:
-    if account.platform not in SUPPORTED_DM_PLATFORMS:
+    if account.platform not in LOGIN_PLATFORMS:
         return ""
     config = _platform_config(db, account.platform)
     configured_url = (config.home_url if config and config.home_url else "").strip()
@@ -321,7 +331,7 @@ def _launch_isolated_login_window(login_url: str, profile_path: str) -> tuple[bo
 
 def _prepare_login_session(db: Session, account: DirectMessageAccount) -> tuple[DirectMessageAccount, str]:
     normalize_account_state(account)
-    if account.platform not in SUPPORTED_DM_PLATFORMS:
+    if account.platform not in LOGIN_PLATFORMS:
         account.status = "不支持私信"
         account.session_status = "不可用"
         account.risk_status = "不支持"
@@ -427,7 +437,7 @@ def list_dm_accounts(db: Session = Depends(get_db)) -> list[DirectMessageAccount
 
 @router.post("/accounts", response_model=DmAccountRead)
 def create_dm_account(payload: DmAccountCreate, db: Session = Depends(get_db)) -> DirectMessageAccount:
-    if payload.platform not in SUPPORTED_DM_PLATFORMS:
+    if payload.platform not in LOGIN_PLATFORMS:
         raise HTTPException(status_code=400, detail=_unsupported_platform_reason(payload.platform))
 
     account = DirectMessageAccount(**payload.model_dump(by_alias=False))

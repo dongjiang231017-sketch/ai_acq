@@ -1086,6 +1086,50 @@ button:disabled {
   margin-top: 16px;
 }
 
+.comment-capture-workbench {
+  margin-top: 16px;
+  border: 1px solid #dce9f8;
+  border-radius: 14px;
+  background: #f9fcff;
+  padding: 12px;
+}
+
+.comment-capture-shell {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.comment-capture-account-rail {
+  max-height: 420px;
+}
+
+.comment-capture-frame .embedded-login-body {
+  padding: 10px;
+}
+
+.comment-capture-frame .login-preview.has-real-login {
+  min-height: 420px;
+}
+
+.comment-capture-frame .real-login-panel,
+.comment-capture-frame .real-login-placeholder {
+  min-height: 330px;
+}
+
+.comment-capture-frame .real-login-panel.has-native-webview {
+  min-height: 420px;
+}
+
+.comment-capture-frame .native-login-viewport {
+  height: 420px;
+}
+
+.comment-capture-actions {
+  justify-content: flex-end;
+  margin-top: 0;
+}
+
 .intercept-source-card {
   display: flex;
   align-items: center;
@@ -2955,9 +2999,10 @@ button:disabled {
   .logged-account-grid,
   .rotation-rule-grid,
   .rotation-pool-row,
-  .rotation-setting-row,
-  .real-login-steps,
-  .profile-grid,
+	  .rotation-setting-row,
+	  .comment-capture-shell,
+	  .real-login-steps,
+	  .profile-grid,
 	  .profile-inspector,
 	  .login-account-rail,
 	  .voice-library-grid {
