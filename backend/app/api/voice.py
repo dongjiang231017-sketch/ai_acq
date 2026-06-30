@@ -370,8 +370,13 @@ def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Se
     usable_samples = _usable_sample_count(db, profile.id)
     if usable_samples <= 0:
         raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再生成复刻音色")
-    if not _voice_clone_training_ready():
-        raise HTTPException(status_code=400, detail="真实声音克隆服务未接入，不能生成复刻音色。请先配置 DashScope/CosyVoice 后再提交。")
+    provider_status = dashscope_provider_status(probe=False)
+    if not provider_status.ready:
+        missing_public_url = "" if provider_status.sample_public_base_url_configured else " 还需要配置可公网访问的 VOICE_SAMPLE_PUBLIC_BASE_URL。"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider_status.message}{missing_public_url}",
+        )
     sample = _latest_usable_sample(db, profile.id)
     if not sample:
         raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再创建复刻音色")

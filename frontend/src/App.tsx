@@ -1179,6 +1179,7 @@ function App() {
   const [voiceSampleFile, setVoiceSampleFile] = useState<File | null>(null);
   const [voiceSampleMessage, setVoiceSampleMessage] = useState("");
   const [isUploadingVoiceSample, setIsUploadingVoiceSample] = useState(false);
+  const [isCheckingVoiceProvider, setIsCheckingVoiceProvider] = useState(false);
   const settingsEditorRef = useRef<HTMLElement | null>(null);
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
   const nativeLoginViewportRef = useRef<HTMLDivElement | null>(null);
@@ -1921,6 +1922,55 @@ function App() {
     return `${Math.round(bytes / 1024 / 102.4) / 10} MB`;
   }
 
+  async function readAudioDurationSeconds(file: File): Promise<number> {
+    const AudioContextCtor =
+      window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (AudioContextCtor) {
+      try {
+        const context = new AudioContextCtor();
+        const buffer = await context.decodeAudioData(await file.arrayBuffer());
+        await context.close();
+        return Math.max(0, Math.round(buffer.duration));
+      } catch {
+        // Some browser/codec combinations cannot decode every upload format; fall back to metadata loading.
+      }
+    }
+
+    return new Promise((resolve) => {
+      const audio = document.createElement("audio");
+      const objectUrl = URL.createObjectURL(file);
+      const cleanup = () => {
+        audio.removeAttribute("src");
+        audio.load();
+        URL.revokeObjectURL(objectUrl);
+      };
+      audio.preload = "metadata";
+      audio.onloadedmetadata = () => {
+        const duration = Number.isFinite(audio.duration) ? Math.max(0, Math.round(audio.duration)) : 0;
+        cleanup();
+        resolve(duration);
+      };
+      audio.onerror = () => {
+        cleanup();
+        resolve(0);
+      };
+      audio.src = objectUrl;
+    });
+  }
+
+  async function checkVoiceProviderStatus() {
+    setIsCheckingVoiceProvider(true);
+    try {
+      const status = await api.voiceProviderStatus(true);
+      setVoiceProviderStatus(status);
+      setVoiceSampleMessage(`${status.engineName}：${status.message}`);
+    } catch (error) {
+      setVoiceSampleMessage(error instanceof Error ? error.message : "检测真实复刻服务失败");
+    } finally {
+      setIsCheckingVoiceProvider(false);
+    }
+  }
+
   async function submitVoiceProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!voiceProfileForm.name.trim() || !voiceProfileForm.ownerName.trim()) {
@@ -1934,6 +1984,7 @@ function App() {
 
     setIsUploadingVoiceSample(true);
     try {
+      const durationSeconds = await readAudioDurationSeconds(voiceSampleFile);
       const created = await api.createVoiceProfile({
         ...voiceProfileForm,
         status: "待授权",
@@ -1942,6 +1993,7 @@ function App() {
       });
       await api.uploadVoiceSample(created.id, voiceSampleFile, {
         uploadedBy: voiceProfileForm.ownerName,
+        durationSeconds,
         transcript: voiceProfileForm.consentMaterial,
       });
       const [overviewData, profileData, sampleData] = await Promise.all([
@@ -1992,8 +2044,10 @@ function App() {
     }
     setIsUploadingVoiceSample(true);
     try {
+      const durationSeconds = await readAudioDurationSeconds(voiceSampleFile);
       await api.uploadVoiceSample(activeVoiceProfile.id, voiceSampleFile, {
         uploadedBy: activeVoiceProfile.ownerName,
+        durationSeconds,
       });
       const [overviewData, profileData, sampleData] = await Promise.all([
         api.voiceOverview(),
@@ -3146,6 +3200,12 @@ function App() {
                 <div className="form-result">
                   {voiceProviderStatus.engineName} · {voiceProviderStatus.message}
                   {!voiceProviderStatus.samplePublicBaseUrlConfigured && " 请配置公网样本地址后再提交。"}
+                </div>
+                <div className="button-row">
+                  <button className="secondary-button" disabled={isCheckingVoiceProvider} onClick={() => void checkVoiceProviderStatus()} type="button">
+                    <RefreshCw size={16} />
+                    {isCheckingVoiceProvider ? "检测中..." : "检测真实服务"}
+                  </button>
                 </div>
                 {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无可复刻的授权克隆档案。</div>}
                 {customerVoiceProfiles.map((profile) => {
