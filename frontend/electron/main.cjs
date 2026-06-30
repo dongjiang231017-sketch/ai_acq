@@ -11,7 +11,9 @@ const PLATFORM_SESSION_DOMAINS = {
 
 const SESSION_MARKERS = ["auth", "login", "passport", "session", "sid", "sso", "ticket", "token", "uid", "user"];
 
-const userDataDir = path.join(__dirname, "..", ".electron-user-data");
+const userDataDir = process.env.AI_ACQ_DESKTOP_USER_DATA_DIR
+  ? path.resolve(process.env.AI_ACQ_DESKTOP_USER_DATA_DIR)
+  : app.getPath("userData");
 app.setPath("userData", userDataDir);
 const asteriskSidecar = createAsteriskSidecar({ userDataDir });
 

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+import socket
 from uuid import uuid4
 
 from app.core.config import settings
@@ -117,32 +118,42 @@ _SESSIONS: dict[str, RealtimeSession] = {}
 
 
 def build_realtime_pipeline() -> dict[str, object]:
-    bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled
+    audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
+    bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
     steps = [
         _pipeline_step(
             "media_bridge",
             "UC100/Asterisk 媒体桥",
             "warn" if not bridge_ready else "pass",
-            "mock_media" if not bridge_ready else "asterisk_external_media",
+            "mock_media" if not bridge_ready else "asterisk_audiosocket",
             120,
-            "今天使用模拟媒体入口；UC100 识卡、客户端内置 Asterisk trunk 和 AMI 单号试拨通过后切到 ExternalMedia/AudioSocket。",
+            (
+                f"AudioSocket 桥接服务监听 {settings.asterisk_audio_socket_host}:{settings.asterisk_audio_socket_port}，"
+                "Asterisk 接通后把电话 8k PCM 音频送入 ASR/TTS 回路。"
+                if bridge_ready
+                else "真实媒体桥未完全就绪；需要 Asterisk/UC100、单号试拨开关和 AudioSocket bridge 同时在线。"
+            ),
         ),
-        _pipeline_step("asr", "流式 ASR", "pass", "Paraformer realtime adapter", 380, "按 WebSocket 流式输入设计，当前用文本模拟最终识别事件。"),
+        _pipeline_step("asr", "流式 ASR", "pass", settings.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
         _pipeline_step("router", "快速意图路由", "pass", "local intent rules", 50, "价格、拒绝、稍后联系、加微信、身份确认等高频意图先走规则。"),
         _pipeline_step("llm", "LLM 生成", "pass", "DeepSeek-V4-Flash adapter", 320, "当前使用短句模拟回复；真实接入时只给复杂问题调用 LLM。"),
-        _pipeline_step("tts", "流式 TTS", "pass", "声音档案 voice router", 430, "音色由客户在声音档案选择，估算口径按首个可播放音频块。"),
+        _pipeline_step("tts", "流式 TTS", "pass", settings.dashscope_tts_model, 430, "优先使用声音档案可用复刻 voice_id 输出 8k PCM；客户可在声音档案选择音色。"),
         _pipeline_step("barge_in", "打断处理", "pass", "VAD + playback queue cancel", 80, "AI 说话时收到客户插话会停止当前 TTS 并重新进入 listening。"),
     ]
     estimated_latency = sum(int(step["latencyMs"]) for step in steps)
     return {
         "mode": "half_duplex_interruptible",
-        "bridgeMode": "mock_media" if not bridge_ready else "asterisk_external_media",
+        "bridgeMode": "mock_media" if not bridge_ready else "asterisk_audiosocket",
         "targetLatencyMs": 1500,
         "estimatedLatencyMs": estimated_latency,
         "estimatedAiCostPerMinute": 0.04,
         "readyForMockCall": True,
         "readyForAsteriskMedia": bridge_ready,
-        "nextStep": "可先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接客户端内置 Asterisk 媒体桥。",
+        "nextStep": (
+            "真实电话媒体桥已就绪，可以从前端做单号试拨。"
+            if bridge_ready
+            else "先启动 AudioSocket bridge，再打开 ASTERISK_LIVE_CALL_ENABLED=true，并从前端做单号试拨。"
+        ),
         "steps": steps,
     }
 
@@ -310,3 +321,11 @@ def _interrupt_session(session: RealtimeSession, detail: str) -> bool:
     session.current_tts_event_id = None
     session.add_event("tts_interrupted", "system", "stopped", "已停止 AI 播放。", detail, latency_ms=80)
     return True
+
+
+def _is_tcp_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False

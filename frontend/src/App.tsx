@@ -1220,6 +1220,21 @@ function telephonyPreflightSummary(preflight: TelephonyPreflight) {
   return "等待配置";
 }
 
+function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
+  if (!result?.rawPayload) return "";
+  try {
+    const payload = JSON.parse(result.rawPayload) as { events?: Array<Record<string, string>> };
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    const compact = events
+      .map((event) => [event.Event, event.DialStatus, event.Cause, event["Cause-txt"], event.TechCause, event.Reason].filter(Boolean).join("/"))
+      .filter(Boolean)
+      .slice(-4);
+    return compact.length ? compact.join(" -> ") : "";
+  } catch {
+    return "";
+  }
+}
+
 function realtimePipelineStatusText(status: string) {
   if (status === "pass") return "PASS";
   if (status === "fail") return "FAIL";
@@ -2072,7 +2087,7 @@ function App() {
         callerId: telephonyTestForm.callerId.trim() || null,
       });
       setTelephonyTestResult(result);
-      setTelephonyMessage(result.accepted ? "已提交到 UC100/Asterisk，请观察被叫手机和线路事件。" : result.message);
+      setTelephonyMessage(result.message || (result.accepted ? "试拨请求已被 Asterisk 接收。" : "测试拨号失败"));
       try {
         const preflight = await api.telephonyPreflight(telephonyTestForm.phone);
         setTelephonyHealth(preflight.health);
@@ -4897,6 +4912,9 @@ function App() {
                     <small>
                       {telephonyTestResult.gatewayStatus} · {telephonyTestResult.actionId} · {telephonyTestResult.channel}
                     </small>
+                  )}
+                  {telephonyTestResult && telephonyTestPayloadSummary(telephonyTestResult) && (
+                    <small>{telephonyTestPayloadSummary(telephonyTestResult)}</small>
                   )}
                 </div>
               </div>

@@ -15,6 +15,8 @@ const DEFAULTS = {
   uc100Host: "192.168.10.100",
   uc100SipPort: 5080,
   maxChannels: 1,
+  audioSocketHost: "127.0.0.1",
+  audioSocketPort: 9019,
 };
 
 function createAsteriskSidecar(options) {
@@ -23,7 +25,7 @@ function createAsteriskSidecar(options) {
 
 class AsteriskSidecar {
   constructor(options = {}) {
-    this.userDataDir = options.userDataDir;
+    this.userDataDir = path.resolve(options.userDataDir || path.join(os.homedir(), ".ai-acq-client"));
     this.managedProcess = null;
     this.lastExit = null;
   }
@@ -33,7 +35,8 @@ class AsteriskSidecar {
     const runtime = this.resolveRuntime();
     const running = this.isManagedRunning();
     const amiReachable = await isTcpOpen("127.0.0.1", layout.state.amiPort, 350);
-    const checks = this.buildChecks({ layout, runtime, running, amiReachable });
+    const audioSocketReachable = await isTcpOpen(layout.state.audioSocketHost, layout.state.audioSocketPort, 350);
+    const checks = this.buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable });
     return {
       deliveryMode: "client-sidecar",
       runtimeMode: runtime.mode,
@@ -49,13 +52,16 @@ class AsteriskSidecar {
       uc100Host: layout.state.uc100Host,
       uc100SipPort: layout.state.uc100SipPort,
       maxChannels: layout.state.maxChannels,
+      audioSocketHost: layout.state.audioSocketHost,
+      audioSocketPort: layout.state.audioSocketPort,
+      audioSocketReachable,
       configDir: layout.configDir,
       stateDir: layout.stateDir,
       backendEnvPath: layout.backendEnvPath,
       backendEnvReady: fs.existsSync(layout.backendEnvPath),
       checks,
       lastExit: this.lastExit,
-      nextStep: this.nextStep({ runtime, running, amiReachable, layout }),
+      nextStep: this.nextStep({ runtime, running, amiReachable, audioSocketReachable, layout }),
     };
   }
 
@@ -120,6 +126,7 @@ class AsteriskSidecar {
       logDir,
       runDir,
       spoolDir,
+      stateDir,
       state,
     });
 
@@ -152,6 +159,9 @@ class AsteriskSidecar {
       uc100Host: process.env.AI_ACQ_UC100_HOST || DEFAULTS.uc100Host,
       uc100SipPort: Number(process.env.AI_ACQ_UC100_SIP_PORT || DEFAULTS.uc100SipPort),
       maxChannels: Number(process.env.AI_ACQ_ASTERISK_MAX_CHANNELS || DEFAULTS.maxChannels),
+      audioSocketHost: process.env.AI_ACQ_AUDIOSOCKET_HOST || DEFAULTS.audioSocketHost,
+      audioSocketPort: Number(process.env.AI_ACQ_AUDIOSOCKET_PORT || DEFAULTS.audioSocketPort),
+      audioSocketUuid: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       ...(existing || {}),
     };
@@ -244,9 +254,9 @@ match = ${state.uc100Host}
     writeFileIfChanged(
       path.join(paths.configDir, "extensions.conf"),
       `[from-ai-acq]
-exten => s,1,NoOp(AI ACQ outbound call answered)
+exten => s,1,NoOp(AI ACQ realtime outbound call answered)
  same => n,Answer()
- same => n,Wait(1)
+ same => n,AudioSocket(${state.audioSocketUuid},${state.audioSocketHost}:${state.audioSocketPort})
  same => n,Hangup()
 
 [from-uc100]
@@ -276,6 +286,9 @@ ASTERISK_TRUNK_NAME=${state.trunkName}
 ASTERISK_MAX_CHANNELS=${state.maxChannels}
 ASTERISK_LIVE_CALL_ENABLED=false
 ASTERISK_BULK_CALL_ENABLED=false
+ASTERISK_AUDIO_SOCKET_BIND_HOST=${state.audioSocketHost}
+ASTERISK_AUDIO_SOCKET_HOST=${state.audioSocketHost}
+ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
 `,
       0o600,
     );
@@ -304,7 +317,7 @@ ASTERISK_BULK_CALL_ENABLED=false
     return Boolean(this.managedProcess && this.managedProcess.exitCode === null && !this.managedProcess.killed);
   }
 
-  buildChecks({ layout, runtime, running, amiReachable }) {
+  buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable }) {
     return [
       {
         key: "runtime",
@@ -336,10 +349,18 @@ ASTERISK_BULK_CALL_ENABLED=false
         status: "warn",
         detail: `${layout.state.uc100Host}:${layout.state.uc100SipPort}，单卡默认 ${layout.state.maxChannels} 路。`,
       },
+      {
+        key: "audio_socket",
+        label: "实时媒体桥",
+        status: audioSocketReachable ? "pass" : "warn",
+        detail: audioSocketReachable
+          ? `AudioSocket bridge 已监听：${layout.state.audioSocketHost}:${layout.state.audioSocketPort}。`
+          : `Asterisk 接通后会连接 AudioSocket：${layout.state.audioSocketHost}:${layout.state.audioSocketPort}，请先启动实时音频桥。`,
+      },
     ];
   }
 
-  nextStep({ runtime, running, amiReachable, layout }) {
+  nextStep({ runtime, running, amiReachable, audioSocketReachable, layout }) {
     if (!runtime.found) {
       return "把 Asterisk runtime 打进桌面客户端安装包，或在开发机用 AI_ACQ_ASTERISK_BIN 指向可执行文件后再启动。";
     }
@@ -349,7 +370,10 @@ ASTERISK_BULK_CALL_ENABLED=false
     if (!amiReachable) {
       return "Asterisk 进程已启动，等待 AMI 端口打开；若持续失败，查看客户端日志目录。";
     }
-    return `内置 Asterisk 已运行。后端应读取 ${layout.backendEnvPath}，再做 UC100 trunk 预检。`;
+    if (!audioSocketReachable) {
+      return "内置 Asterisk 已运行；启动实时 AudioSocket bridge 后，再做 UC100 trunk 预检和单号试拨。";
+    }
+    return `内置 Asterisk 和实时媒体桥已运行。后端应读取 ${layout.backendEnvPath}，再做 UC100 trunk 预检。`;
   }
 }
 

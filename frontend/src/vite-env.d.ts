@@ -71,6 +71,9 @@ type AiAcqDesktopAsteriskStatus = {
   uc100Host: string;
   uc100SipPort: number;
   maxChannels: number;
+  audioSocketHost: string;
+  audioSocketPort: number;
+  audioSocketReachable: boolean;
   configDir: string;
   stateDir: string;
   backendEnvPath: string;

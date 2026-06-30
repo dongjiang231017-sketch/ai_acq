@@ -1,5 +1,6 @@
 import json
 import socket
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
@@ -105,6 +106,19 @@ def parse_ami_message(raw: str) -> AmiResponse:
     )
 
 
+def split_ami_messages(raw: str) -> list[str]:
+    normalized = raw.replace("\r\n", "\n")
+    return [chunk for chunk in normalized.split("\n\n") if chunk.strip()]
+
+
+def safe_ami_event_log(events: list[dict[str, str | list[str]]]) -> list[dict[str, str]]:
+    allowed = {"Event", "DialStatus", "Cause", "Cause-txt", "TechCause", "Response", "Reason", "ChannelStateDesc"}
+    result: list[dict[str, str]] = []
+    for event in events[-12:]:
+        result.append({key: str(value) for key, value in event.items() if key in allowed})
+    return result
+
+
 class AsteriskAmiClient:
     def __init__(
         self,
@@ -113,13 +127,17 @@ class AsteriskAmiClient:
         username: str | None = None,
         password: str | None = None,
         timeout_seconds: int | None = None,
+        events: bool = False,
     ) -> None:
         self.host = host or settings.asterisk_host
         self.port = port or settings.asterisk_ami_port
         self.username = username if username is not None else settings.asterisk_ami_username
         self.password = password if password is not None else settings.asterisk_ami_password
         self.timeout_seconds = timeout_seconds or settings.asterisk_ami_timeout_seconds
+        self.events = events
         self._socket: socket.socket | None = None
+        self._incoming_messages: list[str] = []
+        self._event_messages: list[str] = []
 
     def __enter__(self) -> "AsteriskAmiClient":
         self.connect()
@@ -157,7 +175,7 @@ class AsteriskAmiClient:
                 "Action": "Login",
                 "Username": self.username,
                 "Secret": self.password,
-                "Events": "off",
+                "Events": "on" if self.events else "off",
             }
         )
         if not response.ok:
@@ -169,7 +187,13 @@ class AsteriskAmiClient:
     def command(self, command: str) -> AmiResponse:
         return self.send_action({"Action": "Command", "Command": command})
 
-    def originate(self, phone: str, caller_id: str | None = None, variables: dict[str, str] | None = None) -> AsteriskOriginateResult:
+    def originate(
+        self,
+        phone: str,
+        caller_id: str | None = None,
+        variables: dict[str, str] | None = None,
+        wait_for_result_seconds: float = 0,
+    ) -> AsteriskOriginateResult:
         action_id = f"ai-acq-{uuid4().hex}"
         channel = render_originate_channel(phone)
         payload: dict[str, str | list[str]] = {
@@ -189,6 +213,26 @@ class AsteriskAmiClient:
                 for key, value in variables.items()
             ]
         response = self.send_action(payload)
+        event_result = self._wait_for_originate_result(action_id, wait_for_result_seconds) if response.ok and self.events else None
+        if event_result:
+            return AsteriskOriginateResult(
+                accepted=bool(event_result["accepted"]),
+                action_id=action_id,
+                channel=channel,
+                status=str(event_result["status"]),
+                message=str(event_result["message"]),
+                raw_payload=json.dumps(
+                    {
+                        "provider": "asterisk",
+                        "actionId": action_id,
+                        "channel": channel,
+                        "response": response.response,
+                        "message": response.message,
+                        "events": event_result["events"],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
         accepted = response.ok
         return AsteriskOriginateResult(
             accepted=accepted,
@@ -220,7 +264,16 @@ class AsteriskAmiClient:
         payload = "\r\n".join(lines) + "\r\n\r\n"
         try:
             self._socket.sendall(payload.encode("utf-8"))
-            return parse_ami_message(self._read_message())
+            deadline = time.monotonic() + max(self.timeout_seconds, 1)
+            while True:
+                message = self._read_next_message()
+                response = parse_ami_message(message)
+                if "Response" in response.fields:
+                    return response
+                if response.fields.get("Event"):
+                    self._event_messages.append(message)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError
         except OSError as exc:
             raise AsteriskAmiError("Asterisk AMI 通信失败") from exc
 
@@ -250,6 +303,82 @@ class AsteriskAmiClient:
             if b"\r\n\r\n" in data or b"\n\n" in data:
                 break
         return b"".join(chunks).decode("utf-8", errors="replace")
+
+    def _read_next_message(self) -> str:
+        if self._incoming_messages:
+            return self._incoming_messages.pop(0)
+        raw = self._read_message()
+        messages = split_ami_messages(raw)
+        if not messages:
+            return ""
+        self._incoming_messages.extend(messages[1:])
+        return messages[0]
+
+    def _read_next_event_message(self) -> str:
+        if self._event_messages:
+            return self._event_messages.pop(0)
+        return self._read_next_message()
+
+    def _wait_for_originate_result(self, action_id: str, timeout_seconds: float) -> dict[str, object] | None:
+        if timeout_seconds <= 0 or self._socket is None:
+            return None
+
+        deadline = time.monotonic() + timeout_seconds
+        started_at = time.monotonic()
+        saw_ringing = False
+        events: list[dict[str, str | list[str]]] = []
+        previous_timeout = self._socket.gettimeout()
+        self._socket.settimeout(min(max(timeout_seconds, 0.5), 1.0))
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    raw_message = self._read_next_event_message()
+                except TimeoutError:
+                    continue
+                response = parse_ami_message(raw_message)
+                event = response.fields
+                event_name = str(event.get("Event", ""))
+                if not event_name:
+                    continue
+                events.append(event)
+
+                event_action_id = str(event.get("ActionID", ""))
+                normalized = normalize_ami_call_event({key: str(value) for key, value in event.items()})
+                status = normalized["status"]
+                if is_line_rejection_event(event):
+                    status = "failed"
+                if status == "ringing":
+                    saw_ringing = True
+                if is_immediate_originate_failure(event, status, saw_ringing, time.monotonic() - started_at):
+                    status = "failed"
+                message = ami_call_status_message(event, status)
+
+                if event_name == "OriginateResponse" and event_action_id and event_action_id != action_id:
+                    continue
+                if status in {"failed", "busy", "no_answer", "cancelled"}:
+                    return {
+                        "accepted": False,
+                        "status": status,
+                        "message": message,
+                        "events": safe_ami_event_log(events),
+                    }
+                if status == "answered":
+                    return {
+                        "accepted": True,
+                        "status": "answered",
+                        "message": message,
+                        "events": safe_ami_event_log(events),
+                    }
+                if status == "ringing":
+                    return {
+                        "accepted": True,
+                        "status": "ringing",
+                        "message": message,
+                        "events": safe_ami_event_log(events),
+                    }
+        finally:
+            self._socket.settimeout(previous_timeout)
+        return None
 
 
 def clean_ami_field_value(value: object, field_name: str) -> str:
@@ -352,8 +481,13 @@ def originate_test_call(phone: str, caller_id: str | None = None) -> AsteriskOri
     render_originate_channel(phone)
     if caller_id:
         clean_ami_field_value(caller_id, "AMI CallerID")
-    with AsteriskAmiClient() as client:
-        return client.originate(phone, caller_id=caller_id, variables={"AI_ACQ_TEST_CALL": "1"})
+    with AsteriskAmiClient(events=True) as client:
+        return client.originate(
+            phone,
+            caller_id=caller_id,
+            variables={"AI_ACQ_TEST_CALL": "1"},
+            wait_for_result_seconds=settings.asterisk_test_call_result_wait_seconds,
+        )
 
 
 def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
@@ -380,7 +514,7 @@ def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
             "CONGESTION": "failed",
             "CHANUNAVAIL": "failed",
         }.get(dial_status.upper(), "ended")
-    elif event_name == "Hangup":
+    elif event_name in {"Hangup", "HangupRequest"}:
         status = {"16": "hangup", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "hangup")
     elif event_name == "OriginateResponse":
         if response.lower() == "success":
@@ -394,3 +528,59 @@ def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
         "dialStatus": dial_status,
         "cause": cause,
     }
+
+
+def ami_call_status_message(event: dict[str, str | list[str]], status: str) -> str:
+    event_name = str(event.get("Event", ""))
+    dial_status = str(event.get("DialStatus", "")).upper()
+    cause = str(event.get("Cause", ""))
+    cause_text = str(event.get("Cause-txt", ""))
+    tech_cause = str(event.get("TechCause", ""))
+    response = str(event.get("Response", ""))
+    reason = str(event.get("Reason", ""))
+    diagnostic = " ".join(part for part in [tech_cause, cause_text, dial_status, response, reason] if part)
+    lower_diagnostic = diagnostic.lower()
+
+    if "403" in diagnostic or "forbidden" in lower_diagnostic:
+        return "UC100 拒绝外呼：403 Forbidden。请在 UC100 后台配置允许 Asterisk/SIP 分机通过 VoLTE 线路外呼后重试。"
+    if status == "answered":
+        return "电话已接通，实时音频桥已进入通话。"
+    if status == "ringing":
+        return "线路已发起，手机侧正在振铃。"
+    if status == "busy":
+        return "号码忙线或被占用，请稍后重试。"
+    if status == "no_answer":
+        return "号码暂未接听或运营商未返回接通。"
+    if status == "cancelled":
+        return "试拨已取消或线路提前结束。"
+    if status == "failed" and cause == "21":
+        return "线路拒绝外呼。请检查 UC100 的 SIP 分机/中继/呼叫路由是否允许当前 Asterisk 发起外呼。"
+    if is_immediate_originate_failure(event, status, saw_ringing=False, elapsed_seconds=0):
+        return "UC100/运营商未放行外呼：呼叫没有进入振铃就被线路侧结束。请检查 UC100 的 SIP 分机、呼叫路由和 VoLTE 外呼权限。"
+    if status == "failed" and dial_status:
+        return f"线路外呼失败：{dial_status}。请检查 UC100 SIP 路由、SIM 卡和运营商线路状态。"
+    if status == "failed" and event_name == "OriginateResponse":
+        return f"Asterisk 发起外呼失败：Reason {reason or 'unknown'}。"
+    return "试拨状态已更新。"
+
+
+def is_immediate_originate_failure(
+    event: dict[str, str | list[str]],
+    status: str,
+    saw_ringing: bool,
+    elapsed_seconds: float,
+) -> bool:
+    event_name = str(event.get("Event", ""))
+    response = str(event.get("Response", "")).lower()
+    reason = str(event.get("Reason", ""))
+    if event_name != "OriginateResponse" or response != "failure" or saw_ringing:
+        return False
+    return reason == "1" and elapsed_seconds <= 5
+
+
+def is_line_rejection_event(event: dict[str, str | list[str]]) -> bool:
+    cause = str(event.get("Cause", ""))
+    cause_text = str(event.get("Cause-txt", ""))
+    tech_cause = str(event.get("TechCause", ""))
+    diagnostic = " ".join(part for part in [tech_cause, cause_text] if part).lower()
+    return cause == "21" or "403" in diagnostic or "forbidden" in diagnostic

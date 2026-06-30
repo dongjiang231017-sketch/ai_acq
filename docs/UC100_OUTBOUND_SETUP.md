@@ -63,11 +63,20 @@ ASTERISK_ORIGINATE_CONTEXT=from-ai-acq
 ASTERISK_ORIGINATE_EXTENSION=s
 ASTERISK_ORIGINATE_CHANNEL_TEMPLATE=PJSIP/{phone}@{trunk}
 ASTERISK_ORIGINATE_TIMEOUT_MS=30000
+ASTERISK_TEST_CALL_RESULT_WAIT_SECONDS=4
 ASTERISK_CALLER_ID=AI获客
 ASTERISK_TRUNK_NAME=uc100
 ASTERISK_MAX_CHANNELS=1
 ASTERISK_LIVE_CALL_ENABLED=false
 ASTERISK_BULK_CALL_ENABLED=false
+ASTERISK_AUDIO_SOCKET_BIND_HOST=127.0.0.1
+ASTERISK_AUDIO_SOCKET_HOST=127.0.0.1
+ASTERISK_AUDIO_SOCKET_PORT=9019
+REALTIME_ASR_MODEL=paraformer-realtime-v2
+REALTIME_TTS_VOICE_ID=
+REALTIME_TTS_VOICE_NAME=
+REALTIME_CALL_OPENING_TEXT=您好，我是本地生活获客助手，想跟您确认一下现在方便了解视频号团购获客吗？
+REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
 ```
 
 不要提交 `.env`，不要把 AMI 密码写进 Git。
@@ -188,6 +197,17 @@ curl -X POST http://localhost:8000/api/outbound/realtime/sessions/会话ID/playb
 
 这组接口不会真实拨号，也不会调用真实 ASR/LLM/TTS 供应商；它用于设备对接前先把外呼会话状态、音色选择、打断处理和前端操作闭环跑顺。音色来自「声音档案」：客户可选系统音色或已授权可用的复刻音色。
 
+启动真实 AudioSocket 实时桥：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.tools.realtime_audio_bridge --check
+python -m app.tools.realtime_audio_bridge
+```
+
+`--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。
+
 单号试拨：
 
 ```bash
@@ -209,10 +229,10 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 9. 打开 `ASTERISK_LIVE_CALL_ENABLED=true`，在 AI 外呼系统里做单号试拨。
 10. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
 
-## 现在还没做的硬件相关实现
+## 现在还没做完的硬件相关实现
 
 - Asterisk 事件回调持久化：接通、忙线、未接、挂断、失败需要从 AMI event 更新通话记录。
-- Asterisk ExternalMedia/AudioSocket 把真实电话音频流接入 ASR，再把 TTS 音频送回通话。
+- AudioSocket 实时桥已具备独立进程和事件日志；还需要在客户现场完成真实单号电话测试，确认电话音频进入 ASR、TTS 音频回写电话、打断事件可观测。
 - 人工接管时从 AI 通话转人工坐席。
 
-第一阶段代码已经提供客户端内置 Asterisk sidecar 状态/启动入口、AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器、单号试拨接口和实时语音管线模拟通话。真实批量外呼仍需要在单号测试稳定后再开启。
+第一阶段代码已经提供客户端内置 Asterisk sidecar 状态/启动入口、AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器、带 AMI 事件等待的单号试拨接口、实时语音管线模拟通话，以及独立 AudioSocket 实时桥。真实批量外呼仍需要在单号测试稳定后再开启。
