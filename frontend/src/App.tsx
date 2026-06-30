@@ -52,6 +52,7 @@ import {
   SystemVoice,
   TelephonyConfig,
   TelephonyHealth,
+  TelephonyPreflight,
   TelephonyTestCallResult,
   VoiceCloneRecord,
   VoiceOverview,
@@ -203,6 +204,31 @@ const fallbackTelephonyHealth: TelephonyHealth = {
   maxChannels: 1,
   readyForTestCall: false,
   errors: ["Asterisk AMI 账号或密码未配置"],
+};
+
+const fallbackTelephonyPreflight: TelephonyPreflight = {
+  checkedAt: fallbackTelephonyHealth.checkedAt,
+  readyForDeviceTest: false,
+  readyForSingleNumberTest: false,
+  readyForBulkTasks: false,
+  nextStep: "先配置 AMI 账号、UC100 trunk，并切到 Asterisk 真实线路模式。",
+  health: fallbackTelephonyHealth,
+  steps: [
+    {
+      key: "gateway_mode",
+      label: "网关模式",
+      status: "warn",
+      detail: "当前仍是模拟线路，代码不会访问 UC100。",
+      action: "实机联调时设置 TELEPHONY_GATEWAY_MODE=asterisk。",
+    },
+    {
+      key: "ami_credentials",
+      label: "AMI 账号",
+      status: "fail",
+      detail: "AMI 用户名或密码未配置。",
+      action: "在 backend/.env 配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。",
+    },
+  ],
 };
 
 const fallbackRecords: CallRecord[] = [
@@ -1019,7 +1045,10 @@ function formatSettingOption(setting: SystemSetting, option: string) {
   return formatSettingValue({ ...setting, value: option }, option);
 }
 
-function telephonyReadinessLabel(health: TelephonyHealth) {
+function telephonyReadinessLabel(health: TelephonyHealth, preflight?: TelephonyPreflight) {
+  if (preflight?.readyForBulkTasks) return "可批量外呼";
+  if (preflight?.readyForSingleNumberTest) return "可单号试拨";
+  if (preflight?.readyForDeviceTest) return "设备可联调";
   if (health.readyForTestCall && health.liveCallEnabled) return "可单号试拨";
   if (health.readyForTestCall) return "线路已就绪";
   if (health.amiReachable && health.authenticated) return "AMI 已连接";
@@ -1034,6 +1063,19 @@ function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHeal
   if (health.trunkReachable === false) return health.trunkStatus;
   if (!health.liveCallEnabled) return "单号试拨开关未开启";
   return health.trunkStatus || "UC100 线路待测试";
+}
+
+function telephonyPreflightStatusText(status: string) {
+  if (status === "pass") return "PASS";
+  if (status === "fail") return "FAIL";
+  return "WARN";
+}
+
+function telephonyPreflightSummary(preflight: TelephonyPreflight) {
+  if (preflight.readyForBulkTasks) return "真实批量外呼已开放";
+  if (preflight.readyForSingleNumberTest) return "可做单号试拨";
+  if (preflight.readyForDeviceTest) return "设备链路可联调";
+  return "等待配置";
 }
 
 function formatDuration(seconds: number) {
@@ -1053,6 +1095,7 @@ function App() {
   const [overview, setOverview] = useState<OutboundOverview>(fallbackOverview);
   const [telephonyConfig, setTelephonyConfig] = useState<TelephonyConfig>(fallbackTelephonyConfig);
   const [telephonyHealth, setTelephonyHealth] = useState<TelephonyHealth>(fallbackTelephonyHealth);
+  const [telephonyPreflight, setTelephonyPreflight] = useState<TelephonyPreflight>(fallbackTelephonyPreflight);
   const [callRecords, setCallRecords] = useState<CallRecord[]>(fallbackRecords);
   const [liveCalls, setLiveCalls] = useState<CallRecord[]>(fallbackRecords);
   const [scripts, setScripts] = useState<CallScript[]>(fallbackScripts);
@@ -1132,6 +1175,7 @@ function App() {
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
   const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认 UC100/Asterisk 可用后再做单号试拨。");
+  const [isCheckingTelephony, setIsCheckingTelephony] = useState(false);
   const [isTestingTelephony, setIsTestingTelephony] = useState(false);
   const [dmForm, setDmForm] = useState({
     name: "美团高意向商家首轮私信",
@@ -1401,6 +1445,7 @@ function App() {
       api.systemSettings(),
       api.telephonyConfig(),
       api.telephonyHealth(),
+      api.telephonyPreflight(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -1515,6 +1560,10 @@ function App() {
     }
     if (results[33].status === "fulfilled") setTelephonyConfig(results[33].value);
     if (results[34].status === "fulfilled") setTelephonyHealth(results[34].value);
+    if (results[35].status === "fulfilled") {
+      setTelephonyPreflight(results[35].value);
+      setTelephonyHealth(results[35].value.health);
+    }
     setIsLoading(false);
   }
 
@@ -1594,11 +1643,19 @@ function App() {
   }
 
   async function refreshTelephonyStatus() {
-    setTelephonyMessage("正在检查 UC100/Asterisk 线路...");
-    const [config, health] = await Promise.all([api.telephonyConfig(), api.telephonyHealth()]);
-    setTelephonyConfig(config);
-    setTelephonyHealth(health);
-    setTelephonyMessage(telephonyReadinessDetail(config, health));
+    setIsCheckingTelephony(true);
+    setTelephonyMessage("正在预检 UC100/Asterisk 线路...");
+    try {
+      const [config, preflight] = await Promise.all([api.telephonyConfig(), api.telephonyPreflight(telephonyTestForm.phone)]);
+      setTelephonyConfig(config);
+      setTelephonyHealth(preflight.health);
+      setTelephonyPreflight(preflight);
+      setTelephonyMessage(preflight.nextStep || telephonyReadinessDetail(config, preflight.health));
+    } catch (error) {
+      setTelephonyMessage(error instanceof Error ? error.message : "线路预检失败");
+    } finally {
+      setIsCheckingTelephony(false);
+    }
   }
 
   async function submitTelephonyTestCall(event: React.FormEvent<HTMLFormElement>) {
@@ -1614,8 +1671,13 @@ function App() {
       });
       setTelephonyTestResult(result);
       setTelephonyMessage(result.accepted ? "已提交到 UC100/Asterisk，请观察被叫手机和线路事件。" : result.message);
-      const health = await api.telephonyHealth();
-      setTelephonyHealth(health);
+      try {
+        const preflight = await api.telephonyPreflight(telephonyTestForm.phone);
+        setTelephonyHealth(preflight.health);
+        setTelephonyPreflight(preflight);
+      } catch {
+        // 试拨结果已经返回，预检刷新失败不覆盖当前提示。
+      }
     } catch (error) {
       setTelephonyMessage(error instanceof Error ? error.message : "测试拨号失败");
     } finally {
@@ -3538,9 +3600,9 @@ function App() {
                   <p>UC100 / Asterisk</p>
                   <h2>真实线路接入</h2>
                 </div>
-                <button className="secondary-button" onClick={refreshTelephonyStatus} type="button">
-                  <RefreshCw size={16} className={isLoading ? "spin" : ""} />
-                  检查线路
+                <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
+                  <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
+                  {isCheckingTelephony ? "预检中" : "预检线路"}
                 </button>
               </div>
               <div className="line-health-grid">
@@ -3550,7 +3612,7 @@ function App() {
                 </div>
                 <div>
                   <span>线路状态</span>
-                  <strong>{telephonyReadinessLabel(telephonyHealth)}</strong>
+                  <strong>{telephonyReadinessLabel(telephonyHealth, telephonyPreflight)}</strong>
                 </div>
                 <div>
                   <span>AMI</span>
@@ -3567,6 +3629,28 @@ function App() {
                 <div>
                   <span>拨号开关</span>
                   <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨" : "未开启"}</strong>
+                </div>
+              </div>
+              <div className="line-preflight">
+                <div className="line-preflight-header">
+                  <div>
+                    <span>预检结论</span>
+                    <strong>{telephonyPreflightSummary(telephonyPreflight)}</strong>
+                  </div>
+                  <small>{new Date(telephonyPreflight.checkedAt).toLocaleString("zh-CN", { hour12: false })}</small>
+                </div>
+                <p>{telephonyPreflight.nextStep}</p>
+                <div className="line-preflight-steps">
+                  {telephonyPreflight.steps.map((step) => (
+                    <div className="line-preflight-step" key={step.key}>
+                      <span className={`line-preflight-badge is-${step.status}`}>{telephonyPreflightStatusText(step.status)}</span>
+                      <div>
+                        <strong>{step.label}</strong>
+                        <small>{step.detail}</small>
+                        {step.action && <em>{step.action}</em>}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
               <div className="line-test-row">

@@ -137,6 +137,24 @@ class TelephonyHealthRead(BaseModel):
     errors: list[str]
 
 
+class TelephonyPreflightStepRead(BaseModel):
+    key: str
+    label: str
+    status: str
+    detail: str
+    action: str
+
+
+class TelephonyPreflightRead(BaseModel):
+    checked_at: Annotated[datetime, Field(alias="checkedAt")]
+    ready_for_device_test: Annotated[bool, Field(alias="readyForDeviceTest")]
+    ready_for_single_number_test: Annotated[bool, Field(alias="readyForSingleNumberTest")]
+    ready_for_bulk_tasks: Annotated[bool, Field(alias="readyForBulkTasks")]
+    next_step: Annotated[str, Field(alias="nextStep")]
+    health: TelephonyHealthRead
+    steps: list[TelephonyPreflightStepRead]
+
+
 class TelephonyTestCallCreate(BaseModel):
     phone: Annotated[str, Field(min_length=3, max_length=40)]
     caller_id: Annotated[str | None, Field(alias="callerId")] = None

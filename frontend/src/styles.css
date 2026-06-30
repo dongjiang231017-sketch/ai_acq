@@ -726,6 +726,105 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.line-preflight {
+  border: 1px solid #e2ebf6;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 14px;
+}
+
+.line-preflight-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.line-preflight-header span,
+.line-preflight-step small,
+.line-preflight-step em {
+  display: block;
+  color: #738299;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.line-preflight-header strong {
+  display: block;
+  margin-top: 4px;
+  color: #26364d;
+  font-size: 17px;
+  font-weight: 950;
+}
+
+.line-preflight-header small {
+  color: #8290a5;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.line-preflight p {
+  margin: 12px 0 0;
+  color: #40526b;
+  font-weight: 900;
+  line-height: 1.55;
+}
+
+.line-preflight-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.line-preflight-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border-top: 1px solid #e5edf7;
+  padding-top: 10px;
+}
+
+.line-preflight-step strong {
+  display: block;
+  color: #26364d;
+  font-size: 14px;
+  font-weight: 950;
+  margin-bottom: 4px;
+}
+
+.line-preflight-step em {
+  color: #52657f;
+  margin-top: 4px;
+}
+
+.line-preflight-badge {
+  min-width: 44px;
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 950;
+  text-align: center;
+}
+
+.line-preflight-badge.is-pass {
+  background: #0c9f6f;
+}
+
+.line-preflight-badge.is-warn {
+  background: #b77a00;
+}
+
+.line-preflight-badge.is-fail {
+  background: #d64545;
+}
+
 .line-test-row {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
@@ -1992,6 +2091,10 @@ button:disabled {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .line-preflight-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .line-test-row,
   .line-test-form {
     grid-template-columns: 1fr;
@@ -2070,6 +2173,7 @@ button:disabled {
   .nav-list,
   .form-grid,
   .line-health-grid,
+  .line-preflight-steps,
   .flow-node-grid,
   .rule-detail-grid,
   .record-grid,

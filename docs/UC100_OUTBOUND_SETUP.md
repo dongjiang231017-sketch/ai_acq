@@ -1,6 +1,6 @@
 # UC100 实体电话卡外呼接入准备
 
-这份文档用于 UC100 到货前后的开发联调。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker 和通话网关字段；硬件到货后主要补 Asterisk/UC100 连通和真实 originate 适配器。
+这份文档用于 UC100 到货前后的开发联调。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口和真实 originate 适配器。
 
 ## 当前可先做
 
@@ -8,7 +8,10 @@
 2. 使用 Redis 队列验证 worker 消费任务。
 3. 在通话记录中保存 `gateway_call_id`、`gateway_status`、`raw_payload`。
 4. 准备 PostgreSQL、Redis、Asterisk 的本地或测试环境。
-5. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
+5. 在 AI 外呼系统的「真实线路接入」面板做无拨号预检。
+6. 使用 `python -m app.tools.uc100_preflight` 做命令行无拨号预检。
+7. 参考 `docs/UC100_ASTERISK_SNIPPETS.md` 准备 Asterisk AMI、PJSIP trunk 和 dialplan。
+8. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
 
 ## 推荐架构
 
@@ -115,6 +118,23 @@ python -m app.workers.outbound_worker --once
 curl http://localhost:8000/api/outbound/telephony/config
 ```
 
+运行完整预检：
+
+```bash
+curl "http://localhost:8000/api/outbound/telephony/preflight?phone=你的测试手机号"
+```
+
+前端也已经接入同一套预检逻辑：打开 AI 外呼系统，进入「实时监听」页顶部的「真实线路接入」面板，输入测试号码后点「预检线路」。这个动作只检查配置、AMI、trunk 和 Channel 渲染，不会拨号。
+
+不启动 API 的本地预检：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.tools.uc100_preflight --phone 你的测试手机号
+python -m app.tools.uc100_preflight --phone 你的测试手机号 --json
+```
+
 检查 UC100/Asterisk 线路：
 
 ```bash
@@ -133,13 +153,14 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 
 1. 插 SIM 卡并确认能正常注册运营商网络。
 2. 给 UC100 配置固定局域网 IP。
-3. 在 Asterisk 配置 UC100 SIP trunk。
+3. 按 `docs/UC100_ASTERISK_SNIPPETS.md` 在 Asterisk 配置 UC100 SIP/PJSIP trunk。
 4. 在 Asterisk 配置 AMI 用户，只开放测试环境访问。
 5. 从 Asterisk CLI 手动拨一个测试号码。
 6. 确认通话状态、挂断原因、录音或音频流是否可用。
-7. 再把 `TELEPHONY_GATEWAY_MODE` 从 `simulator` 切到 `asterisk`。
-8. 打开 `ASTERISK_LIVE_CALL_ENABLED=true`，在 AI 外呼系统里做单号试拨。
-9. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
+7. 运行 `python -m app.tools.uc100_preflight --phone 你的测试手机号`，先让 AMI/trunk/Channel 检查通过。
+8. 再把 `TELEPHONY_GATEWAY_MODE` 从 `simulator` 切到 `asterisk`。
+9. 打开 `ASTERISK_LIVE_CALL_ENABLED=true`，在 AI 外呼系统里做单号试拨。
+10. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
 
 ## 现在还没做的硬件相关实现
 
@@ -147,4 +168,4 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 - 实时音频流进入 ASR，再把 TTS 音频送回通话。
 - 人工接管时从 AI 通话转人工坐席。
 
-第一阶段代码已经提供 AMI 健康检查、受开关保护的真实 originate 适配器和单号试拨接口。真实批量外呼仍需要在单号测试稳定后再开启。
+第一阶段代码已经提供 AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器和单号试拨接口。真实批量外呼仍需要在单号测试稳定后再开启。

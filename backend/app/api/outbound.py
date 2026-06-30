@@ -18,6 +18,7 @@ from app.schemas.task import (
     TaskRead,
     TelephonyConfigRead,
     TelephonyHealthRead,
+    TelephonyPreflightRead,
     TelephonyTestCallCreate,
     TelephonyTestCallRead,
 )
@@ -30,6 +31,7 @@ from app.services.asterisk_ami import (
 from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
+from app.services.telephony_preflight import build_telephony_preflight
 
 router = APIRouter()
 
@@ -100,6 +102,11 @@ def telephony_config() -> dict[str, object]:
 @router.get("/telephony/health", response_model=TelephonyHealthRead)
 def telephony_health() -> dict[str, object]:
     return check_asterisk_health().as_dict()
+
+
+@router.get("/telephony/preflight", response_model=TelephonyPreflightRead)
+def telephony_preflight(phone: str | None = None) -> dict[str, object]:
+    return build_telephony_preflight(test_phone=phone)
 
 
 @router.post("/telephony/test-call", response_model=TelephonyTestCallRead)

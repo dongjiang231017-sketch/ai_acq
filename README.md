@@ -158,6 +158,18 @@ python -m app.workers.outbound_worker --once
 GET /api/outbound/telephony/config
 ```
 
+UC100/Asterisk 对接预检：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.tools.uc100_preflight --phone 你的测试手机号
+```
+
+前端入口：AI 外呼系统 -> 实时监听 -> 真实线路接入 -> 预检线路。
+
+Asterisk/UC100 配置样例见 `docs/UC100_ASTERISK_SNIPPETS.md`。
+
 ## 数据库迁移
 
 新增或修改 SQLAlchemy model 后，生成迁移：

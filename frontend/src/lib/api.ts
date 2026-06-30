@@ -131,6 +131,24 @@ export type TelephonyHealth = {
   errors: string[];
 };
 
+export type TelephonyPreflightStep = {
+  key: string;
+  label: string;
+  status: "pass" | "warn" | "fail" | string;
+  detail: string;
+  action: string;
+};
+
+export type TelephonyPreflight = {
+  checkedAt: string;
+  readyForDeviceTest: boolean;
+  readyForSingleNumberTest: boolean;
+  readyForBulkTasks: boolean;
+  nextStep: string;
+  health: TelephonyHealth;
+  steps: TelephonyPreflightStep[];
+};
+
 export type TelephonyTestCallResult = {
   accepted: boolean;
   actionId: string;
@@ -673,6 +691,10 @@ export const api = {
   recallRules: () => request<RecallRule[]>("/outbound/recall-rules"),
   telephonyConfig: () => request<TelephonyConfig>("/outbound/telephony/config"),
   telephonyHealth: () => request<TelephonyHealth>("/outbound/telephony/health"),
+  telephonyPreflight: (phone?: string) => {
+    const query = phone?.trim() ? `?phone=${encodeURIComponent(phone.trim())}` : "";
+    return request<TelephonyPreflight>(`/outbound/telephony/preflight${query}`);
+  },
   createTelephonyTestCall: (payload: { phone: string; callerId?: string | null }) =>
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",
