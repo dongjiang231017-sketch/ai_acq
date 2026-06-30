@@ -50,9 +50,13 @@ import {
   ReportOverview,
   SalesPerformanceReport,
   SystemVoice,
+  TelephonyConfig,
+  TelephonyHealth,
+  TelephonyTestCallResult,
   VoiceCloneRecord,
   VoiceOverview,
   VoiceProfile,
+  VoiceProviderStatus,
   VoiceSample,
   VoiceTrainingJob,
   VoiceUsageRecord,
@@ -167,6 +171,37 @@ const fallbackOverview: OutboundOverview = {
   todayCalls: 326,
   connectedRate: 28,
   intentCount: 58,
+};
+
+const fallbackTelephonyConfig: TelephonyConfig = {
+  gatewayMode: "simulator",
+  queueEnabled: false,
+  queueName: "ai_acq:outbound_tasks",
+  redisUrlConfigured: true,
+  asteriskHost: "127.0.0.1",
+  asteriskAmiPort: 5038,
+  asteriskUsernameConfigured: false,
+  asteriskTrunkName: "uc100",
+  asteriskMaxChannels: 1,
+  asteriskLiveCallEnabled: false,
+  asteriskBulkCallEnabled: false,
+};
+
+const fallbackTelephonyHealth: TelephonyHealth = {
+  checkedAt: new Date().toISOString(),
+  gatewayMode: "simulator",
+  configured: false,
+  liveCallEnabled: false,
+  bulkCallEnabled: false,
+  amiReachable: false,
+  authenticated: false,
+  pingOk: false,
+  trunkConfigured: false,
+  trunkReachable: null,
+  trunkStatus: "待配置",
+  maxChannels: 1,
+  readyForTestCall: false,
+  errors: ["Asterisk AMI 账号或密码未配置"],
 };
 
 const fallbackRecords: CallRecord[] = [
@@ -642,6 +677,18 @@ const fallbackVoiceOverview: VoiceOverview = {
   cloneEngineMessage: "真实声音克隆服务未接入",
 };
 
+const fallbackVoiceProviderStatus: VoiceProviderStatus = {
+  provider: "dashscope",
+  configured: false,
+  ready: false,
+  status: "未启用",
+  message: "请配置 DashScope/CosyVoice 后生成复刻音色。",
+  engineName: "DashScope CosyVoice",
+  cloneModel: "cosyvoice-v2",
+  ttsModel: "cosyvoice-v2",
+  samplePublicBaseUrlConfigured: false,
+};
+
 const fallbackSystemVoices: SystemVoice[] = [
   {
     id: "system_standard_warm",
@@ -934,7 +981,7 @@ const dmTabs = ["私信总览", "任务列表", "账号管理", "轮换规则", 
 type DmTab = (typeof dmTabs)[number];
 const intentTabs = ["客户池", "跟进工单", "客户详情", "分配规则"] as const;
 type IntentTab = (typeof intentTabs)[number];
-const voiceTabs = ["声音档案", "授权审核", "音色训练", "使用记录"] as const;
+const voiceTabs = ["声音档案", "授权审核", "音色复刻", "使用记录"] as const;
 type VoiceTab = (typeof voiceTabs)[number];
 const reportsTabs = ["报表总览", "渠道分析", "销售绩效", "导出中心"] as const;
 type ReportsTab = (typeof reportsTabs)[number];
@@ -971,6 +1018,23 @@ function formatSettingOption(setting: SystemSetting, option: string) {
   return formatSettingValue({ ...setting, value: option }, option);
 }
 
+function telephonyReadinessLabel(health: TelephonyHealth) {
+  if (health.readyForTestCall && health.liveCallEnabled) return "可单号试拨";
+  if (health.readyForTestCall) return "线路已就绪";
+  if (health.amiReachable && health.authenticated) return "AMI 已连接";
+  return "待配置";
+}
+
+function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHealth) {
+  if (config.gatewayMode !== "asterisk") return "当前仍为模拟线路";
+  if (!health.configured) return "请先配置 AMI 账号和密码";
+  if (!health.amiReachable) return "后端还连不上 Asterisk AMI";
+  if (!health.pingOk) return "AMI Ping 未通过";
+  if (health.trunkReachable === false) return health.trunkStatus;
+  if (!health.liveCallEnabled) return "单号试拨开关未开启";
+  return health.trunkStatus || "UC100 线路待测试";
+}
+
 function formatDuration(seconds: number) {
   const minute = Math.floor(seconds / 60)
     .toString()
@@ -986,6 +1050,8 @@ function App() {
   const [leads, setLeads] = useState<Lead[]>(fallbackLeads);
   const [tasks, setTasks] = useState<OutreachTask[]>(fallbackTasks);
   const [overview, setOverview] = useState<OutboundOverview>(fallbackOverview);
+  const [telephonyConfig, setTelephonyConfig] = useState<TelephonyConfig>(fallbackTelephonyConfig);
+  const [telephonyHealth, setTelephonyHealth] = useState<TelephonyHealth>(fallbackTelephonyHealth);
   const [callRecords, setCallRecords] = useState<CallRecord[]>(fallbackRecords);
   const [liveCalls, setLiveCalls] = useState<CallRecord[]>(fallbackRecords);
   const [scripts, setScripts] = useState<CallScript[]>(fallbackScripts);
@@ -1058,6 +1124,13 @@ function App() {
     concurrency: 10,
     scheduledAt: "",
   });
+  const [telephonyTestForm, setTelephonyTestForm] = useState({
+    phone: "",
+    callerId: "",
+  });
+  const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
+  const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认 UC100/Asterisk 可用后再做单号试拨。");
+  const [isTestingTelephony, setIsTestingTelephony] = useState(false);
   const [dmForm, setDmForm] = useState({
     name: "美团高意向商家首轮私信",
     accountId: "",
@@ -1660,18 +1733,19 @@ function App() {
 
   async function openRealDmLogin(accountId: string) {
     setSelectedDmLoginAccountId(accountId);
+    if (!isDesktopClient) {
+      setDmLoginMessage("这里是网页预览，不能登录。请打开桌面客户端；登录入口会出现在同一个内置登录工作台区域。");
+      revealDmLoginWorkbench();
+      return;
+    }
     setIsPreparingDmLogin(true);
-    setDmLoginMessage(isDesktopClient ? "正在加载客户端内置登录页..." : "正在准备桌面客户端登录会话...");
+    setDmLoginMessage("正在加载客户端内置登录页...");
     revealDmLoginWorkbench();
     try {
       const session = await api.createDmLoginSession(accountId);
       setDmLoginSession(session);
-      setDmLoginEntryReady(isDesktopClient);
-      setDmLoginMessage(
-        isDesktopClient
-          ? "已在客户端内置登录区加载平台页面，请在当前区域完成登录后点击“登录后检测”。"
-          : "当前是网页预览，无法内嵌第三方平台登录页；请运行桌面客户端后在这里完成登录。",
-      );
+      setDmLoginEntryReady(true);
+      setDmLoginMessage("已在客户端内置登录区加载平台页面，请在当前区域完成登录后点击“登录后检测”。");
       setDmAccounts((current) =>
         current.map((account) =>
           account.id === accountId
@@ -3975,16 +4049,22 @@ function App() {
                             <div className={`login-mode-alert ${isDesktopClient ? "is-desktop" : "is-preview"}`}>
                               {isDesktopClient
                                 ? "会在当前区域加载平台页面，不会跳到外部浏览器。"
-                                : "普通浏览器无法承载平台真实登录 WebView，请运行桌面客户端。"}
+                                : "你现在看的不是桌面客户端，所以这里不能登录；请打开桌面客户端窗口。"}
                             </div>
+                            {!isDesktopClient && (
+                              <div className="desktop-login-command">
+                                <small>本地启动命令</small>
+                                <code>cd frontend &amp;&amp; npm run desktop</code>
+                              </div>
+                            )}
                             <button
                               className="primary-button real-login-button"
-                              disabled={!activeLoginAccount || isPreparingDmLogin}
+                              disabled={!activeLoginAccount || isPreparingDmLogin || !isDesktopClient}
                               onClick={() => activeLoginAccount && openRealDmLogin(activeLoginAccount.id)}
                               type="button"
                             >
                               <KeyRound size={16} />
-                              {isPreparingDmLogin ? "加载中" : isDesktopClient ? "在内置页登录" : "准备桌面登录会话"}
+                              {isPreparingDmLogin ? "加载中" : isDesktopClient ? "在内置页登录" : "网页预览不能登录"}
                             </button>
                           </div>
                         )}

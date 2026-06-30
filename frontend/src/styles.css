@@ -1638,6 +1638,31 @@ button:disabled {
   color: #9a6400;
 }
 
+.desktop-login-command {
+  width: min(560px, 100%);
+  border: 1px solid #d7e5f7;
+  border-radius: 14px;
+  background: #f8fbff;
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.desktop-login-command small {
+  color: #74849a;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.desktop-login-command code {
+  color: #17233a;
+  font-size: 13px;
+  font-weight: 900;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .real-login-note {
   border-top: 1px solid #dfeaf7;
   background: #f8fbff;
