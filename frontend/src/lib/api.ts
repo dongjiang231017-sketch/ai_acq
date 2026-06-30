@@ -1,5 +1,12 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8017/api";
 
+export function apiAssetUrl(path: string) {
+  if (!path) return "";
+  if (/^https?:\/\//.test(path)) return path;
+  const base = API_BASE_URL.replace(/\/api\/?$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 export type ModuleSummary = {
   key: string;
   name: string;
@@ -403,6 +410,18 @@ export type SystemVoice = {
   sampleText: string;
 };
 
+export type VoiceProviderStatus = {
+  provider: string;
+  configured: boolean;
+  ready: boolean;
+  status: string;
+  message: string;
+  engineName: string;
+  cloneModel: string;
+  ttsModel: string;
+  samplePublicBaseUrlConfigured: boolean;
+};
+
 export type VoiceProfile = {
   id: string;
   name: string;
@@ -450,6 +469,8 @@ export type VoiceCloneRecord = {
   trainingJobId?: string | null;
   clonedVoiceName: string;
   engine: string;
+  externalVoiceId: string;
+  previewAudioUrl: string;
   status: string;
   sampleCount: number;
   sampleMinutes: number;
@@ -759,6 +780,7 @@ export const api = {
   knowledgeBase: () => request<KnowledgeBaseItem[]>("/learning/knowledge"),
   learningExperiments: () => request<LearningExperiment[]>("/learning/experiments"),
   voiceOverview: () => request<VoiceOverview>("/voice/overview"),
+  voiceProviderStatus: (probe = false) => request<VoiceProviderStatus>(`/voice/provider/status${probe ? "?probe=true" : ""}`),
   systemVoices: () => request<SystemVoice[]>("/voice/system-voices"),
   voiceProfiles: () => request<VoiceProfile[]>("/voice/profiles"),
   createVoiceProfile: (profile: Omit<VoiceProfile, "id" | "createdAt" | "updatedAt">) =>

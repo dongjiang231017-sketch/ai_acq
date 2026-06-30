@@ -35,6 +35,20 @@ class SystemVoiceRead(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VoiceProviderStatusRead(BaseModel):
+    provider: str
+    configured: bool
+    ready: bool
+    status: str
+    message: str
+    engine_name: Annotated[str, Field(alias="engineName")]
+    clone_model: Annotated[str, Field(alias="cloneModel")]
+    tts_model: Annotated[str, Field(alias="ttsModel")]
+    sample_public_base_url_configured: Annotated[bool, Field(alias="samplePublicBaseUrlConfigured")]
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
 class VoiceProfileCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     owner_name: Annotated[str, Field(alias="ownerName")] = "待授权人"
@@ -109,6 +123,8 @@ class VoiceCloneRecordRead(BaseModel):
     training_job_id: Annotated[str | None, Field(alias="trainingJobId")]
     cloned_voice_name: Annotated[str, Field(alias="clonedVoiceName")]
     engine: str
+    external_voice_id: Annotated[str, Field(alias="externalVoiceId")] = ""
+    preview_audio_url: Annotated[str, Field(alias="previewAudioUrl")] = ""
     status: str
     sample_count: Annotated[int, Field(alias="sampleCount")]
     sample_minutes: Annotated[int, Field(alias="sampleMinutes")]

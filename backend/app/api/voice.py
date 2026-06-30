@@ -2,7 +2,8 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
@@ -15,11 +16,17 @@ from app.schemas.voice import (
     VoiceProfileCreate,
     VoiceProfileRead,
     VoiceProfileUpdate,
+    VoiceProviderStatusRead,
     VoiceSampleRead,
     SystemVoiceRead,
     VoiceTrainingJobCreate,
     VoiceTrainingJobRead,
     VoiceUsageRecordRead,
+)
+from app.services.dashscope_voice import (
+    VoiceProviderError,
+    create_dashscope_voice_clone,
+    dashscope_provider_status,
 )
 
 router = APIRouter()
@@ -114,24 +121,32 @@ def _voice_clone_engine_name() -> str:
 
 
 def _voice_clone_training_ready() -> bool:
-    return bool(settings.voice_clone_training_enabled and settings.voice_clone_engine_name.strip())
+    return dashscope_provider_status(probe=False).ready
 
 
 def _voice_clone_status() -> dict[str, str | bool]:
-    if _voice_clone_training_ready():
-        engine_name = _voice_clone_engine_name()
+    provider_status = dashscope_provider_status(probe=False)
+    if provider_status.ready:
         return {
             "cloneTrainingEnabled": True,
-            "cloneEngineName": engine_name,
-            "cloneEngineStatus": "已接入",
-            "cloneEngineMessage": f"已接入 {engine_name}，训练会提交到真实声音克隆服务。",
+            "cloneEngineName": provider_status.engine_name,
+            "cloneEngineStatus": provider_status.status,
+            "cloneEngineMessage": provider_status.message,
         }
     return {
         "cloneTrainingEnabled": False,
-        "cloneEngineName": "",
-        "cloneEngineStatus": "未接入",
-        "cloneEngineMessage": "真实声音克隆服务未接入；当前只能上传授权样本和审核档案，不能创建真实训练。",
+        "cloneEngineName": provider_status.engine_name,
+        "cloneEngineStatus": provider_status.status,
+        "cloneEngineMessage": provider_status.message,
     }
+
+
+def _latest_usable_sample(db: Session, profile_id: str) -> VoiceSample | None:
+    return db.scalar(
+        select(VoiceSample)
+        .where(VoiceSample.profile_id == profile_id, VoiceSample.quality_status == "可用")
+        .order_by(VoiceSample.created_at.desc())
+    )
 
 
 def _seed_voice_assets(db: Session) -> None:
@@ -148,7 +163,7 @@ def _seed_voice_assets(db: Session) -> None:
         sample_count=0,
         fallback_voice=DEFAULT_SYSTEM_VOICE["name"],
         consent_material="等待上传授权材料和声音样本元数据。",
-        risk_note="未授权前不可训练、不可被任务选择。",
+        risk_note="未授权前不可复刻、不可被任务选择。",
     )
     db.add(pending)
     db.flush()
@@ -209,6 +224,11 @@ def list_system_voices() -> list[dict[str, str | bool]]:
     return SYSTEM_VOICES
 
 
+@router.get("/provider/status", response_model=VoiceProviderStatusRead)
+def voice_provider_status(probe: bool = Query(False)) -> object:
+    return dashscope_provider_status(probe=probe)
+
+
 @router.get("/profiles", response_model=list[VoiceProfileRead])
 def list_voice_profiles(db: Session = Depends(get_db)) -> list[VoiceProfile]:
     _seed_voice_assets(db)
@@ -262,6 +282,18 @@ def list_profile_voice_samples(profile_id: str, db: Session = Depends(get_db)) -
     )
 
 
+@router.get("/samples/{sample_id}/file")
+def read_voice_sample_file(sample_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    sample = db.get(VoiceSample, sample_id)
+    if not sample:
+        raise HTTPException(status_code=404, detail="录音样本不存在")
+    _ensure_clone_profile(db, sample.profile_id)
+    path = Path(sample.storage_path)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="录音文件不存在")
+    return FileResponse(path, media_type=sample.content_type or "audio/*", filename=sample.file_name)
+
+
 @router.post("/profiles/{profile_id}/samples", response_model=VoiceSampleRead)
 def upload_voice_sample(
     profile_id: str,
@@ -303,8 +335,8 @@ def upload_voice_sample(
     db.flush()
 
     profile.sample_count = _usable_sample_count(db, profile.id)
-    if profile.authorization_status == "授权通过" and profile.status not in {"训练中", "可用"}:
-        profile.status = "可训练"
+    if profile.authorization_status == "授权通过" and profile.status not in {"复刻中", "可用"}:
+        profile.status = "可复刻"
     elif profile.authorization_status != "授权通过":
         profile.status = "待授权"
     profile.consent_material = profile.consent_material or "已上传授权录音样本，等待补充授权说明。"
@@ -337,9 +369,12 @@ def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Se
         raise HTTPException(status_code=400, detail="声音档案未授权，不能进入训练")
     usable_samples = _usable_sample_count(db, profile.id)
     if usable_samples <= 0:
-        raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再创建克隆训练")
+        raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再生成复刻音色")
     if not _voice_clone_training_ready():
-        raise HTTPException(status_code=400, detail="真实声音克隆服务未接入，不能创建训练。请先在后台配置授权的声音克隆服务后再提交。")
+        raise HTTPException(status_code=400, detail="真实声音克隆服务未接入，不能生成复刻音色。请先配置 DashScope/CosyVoice 后再提交。")
+    sample = _latest_usable_sample(db, profile.id)
+    if not sample:
+        raise HTTPException(status_code=400, detail="请先上传至少 1 条可用录音样本，再创建复刻音色")
     sample_seconds = (
         db.scalar(
             select(func.coalesce(func.sum(VoiceSample.duration_seconds), 0)).where(
@@ -351,30 +386,59 @@ def create_training_job(profile_id: str, payload: VoiceTrainingJobCreate, db: Se
     sample_minutes = max(payload.sample_minutes, max(1, int(sample_seconds // 60) if sample_seconds else usable_samples))
     job = VoiceTrainingJob(
         profile_id=profile.id,
-        status="已提交",
-        progress=0,
+        status="生成中",
+        progress=10,
         engine=_voice_clone_engine_name(),
         sample_minutes=sample_minutes,
-        message=payload.message or "已提交到真实声音克隆服务，等待服务商返回训练进度。",
+        message=payload.message or "正在提交 DashScope/CosyVoice 生成复刻音色。",
         started_at=datetime.utcnow(),
         finished_at=None,
     )
     db.add(job)
     db.flush()
-    db.add(
-        VoiceCloneRecord(
-            profile_id=profile.id,
-            training_job_id=job.id,
-            cloned_voice_name=profile.name,
-            engine=job.engine,
-            status=job.status,
-            sample_count=usable_samples,
-            sample_minutes=job.sample_minutes,
-            result=job.message,
-        )
+    clone_record = VoiceCloneRecord(
+        profile_id=profile.id,
+        training_job_id=job.id,
+        cloned_voice_name=profile.name,
+        engine=job.engine,
+        status=job.status,
+        sample_count=usable_samples,
+        sample_minutes=job.sample_minutes,
+        result=job.message,
     )
-    profile.status = "训练中"
+    db.add(clone_record)
+    db.flush()
+    profile.status = "复刻中"
     profile.sample_count = usable_samples
+    profile.updated_at = datetime.utcnow()
+
+    try:
+        clone_result = create_dashscope_voice_clone(profile, sample, clone_record.id)
+    except VoiceProviderError as exc:
+        job.status = "失败"
+        job.progress = 100
+        job.message = str(exc)
+        job.finished_at = datetime.utcnow()
+        clone_record.status = "失败"
+        clone_record.result = str(exc)
+        clone_record.completed_at = datetime.utcnow()
+        profile.status = "复刻失败"
+        profile.risk_note = str(exc)
+        profile.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    job.status = "已完成"
+    job.progress = 100
+    job.message = clone_result.message
+    job.finished_at = datetime.utcnow()
+    clone_record.status = "可用"
+    clone_record.external_voice_id = clone_result.external_voice_id
+    clone_record.preview_audio_path = clone_result.preview_audio_path
+    clone_record.result = clone_result.message
+    clone_record.completed_at = datetime.utcnow()
+    profile.status = "可用"
+    profile.risk_note = f"DashScope/CosyVoice 音色已生成，可用于试听和后续外呼音频合成。voice_id={clone_result.external_voice_id}"
     profile.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(job)
@@ -388,10 +452,24 @@ def list_voice_clone_records(db: Session = Depends(get_db)) -> list[VoiceCloneRe
         db.scalars(
             select(VoiceCloneRecord)
             .join(VoiceProfile, VoiceCloneRecord.profile_id == VoiceProfile.id)
-            .where(_clone_profile_filter())
+            .where(_clone_profile_filter(), VoiceCloneRecord.engine != MOCK_VOICE_ENGINE)
             .order_by(VoiceCloneRecord.created_at.desc())
         ).all()
     )
+
+
+@router.get("/clone-records/{record_id}/preview")
+def read_voice_clone_preview(record_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    record = db.get(VoiceCloneRecord, record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="克隆记录不存在")
+    _ensure_clone_profile(db, record.profile_id)
+    if not record.preview_audio_path:
+        raise HTTPException(status_code=404, detail="暂无试听音频")
+    path = Path(record.preview_audio_path)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="试听音频文件不存在")
+    return FileResponse(path, media_type="audio/wav", filename=f"{record.cloned_voice_name}.wav")
 
 
 @router.get("/usage-records", response_model=list[VoiceUsageRecordRead])

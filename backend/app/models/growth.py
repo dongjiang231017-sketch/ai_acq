@@ -201,6 +201,8 @@ class VoiceCloneRecord(Base):
     training_job_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("voice_training_jobs.id"), nullable=True, index=True)
     cloned_voice_name: Mapped[str] = mapped_column(String(120), default="")
     engine: Mapped[str] = mapped_column(String(80), default="真实声音克隆服务")
+    external_voice_id: Mapped[str] = mapped_column(String(160), default="")
+    preview_audio_path: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(40), default="排队中", index=True)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
     sample_minutes: Mapped[int] = mapped_column(Integer, default=0)
@@ -210,6 +212,10 @@ class VoiceCloneRecord(Base):
 
     def __repr__(self) -> str:
         return f"{self.cloned_voice_name} {self.status}"
+
+    @property
+    def preview_audio_url(self) -> str:
+        return f"/api/voice/clone-records/{self.id}/preview" if self.preview_audio_path else ""
 
 
 class VoiceUsageRecord(Base):

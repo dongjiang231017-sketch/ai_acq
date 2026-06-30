@@ -10,7 +10,7 @@ MODULES = [
     {"key": "dm", "name": "平台私信系统", "description": "平台个人号、私信任务、模板和会话。", "pageCount": 6, "status": "ready"},
     {"key": "intent", "name": "意向客户池", "description": "客户分级、工单跟进和分配规则。", "pageCount": 4, "status": "ready"},
     {"key": "learning", "name": "AI学习中心", "description": "建议队列、知识库和实验结果。", "pageCount": 5, "status": "ready"},
-    {"key": "voice", "name": "声音档案", "description": "授权、音色训练和使用记录。", "pageCount": 4, "status": "ready"},
+    {"key": "voice", "name": "声音档案", "description": "授权、音色复刻和使用记录。", "pageCount": 4, "status": "ready"},
     {"key": "reports", "name": "数据报表", "description": "渠道、绩效和导出中心。", "pageCount": 4, "status": "ready"},
     {"key": "settings", "name": "系统设置", "description": "线路、账号和合规保护。", "pageCount": 4, "status": "ready"},
 ]

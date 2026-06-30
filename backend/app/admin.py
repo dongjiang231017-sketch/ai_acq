@@ -595,8 +595,8 @@ class VoiceProfileAdmin(ModelView, model=VoiceProfile):
 
 
 class VoiceTrainingJobAdmin(ModelView, model=VoiceTrainingJob):
-    name = "音色训练"
-    name_plural = "音色训练任务"
+    name = "音色复刻"
+    name_plural = "音色复刻任务"
     icon = "fa-solid fa-wave-square"
 
     column_list = [
@@ -661,6 +661,7 @@ class VoiceCloneRecordAdmin(ModelView, model=VoiceCloneRecord):
         VoiceCloneRecord.cloned_voice_name,
         VoiceCloneRecord.status,
         VoiceCloneRecord.engine,
+        VoiceCloneRecord.external_voice_id,
         VoiceCloneRecord.sample_count,
         VoiceCloneRecord.sample_minutes,
         VoiceCloneRecord.created_at,
@@ -672,6 +673,8 @@ class VoiceCloneRecordAdmin(ModelView, model=VoiceCloneRecord):
         VoiceCloneRecord.training_job_id: "训练任务ID",
         VoiceCloneRecord.cloned_voice_name: "克隆音色",
         VoiceCloneRecord.engine: "克隆引擎",
+        VoiceCloneRecord.external_voice_id: "外部音色ID",
+        VoiceCloneRecord.preview_audio_path: "试听音频路径",
         VoiceCloneRecord.status: "状态",
         VoiceCloneRecord.sample_count: "样本数",
         VoiceCloneRecord.sample_minutes: "样本分钟",

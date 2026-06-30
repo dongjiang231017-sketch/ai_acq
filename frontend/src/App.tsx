@@ -63,6 +63,7 @@ import {
   SettingsOverview,
   SystemSetting,
   api,
+  apiAssetUrl,
 } from "./lib/api";
 
 const icons = [BarChart3, Search, Database, PhoneCall, MessageSquareText, Users, Headphones, ClipboardList, Settings];
@@ -76,7 +77,7 @@ const fallbackModules: ModuleSummary[] = [
   { key: "outbound", name: "AI外呼系统", description: "外呼任务、话术流程、通话记录。", pageCount: 6, status: "ready" },
   { key: "dm", name: "平台私信系统", description: "平台个人号、私信任务、模板和会话。", pageCount: 7, status: "ready" },
   { key: "intent", name: "意向客户池", description: "客户分级、工单跟进和分配规则。", pageCount: 4, status: "ready" },
-  { key: "voice", name: "声音档案", description: "授权、音色训练和使用记录。", pageCount: 4, status: "ready" },
+  { key: "voice", name: "声音档案", description: "授权、音色复刻和使用记录。", pageCount: 4, status: "ready" },
   { key: "reports", name: "数据报表", description: "渠道、绩效和导出中心。", pageCount: 4, status: "ready" },
   { key: "settings", name: "系统设置", description: "线路、账号和合规保护。", pageCount: 4, status: "ready" },
 ];
@@ -736,7 +737,7 @@ const fallbackVoiceProfiles: VoiceProfile[] = [
     sampleCount: 0,
     fallbackVoice: "标准AI音色",
     consentMaterial: "等待上传授权材料和样本元数据。",
-    riskNote: "未授权前不可训练、不可被任务选择。",
+    riskNote: "未授权前不可复刻、不可被任务选择。",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
@@ -1068,6 +1069,7 @@ function App() {
   const [intentEvents, setIntentEvents] = useState<IntentEvent[]>(fallbackIntentEvents);
   const [followUpWorkOrders, setFollowUpWorkOrders] = useState<FollowUpWorkOrder[]>(fallbackWorkOrders);
   const [voiceOverview, setVoiceOverview] = useState<VoiceOverview>(fallbackVoiceOverview);
+  const [voiceProviderStatus, setVoiceProviderStatus] = useState<VoiceProviderStatus>(fallbackVoiceProviderStatus);
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>(fallbackSystemVoices);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>(fallbackVoiceProfiles);
   const [voiceTrainingJobs, setVoiceTrainingJobs] = useState<VoiceTrainingJob[]>(fallbackVoiceTrainingJobs);
@@ -1172,7 +1174,7 @@ function App() {
     sampleCount: 0,
     fallbackVoice: "标准AI音色",
     consentMaterial: "",
-    riskNote: "未授权前不可训练、不可被任务选择。",
+    riskNote: "未授权前不可复刻、不可被任务选择。",
   });
   const [voiceSampleFile, setVoiceSampleFile] = useState<File | null>(null);
   const [voiceSampleMessage, setVoiceSampleMessage] = useState("");
@@ -1382,6 +1384,7 @@ function App() {
       api.intentEvents(),
       api.followUpWorkOrders(),
       api.voiceOverview(),
+      api.voiceProviderStatus(),
       api.systemVoices(),
       api.voiceProfiles(),
       api.voiceTrainingJobs(),
@@ -1453,8 +1456,9 @@ function App() {
     if (results[17].status === "fulfilled") setIntentEvents(results[17].value);
     if (results[18].status === "fulfilled") setFollowUpWorkOrders(results[18].value);
     if (results[19].status === "fulfilled") setVoiceOverview(results[19].value);
-    if (results[20].status === "fulfilled") {
-      const nextSystemVoices = results[20].value;
+    if (results[20].status === "fulfilled") setVoiceProviderStatus(results[20].value);
+    if (results[21].status === "fulfilled") {
+      const nextSystemVoices = results[21].value;
       setSystemVoices(nextSystemVoices);
       setSelectedSystemVoiceId((current) =>
         nextSystemVoices.some((voice) => voice.id === current)
@@ -1464,41 +1468,41 @@ function App() {
       const defaultVoiceName = nextSystemVoices.find((voice) => voice.isDefault)?.name ?? nextSystemVoices[0]?.name ?? "标准AI音色";
       setVoiceProfileForm((current) => ({ ...current, fallbackVoice: current.fallbackVoice || defaultVoiceName }));
     }
-    if (results[21].status === "fulfilled") {
-      const nextProfiles = results[21].value;
+    if (results[22].status === "fulfilled") {
+      const nextProfiles = results[22].value;
       const nextCustomerProfiles = nextProfiles.filter((profile) => profile.authorizationStatus !== "系统内置" && profile.ownerName !== "系统");
       setVoiceProfiles(nextProfiles);
       setSelectedVoiceProfileId((current) =>
         nextCustomerProfiles.some((profile) => profile.id === current) ? current : nextCustomerProfiles[0]?.id ?? "",
       );
     }
-    if (results[22].status === "fulfilled") setVoiceTrainingJobs(results[22].value);
-    if (results[23].status === "fulfilled") setVoiceSamples(results[23].value);
-    if (results[24].status === "fulfilled") setVoiceCloneRecords(results[24].value);
-    if (results[25].status === "fulfilled") setVoiceUsageRecords(results[25].value);
-    if (results[26].status === "fulfilled") setReportOverview(results[26].value);
-    if (results[27].status === "fulfilled") {
-      const nextChannels = results[27].value;
+    if (results[23].status === "fulfilled") setVoiceTrainingJobs(results[23].value);
+    if (results[24].status === "fulfilled") setVoiceSamples(results[24].value);
+    if (results[25].status === "fulfilled") setVoiceCloneRecords(results[25].value);
+    if (results[26].status === "fulfilled") setVoiceUsageRecords(results[26].value);
+    if (results[27].status === "fulfilled") setReportOverview(results[27].value);
+    if (results[28].status === "fulfilled") {
+      const nextChannels = results[28].value;
       setChannelReports(nextChannels);
       setSelectedChannelReportId((current) =>
         nextChannels.some((channel) => channel.id === current) ? current : nextChannels[0]?.id ?? "",
       );
     }
-    if (results[28].status === "fulfilled") {
-      const nextSalesReports = results[28].value;
+    if (results[29].status === "fulfilled") {
+      const nextSalesReports = results[29].value;
       setSalesReports(nextSalesReports);
       setSelectedSalesReportId((current) =>
         nextSalesReports.some((report) => report.id === current) ? current : nextSalesReports[0]?.id ?? "",
       );
     }
-    if (results[29].status === "fulfilled") {
-      const nextExports = results[29].value;
+    if (results[30].status === "fulfilled") {
+      const nextExports = results[30].value;
       setReportExports(nextExports);
       setSelectedReportExportId((current) => (nextExports.some((job) => job.id === current) ? current : nextExports[0]?.id ?? ""));
     }
-    if (results[30].status === "fulfilled") setSettingsOverview(results[30].value);
-    if (results[31].status === "fulfilled") {
-      const nextSettings = results[31].value;
+    if (results[31].status === "fulfilled") setSettingsOverview(results[31].value);
+    if (results[32].status === "fulfilled") {
+      const nextSettings = results[32].value;
       setSystemSettings(nextSettings);
       setSelectedSystemSettingId((current) => {
         const nextId = nextSettings.some((setting) => setting.id === current) ? current : nextSettings[0]?.id ?? "";
@@ -1507,8 +1511,8 @@ function App() {
         return nextId;
       });
     }
-    if (results[32].status === "fulfilled") setTelephonyConfig(results[32].value);
-    if (results[33].status === "fulfilled") setTelephonyHealth(results[33].value);
+    if (results[33].status === "fulfilled") setTelephonyConfig(results[33].value);
+    if (results[34].status === "fulfilled") setTelephonyHealth(results[34].value);
     setIsLoading(false);
   }
 
@@ -1958,7 +1962,7 @@ function App() {
         sampleCount: 0,
         fallbackVoice: activeSystemVoice?.name ?? defaultSystemVoice?.name ?? "标准AI音色",
         consentMaterial: "",
-        riskNote: "未授权前不可训练、不可被任务选择。",
+        riskNote: "未授权前不可复刻、不可被任务选择。",
       });
     } catch (error) {
       setVoiceSampleMessage(error instanceof Error ? error.message : "新增克隆档案失败");
@@ -1970,8 +1974,8 @@ function App() {
   async function updateVoiceAuthorization(profile: VoiceProfile, authorizationStatus: string) {
     const updated = await api.updateVoiceProfile(profile.id, {
       authorizationStatus,
-      status: authorizationStatus === "授权通过" ? "可训练" : "已停用",
-      riskNote: authorizationStatus === "授权通过" ? "授权已通过，可进入训练队列。" : "授权已撤回，任务只能使用回退音色。",
+      status: authorizationStatus === "授权通过" ? "可复刻" : "已停用",
+      riskNote: authorizationStatus === "授权通过" ? "授权已通过，可生成复刻音色。" : "授权已撤回，任务只能使用回退音色。",
     });
     setVoiceProfiles((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     const overviewData = await api.voiceOverview();
@@ -1998,7 +2002,7 @@ function App() {
       setVoiceProfiles(profileData);
       setVoiceSamples(sampleData);
       setVoiceSampleFile(null);
-      setVoiceSampleMessage("录音样本已上传，可继续授权审核或创建训练。");
+      setVoiceSampleMessage("录音样本已上传，可继续授权审核或生成复刻音色。");
     } catch (error) {
       setVoiceSampleMessage(error instanceof Error ? error.message : "上传录音样本失败");
     } finally {
@@ -2017,7 +2021,7 @@ function App() {
       const job = await api.createVoiceTrainingJob(profile.id, {
         engine: voiceOverview.cloneEngineName || "真实声音克隆服务",
         sampleMinutes: Math.max(usableSamples, 1),
-        message: "提交真实声音克隆训练。",
+        message: "提交 DashScope/CosyVoice 音色复刻生成。",
       });
       setVoiceTrainingJobs((current) => [job, ...current]);
       const [overviewData, profileData, cloneRecordData] = await Promise.all([
@@ -2028,9 +2032,9 @@ function App() {
       setVoiceOverview(overviewData);
       setVoiceProfiles(profileData);
       setVoiceCloneRecords(cloneRecordData);
-      setVoiceSampleMessage("已提交真实声音克隆训练，并写入克隆语音记录。");
+      setVoiceSampleMessage("已生成复刻音色，并写入克隆语音记录。");
     } catch (error) {
-      setVoiceSampleMessage(error instanceof Error ? error.message : "创建训练失败");
+      setVoiceSampleMessage(error instanceof Error ? error.message : "生成复刻音色失败");
     }
   }
 
@@ -2884,7 +2888,7 @@ function App() {
   function renderVoiceWorkspace() {
     const showProfiles = activeVoiceTab === "声音档案";
     const showAuth = activeVoiceTab === "授权审核";
-    const showTraining = activeVoiceTab === "音色训练";
+    const showTraining = activeVoiceTab === "音色复刻";
     const showUsage = activeVoiceTab === "使用记录";
 
     return (
@@ -2900,7 +2904,7 @@ function App() {
         <section className="metrics outbound-metrics">
           <MetricCard icon={<Headphones size={20} />} label="克隆档案" value={voiceOverview.profiles} detail="客户/员工授权" tone="blue" />
           <MetricCard icon={<Radio size={20} />} label="系统音色" value={systemVoices.length || voiceOverview.systemVoices} detail={activeSystemVoice?.name ?? voiceOverview.defaultVoice} tone="green" />
-          <MetricCard icon={<ShieldAlert size={20} />} label="克隆服务" value={voiceOverview.cloneEngineStatus} detail={voiceOverview.cloneEngineName || "未配置真实引擎"} tone="amber" />
+          <MetricCard icon={<ShieldAlert size={20} />} label="克隆服务" value={voiceProviderStatus.status || voiceOverview.cloneEngineStatus} detail={voiceProviderStatus.engineName || voiceOverview.cloneEngineName || "未配置真实引擎"} tone="amber" />
           <MetricCard icon={<Activity size={20} />} label="使用记录" value={voiceOverview.usageRecords} detail="审计留痕" tone="rose" />
         </section>
 
@@ -2991,7 +2995,7 @@ function App() {
                     onChange={(event) => setVoiceSampleFile(event.target.files?.[0] ?? null)}
                     type="file"
                   />
-                  <small>{voiceSampleFile ? `${voiceSampleFile.name} · ${formatBytes(voiceSampleFile.size)}` : "请上传客户/员工本人授权录音，作为克隆训练样本。"}</small>
+                  <small>{voiceSampleFile ? `${voiceSampleFile.name} · ${formatBytes(voiceSampleFile.size)}` : "请上传客户/员工本人授权录音，作为音色复刻样本。"}</small>
                 </label>
                 <label className="wide">
                   授权材料 / 说明
@@ -3132,13 +3136,16 @@ function App() {
               <div className="panel-title">
                 <div>
                   <p>Training</p>
-                  <h2>训练入口</h2>
+                  <h2>复刻生成入口</h2>
                 </div>
                 <Activity size={22} />
               </div>
               <div className="account-list">
-                {!voiceOverview.cloneTrainingEnabled && <div className="form-result">{voiceOverview.cloneEngineMessage}</div>}
-                {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无可训练的授权克隆档案。</div>}
+                <div className="form-result">
+                  {voiceProviderStatus.engineName} · {voiceProviderStatus.message}
+                  {!voiceProviderStatus.samplePublicBaseUrlConfigured && " 请配置公网样本地址后再提交。"}
+                </div>
+                {customerVoiceProfiles.length === 0 && <div className="empty-state">暂无可复刻的授权克隆档案。</div>}
                 {customerVoiceProfiles.map((profile) => {
                   const blockReason = voiceTrainingBlockReason(profile);
                   const usableSamples = usableVoiceSampleCount(profile.id);
@@ -3152,7 +3159,7 @@ function App() {
                         <div>
                           <strong>{profile.name}</strong>
                           <small>{profile.authorizationStatus} · {profile.status} · {usableSamples} 条可用录音样本</small>
-                          <small>{blockReason || "授权、录音样本和真实克隆服务均已满足，可提交训练。"}</small>
+                          <small>{blockReason || "授权、录音样本和 DashScope/CosyVoice 均已满足，可生成复刻音色。"}</small>
                         </div>
                         <button
                           className="row-action is-primary"
@@ -3163,7 +3170,7 @@ function App() {
                           }}
                           type="button"
                         >
-                          创建训练
+                          生成复刻
                         </button>
                       </div>
                     </article>
@@ -3177,14 +3184,14 @@ function App() {
               <div className="panel-title">
                 <div>
                   <p>Jobs</p>
-                  <h2>训练任务</h2>
+                  <h2>复刻任务</h2>
                 </div>
                 <Clock3 size={22} />
               </div>
               <div className="task-list">
                 {customerVoiceTrainingJobs.length === 0 && (
                   <div className="empty-state">
-                    {voiceOverview.cloneTrainingEnabled ? "暂无克隆训练任务。" : "真实克隆服务未接入，暂不会产生训练任务。"}
+                    {voiceOverview.cloneTrainingEnabled ? "暂无复刻生成任务。" : "真实克隆服务未接入，暂不会产生复刻任务。"}
                   </div>
                 )}
                 {customerVoiceTrainingJobs.map((job) => (
@@ -3217,9 +3224,11 @@ function App() {
                   <thead>
                     <tr>
                       <th>克隆音色</th>
+                      <th>外部音色ID</th>
                       <th>样本</th>
                       <th>引擎</th>
                       <th>状态</th>
+                      <th>试听</th>
                       <th>结果</th>
                       <th>时间</th>
                     </tr>
@@ -3228,16 +3237,24 @@ function App() {
                     {customerVoiceCloneRecords.map((record) => (
                       <tr key={record.id}>
                         <td>{record.clonedVoiceName}</td>
+                        <td>{record.externalVoiceId || "未生成"}</td>
                         <td>{record.sampleCount} 条 / {record.sampleMinutes} 分钟</td>
                         <td>{record.engine}</td>
                         <td>{record.status}</td>
+                        <td>
+                          {record.previewAudioUrl ? (
+                            <audio controls preload="none" src={apiAssetUrl(record.previewAudioUrl)} />
+                          ) : (
+                            "暂无"
+                          )}
+                        </td>
                         <td>{record.result}</td>
                         <td>{new Date(record.createdAt).toLocaleString()}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                {customerVoiceCloneRecords.length === 0 && <div className="empty-state">暂无克隆语音记录，上传样本并创建训练后会自动写入。</div>}
+                {customerVoiceCloneRecords.length === 0 && <div className="empty-state">暂无克隆语音记录，上传样本并生成复刻音色后会自动写入。</div>}
               </div>
             </article>
 

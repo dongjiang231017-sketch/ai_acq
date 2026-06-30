@@ -21,6 +21,8 @@ backend/.venv/
 backend/local.db
 .voice_samples/
 backend/.voice_samples/
+.voice_outputs/
+backend/.voice_outputs/
 .dm_browser_profiles/
 backend/.dm_browser_profiles/
 
