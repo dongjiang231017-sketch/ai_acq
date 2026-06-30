@@ -1406,6 +1406,20 @@ function App() {
     () => voiceCloneRecords.filter((record) => customerVoiceProfileIds.has(record.profileId)),
     [customerVoiceProfileIds, voiceCloneRecords],
   );
+  const availableCloneVoiceRecords = useMemo(
+    () => customerVoiceCloneRecords.filter((record) => record.status === "可用" && record.externalVoiceId),
+    [customerVoiceCloneRecords],
+  );
+  const filteredCloneVoiceRecords = useMemo(() => {
+    const keyword = systemVoiceSearch.trim().toLowerCase();
+    if (!keyword) return availableCloneVoiceRecords;
+    return availableCloneVoiceRecords.filter((record) =>
+      [record.clonedVoiceName, record.externalVoiceId, record.engine, record.status, record.result]
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword),
+    );
+  }, [availableCloneVoiceRecords, systemVoiceSearch]);
   const activeVoiceProfile = customerVoiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? customerVoiceProfiles[0];
   const activeVoiceProfileSamples = activeVoiceProfile
     ? customerVoiceSamples.filter((sample) => sample.profileId === activeVoiceProfile.id)
@@ -2054,6 +2068,17 @@ function App() {
         },
       }));
     }
+  }
+
+  function previewCloneVoice(record: VoiceCloneRecord) {
+    if (!record.previewAudioUrl) {
+      setVoiceSampleMessage("这个复刻音色还没有试听音频。");
+      return;
+    }
+    const audio = new Audio(apiAssetUrl(record.previewAudioUrl));
+    void audio.play().catch(() => {
+      setVoiceSampleMessage("试听播放失败，请刷新后重试。");
+    });
   }
 
   function voiceLabelForUsage(profileId?: string | null) {
@@ -3155,8 +3180,8 @@ function App() {
             <article className="panel span-2 voice-library-panel">
               <div className="panel-title voice-library-header">
                 <div>
-                  <p>Qwen-TTS Voice Library</p>
-                  <h2>系统音色库</h2>
+                  <p>Voice Library</p>
+                  <h2>声音库</h2>
                 </div>
                 <div className="button-row">
                   <button className="row-action" onClick={() => setIsSystemVoiceLibraryOpen(false)} type="button">
@@ -3172,15 +3197,76 @@ function App() {
                   <Search size={18} />
                   <input
                     onChange={(event) => setSystemVoiceSearch(event.target.value)}
-                    placeholder="搜索音色、voice 参数、风格或场景"
+                    placeholder="搜索复刻音色、系统音色、voice 参数或场景"
                     value={systemVoiceSearch}
                   />
                 </label>
                 <div className="voice-library-stats">
-                  <strong>{filteredSystemVoices.length}</strong>
-                  <span>/ {systemVoices.length} 个可选音色</span>
+                  <strong>{filteredCloneVoiceRecords.length + filteredSystemVoices.length}</strong>
+                  <span>/ {availableCloneVoiceRecords.length + systemVoices.length} 个可选音色</span>
                 </div>
               </div>
+              <section className="voice-library-section">
+                <div className="voice-library-section-head">
+                  <div>
+                    <p>Cloned Voices</p>
+                    <h3>已复刻音色</h3>
+                  </div>
+                  <span>{filteredCloneVoiceRecords.length} 个可用</span>
+                </div>
+                {availableCloneVoiceRecords.length === 0 ? (
+                  <div className="empty-state compact">暂无可用复刻音色。生成复刻成功后会出现在这里。</div>
+                ) : filteredCloneVoiceRecords.length === 0 ? (
+                  <div className="empty-state compact">没有匹配的复刻音色。</div>
+                ) : (
+                  <div className="voice-library-grid cloned-voice-grid">
+                    {filteredCloneVoiceRecords.map((record) => (
+                      <article className="voice-option-card clone-voice-card" key={record.id}>
+                        <div className="voice-option-top">
+                          <div>
+                            <strong>{record.clonedVoiceName}</strong>
+                            <small>{record.engine}</small>
+                          </div>
+                          <span>{record.status}</span>
+                        </div>
+                        <p>
+                          <span>voice_id</span>
+                          <strong>{record.externalVoiceId}</strong>
+                        </p>
+                        <div className="voice-tags">
+                          <span>{record.sampleCount} 条样本</span>
+                          <span>{record.sampleMinutes} 分钟</span>
+                          <span>客户/员工授权</span>
+                        </div>
+                        <div className="voice-preview-actions">
+                          <button
+                            className="row-action"
+                            disabled={!record.previewAudioUrl}
+                            onClick={() => previewCloneVoice(record)}
+                            type="button"
+                          >
+                            试听
+                          </button>
+                          <span className="voice-id-chip">复刻音色</span>
+                        </div>
+                        {record.previewAudioUrl ? (
+                          <audio controls preload="none" src={apiAssetUrl(record.previewAudioUrl)} />
+                        ) : (
+                          <div className="voice-preview-message is-error">暂无试听音频</div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+              <section className="voice-library-section">
+                <div className="voice-library-section-head">
+                  <div>
+                    <p>Built-in Voices</p>
+                    <h3>系统内置音色</h3>
+                  </div>
+                  <span>{filteredSystemVoices.length} 个可选</span>
+                </div>
               <div className="voice-library-grid">
                 {filteredSystemVoices.map((voice) => {
                   const preview = systemVoicePreviewState[voice.id] ?? {};
@@ -3233,6 +3319,7 @@ function App() {
                   );
                 })}
               </div>
+              </section>
             </article>
           </section>
         )}
