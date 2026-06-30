@@ -15,6 +15,11 @@ from app.schemas.task import (
     OutboundOverview,
     OutboundTaskCreate,
     RecallRuleRead,
+    RealtimePipelineRead,
+    RealtimeSessionCreate,
+    RealtimeSessionRead,
+    RealtimeTurnRead,
+    RealtimeUtteranceCreate,
     TaskRead,
     TelephonyConfigRead,
     TelephonyHealthRead,
@@ -31,6 +36,15 @@ from app.services.asterisk_ami import (
 from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
+from app.services.realtime_outbound import (
+    RealtimeSessionNotFound,
+    build_realtime_pipeline,
+    complete_realtime_playback,
+    create_realtime_session,
+    get_realtime_session,
+    handle_customer_utterance,
+    interrupt_realtime_session,
+)
 from app.services.telephony_preflight import build_telephony_preflight
 
 router = APIRouter()
@@ -125,6 +139,52 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "message": result.message,
         "rawPayload": result.raw_payload,
     }
+
+
+@router.get("/realtime/pipeline", response_model=RealtimePipelineRead)
+def realtime_pipeline() -> dict[str, object]:
+    return build_realtime_pipeline()
+
+
+@router.post("/realtime/sessions", response_model=RealtimeSessionRead)
+def create_realtime_session_api(payload: RealtimeSessionCreate) -> dict[str, object]:
+    return create_realtime_session(
+        merchant_name=payload.merchant_name,
+        phone=payload.phone,
+        voice=payload.voice.model_dump(by_alias=True),
+    )
+
+
+@router.get("/realtime/sessions/{session_id}", response_model=RealtimeSessionRead)
+def get_realtime_session_api(session_id: str) -> dict[str, object]:
+    try:
+        return get_realtime_session(session_id)
+    except RealtimeSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/realtime/sessions/{session_id}/utterances", response_model=RealtimeTurnRead)
+def create_realtime_utterance(session_id: str, payload: RealtimeUtteranceCreate) -> dict[str, object]:
+    try:
+        return handle_customer_utterance(session_id, payload.text, barge_in=payload.barge_in)
+    except RealtimeSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/realtime/sessions/{session_id}/interrupt", response_model=RealtimeSessionRead)
+def interrupt_realtime_session_api(session_id: str) -> dict[str, object]:
+    try:
+        return interrupt_realtime_session(session_id)
+    except RealtimeSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/realtime/sessions/{session_id}/playback-complete", response_model=RealtimeSessionRead)
+def complete_realtime_playback_api(session_id: str) -> dict[str, object]:
+    try:
+        return complete_realtime_playback(session_id)
+    except RealtimeSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/tasks", response_model=list[TaskRead])

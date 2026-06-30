@@ -48,6 +48,9 @@ import {
   RecallRule,
   ReportExport,
   ReportOverview,
+  RealtimePipeline,
+  RealtimeSession,
+  RealtimeVoiceSelection,
   SalesPerformanceReport,
   SystemVoice,
   TelephonyConfig,
@@ -227,6 +230,67 @@ const fallbackTelephonyPreflight: TelephonyPreflight = {
       status: "fail",
       detail: "AMI 用户名或密码未配置。",
       action: "在 backend/.env 配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。",
+    },
+  ],
+};
+
+const fallbackRealtimePipeline: RealtimePipeline = {
+  mode: "half_duplex_interruptible",
+  bridgeMode: "mock_media",
+  targetLatencyMs: 1500,
+  estimatedLatencyMs: 1380,
+  estimatedAiCostPerMinute: 0.04,
+  readyForMockCall: true,
+  readyForAsteriskMedia: false,
+  nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接 Asterisk 媒体桥。",
+  steps: [
+    {
+      key: "media_bridge",
+      label: "UC100/Asterisk 媒体桥",
+      status: "warn",
+      provider: "mock_media",
+      latencyMs: 120,
+      detail: "当前使用模拟媒体入口。",
+    },
+    {
+      key: "asr",
+      label: "流式 ASR",
+      status: "pass",
+      provider: "Paraformer realtime adapter",
+      latencyMs: 380,
+      detail: "按 WebSocket 流式输入设计。",
+    },
+    {
+      key: "router",
+      label: "快速意图路由",
+      status: "pass",
+      provider: "local intent rules",
+      latencyMs: 50,
+      detail: "高频意图先走规则。",
+    },
+    {
+      key: "llm",
+      label: "LLM 生成",
+      status: "pass",
+      provider: "DeepSeek-V4-Flash adapter",
+      latencyMs: 320,
+      detail: "短句优先，复杂问题再调用 LLM。",
+    },
+    {
+      key: "tts",
+      label: "流式 TTS",
+      status: "pass",
+      provider: "声音档案 voice router",
+      latencyMs: 430,
+      detail: "音色由客户在声音档案选择，按首个可播放音频块估算。",
+    },
+    {
+      key: "barge_in",
+      label: "打断处理",
+      status: "pass",
+      provider: "VAD + playback queue cancel",
+      latencyMs: 80,
+      detail: "客户插话时停止当前播放。",
     },
   ],
 };
@@ -1110,6 +1174,19 @@ function telephonyPreflightSummary(preflight: TelephonyPreflight) {
   return "等待配置";
 }
 
+function realtimePipelineStatusText(status: string) {
+  if (status === "pass") return "PASS";
+  if (status === "fail") return "FAIL";
+  return "WARN";
+}
+
+function realtimeSessionStatusText(status: string) {
+  if (status === "speaking") return "AI 播放中";
+  if (status === "thinking") return "生成回复中";
+  if (status === "listening") return "监听客户";
+  return status;
+}
+
 function formatDuration(seconds: number) {
   const minute = Math.floor(seconds / 60)
     .toString()
@@ -1128,6 +1205,8 @@ function App() {
   const [telephonyConfig, setTelephonyConfig] = useState<TelephonyConfig>(fallbackTelephonyConfig);
   const [telephonyHealth, setTelephonyHealth] = useState<TelephonyHealth>(fallbackTelephonyHealth);
   const [telephonyPreflight, setTelephonyPreflight] = useState<TelephonyPreflight>(fallbackTelephonyPreflight);
+  const [realtimePipeline, setRealtimePipeline] = useState<RealtimePipeline>(fallbackRealtimePipeline);
+  const [realtimeSession, setRealtimeSession] = useState<RealtimeSession | null>(null);
   const [callRecords, setCallRecords] = useState<CallRecord[]>(fallbackRecords);
   const [liveCalls, setLiveCalls] = useState<CallRecord[]>(fallbackRecords);
   const [scripts, setScripts] = useState<CallScript[]>(fallbackScripts);
@@ -1214,6 +1293,16 @@ function App() {
   const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认 UC100/Asterisk 可用后再做单号试拨。");
   const [isCheckingTelephony, setIsCheckingTelephony] = useState(false);
   const [isTestingTelephony, setIsTestingTelephony] = useState(false);
+  const [realtimeForm, setRealtimeForm] = useState({
+    merchantName: "模拟火锅店",
+    phone: "",
+    voiceChoice: `system:${fallbackSystemVoices[0]?.id ?? "qwen_tts_ethan"}`,
+    customerText: "你们这个怎么收费？",
+  });
+  const [realtimeMessage, setRealtimeMessage] = useState("先用模拟通话验证实时 ASR、意图、TTS 和打断。");
+  const [realtimeLastReply, setRealtimeLastReply] = useState("");
+  const [isStartingRealtimeSession, setIsStartingRealtimeSession] = useState(false);
+  const [isSendingRealtimeUtterance, setIsSendingRealtimeUtterance] = useState(false);
   const [dmForm, setDmForm] = useState({
     name: "美团高意向商家首轮私信",
     platform: "美团",
@@ -1443,6 +1532,36 @@ function App() {
         .includes(keyword),
     );
   }, [availableCloneVoiceRecords, systemVoiceSearch]);
+  const realtimeVoiceOptions = useMemo(
+    () => [
+      ...systemVoices.map((voice) => ({
+        key: `system:${voice.id}`,
+        label: voice.name,
+        detail: `${voice.provider} · ${voice.voiceParam}`,
+        selection: {
+          voiceId: voice.id,
+          voiceName: voice.name,
+          voiceType: "system",
+          provider: voice.provider,
+          externalVoiceId: voice.voiceParam,
+        } satisfies RealtimeVoiceSelection,
+      })),
+      ...availableCloneVoiceRecords.map((record) => ({
+        key: `clone:${record.id}`,
+        label: record.clonedVoiceName,
+        detail: `${record.engine} · ${record.externalVoiceId}`,
+        selection: {
+          voiceId: record.id,
+          voiceName: record.clonedVoiceName,
+          voiceType: "clone",
+          provider: record.engine,
+          externalVoiceId: record.externalVoiceId,
+        } satisfies RealtimeVoiceSelection,
+      })),
+    ],
+    [availableCloneVoiceRecords, systemVoices],
+  );
+  const activeRealtimeVoiceOption = realtimeVoiceOptions.find((option) => option.key === realtimeForm.voiceChoice) ?? realtimeVoiceOptions[0];
   const activeVoiceProfile = customerVoiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? customerVoiceProfiles[0];
   const activeVoiceProfileSamples = activeVoiceProfile
     ? customerVoiceSamples.filter((sample) => sample.profileId === activeVoiceProfile.id)
@@ -1541,6 +1660,7 @@ function App() {
       api.telephonyConfig(),
       api.telephonyHealth(),
       api.telephonyPreflight(),
+      api.realtimePipeline(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -1606,6 +1726,12 @@ function App() {
       );
       const defaultVoiceName = nextSystemVoices.find((voice) => voice.isDefault)?.name ?? nextSystemVoices[0]?.name ?? "晨煦（Ethan）";
       setVoiceProfileForm((current) => ({ ...current, fallbackVoice: current.fallbackVoice || defaultVoiceName }));
+      setRealtimeForm((current) => {
+        const defaultVoice = nextSystemVoices.find((voice) => voice.isDefault) ?? nextSystemVoices[0];
+        return defaultVoice && current.voiceChoice.startsWith("system:")
+          ? { ...current, voiceChoice: `system:${defaultVoice.id}` }
+          : current;
+      });
     }
     if (results[22].status === "fulfilled") {
       const nextProfiles = results[22].value;
@@ -1656,6 +1782,7 @@ function App() {
       setTelephonyPreflight(results[35].value);
       setTelephonyHealth(results[35].value.health);
     }
+    if (results[36].status === "fulfilled") setRealtimePipeline(results[36].value);
     setIsLoading(false);
   }
 
@@ -1775,6 +1902,78 @@ function App() {
     } finally {
       setIsTestingTelephony(false);
     }
+  }
+
+  async function startRealtimeMockSession() {
+    const voice = activeRealtimeVoiceOption?.selection;
+    if (!voice) {
+      setRealtimeMessage("请先在声音档案中准备至少一个可用音色。");
+      return;
+    }
+    setIsStartingRealtimeSession(true);
+    setRealtimeMessage("正在创建模拟实时通话...");
+    try {
+      const [pipeline, session] = await Promise.all([
+        api.realtimePipeline(),
+        api.createRealtimeSession({
+          merchantName: realtimeForm.merchantName.trim() || "模拟商家",
+          phone: realtimeForm.phone.trim() || null,
+          voice,
+        }),
+      ]);
+      setRealtimePipeline(pipeline);
+      setRealtimeSession(session);
+      setRealtimeLastReply("");
+      setRealtimeMessage("模拟实时通话已就绪，可以输入客户说的话。");
+    } catch (error) {
+      setRealtimeMessage(error instanceof Error ? error.message : "创建实时通话失败");
+    } finally {
+      setIsStartingRealtimeSession(false);
+    }
+  }
+
+  async function sendRealtimeUtterance(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!realtimeForm.customerText.trim()) return;
+    let activeSession = realtimeSession;
+    setIsSendingRealtimeUtterance(true);
+    setRealtimeMessage("正在模拟 ASR/意图/LLM/TTS...");
+    try {
+      if (!activeSession) {
+        const voice = activeRealtimeVoiceOption?.selection;
+        if (!voice) throw new Error("请先在声音档案中准备至少一个可用音色。");
+        activeSession = await api.createRealtimeSession({
+          merchantName: realtimeForm.merchantName.trim() || "模拟商家",
+          phone: realtimeForm.phone.trim() || null,
+          voice,
+        });
+      }
+      const turn = await api.realtimeUtterance(activeSession.id, {
+        text: realtimeForm.customerText.trim(),
+        bargeIn: true,
+      });
+      setRealtimeSession(turn.session);
+      setRealtimeLastReply(turn.reply);
+      setRealtimeMessage(turn.interrupted ? "检测到客户插话，已停止上一段 TTS 并生成新回复。" : "已生成 TTS 分块，等待播放完成或客户打断。");
+    } catch (error) {
+      setRealtimeMessage(error instanceof Error ? error.message : "模拟实时通话失败");
+    } finally {
+      setIsSendingRealtimeUtterance(false);
+    }
+  }
+
+  async function interruptRealtimePlayback() {
+    if (!realtimeSession) return;
+    const updated = await api.interruptRealtimeSession(realtimeSession.id);
+    setRealtimeSession(updated);
+    setRealtimeMessage("已停止当前 TTS 播放队列，继续监听客户。");
+  }
+
+  async function completeRealtimePlayback() {
+    if (!realtimeSession) return;
+    const updated = await api.completeRealtimePlayback(realtimeSession.id);
+    setRealtimeSession(updated);
+    setRealtimeMessage("AI 播放完成，回到监听客户。");
   }
 
   async function submitDmTask(event: React.FormEvent<HTMLFormElement>) {
@@ -2392,6 +2591,131 @@ function App() {
   function toggleDmLead(leadId: string) {
     setSelectedDmLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
+    );
+  }
+
+  function renderRealtimePipelinePanel() {
+    return (
+      <article className="panel span-2 realtime-voice-panel">
+        <div className="panel-title">
+          <div>
+            <p>Realtime Voice</p>
+            <h2>实时语音管线</h2>
+          </div>
+          <button className="secondary-button" disabled={isStartingRealtimeSession} onClick={() => void startRealtimeMockSession()} type="button">
+            <Bot size={16} />
+            {isStartingRealtimeSession ? "创建中" : "模拟通话"}
+          </button>
+        </div>
+        <div className="realtime-pipeline-summary">
+          <div>
+            <span>模式</span>
+            <strong>{realtimePipeline.mode === "half_duplex_interruptible" ? "半双工可打断" : realtimePipeline.mode}</strong>
+          </div>
+          <div>
+            <span>媒体桥</span>
+            <strong>{realtimePipeline.bridgeMode === "mock_media" ? "模拟媒体" : "Asterisk媒体"}</strong>
+          </div>
+          <div>
+            <span>目标延迟</span>
+            <strong>{realtimePipeline.targetLatencyMs} ms</strong>
+          </div>
+          <div>
+            <span>预估成本</span>
+            <strong>¥{realtimePipeline.estimatedAiCostPerMinute.toFixed(2)} / 分钟</strong>
+          </div>
+        </div>
+        <div className="realtime-pipeline-steps">
+          {realtimePipeline.steps.map((step) => (
+            <div className="line-preflight-step" key={step.key}>
+              <span className={`line-preflight-badge is-${step.status}`}>{realtimePipelineStatusText(step.status)}</span>
+              <div>
+                <strong>{step.label}</strong>
+                <small>{step.provider} · {step.latencyMs} ms</small>
+                <em>{step.detail}</em>
+              </div>
+            </div>
+          ))}
+        </div>
+        <form className="realtime-call-form" onSubmit={sendRealtimeUtterance}>
+          <label>
+            模拟商家
+            <input
+              value={realtimeForm.merchantName}
+              onChange={(event) => setRealtimeForm({ ...realtimeForm, merchantName: event.target.value })}
+            />
+          </label>
+          <label>
+            电话
+            <input
+              placeholder="可留空"
+              value={realtimeForm.phone}
+              onChange={(event) => setRealtimeForm({ ...realtimeForm, phone: event.target.value })}
+            />
+          </label>
+          <label className="wide">
+            本次外呼音色
+            <select
+              value={activeRealtimeVoiceOption?.key ?? realtimeForm.voiceChoice}
+              onChange={(event) => setRealtimeForm({ ...realtimeForm, voiceChoice: event.target.value })}
+            >
+              {realtimeVoiceOptions.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label} - {option.selection.voiceType === "clone" ? "复刻音色" : "系统音色"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="wide">
+            客户说话
+            <input
+              value={realtimeForm.customerText}
+              onChange={(event) => setRealtimeForm({ ...realtimeForm, customerText: event.target.value })}
+            />
+          </label>
+          <button className="primary-button" disabled={isSendingRealtimeUtterance || !realtimeForm.customerText.trim()} type="submit">
+            <Radio size={16} />
+            {isSendingRealtimeUtterance ? "处理中" : realtimeSession ? "发送一句" : "创建并发送"}
+          </button>
+        </form>
+        <div className="realtime-session-board">
+          <div className="line-test-result">
+            <strong>{realtimeSession ? realtimeSessionStatusText(realtimeSession.status) : "未开始"}</strong>
+            <span>{realtimeMessage}</span>
+            {activeRealtimeVoiceOption && <small>{activeRealtimeVoiceOption.label} · {activeRealtimeVoiceOption.detail}</small>}
+          </div>
+          <div className="line-test-result">
+            <strong>{realtimeSession?.currentIntent ?? "待识别"}</strong>
+            <span>{realtimeSession?.currentNode ?? realtimePipeline.nextStep}</span>
+            {realtimeSession && <small>打断 {realtimeSession.interruptions} 次 · ¥{realtimeSession.costEstimatePerMinute.toFixed(2)} / 分钟</small>}
+          </div>
+          <div className="button-row realtime-actions">
+            <button className="secondary-button" disabled={!realtimeSession || realtimeSession.status !== "speaking"} onClick={() => void interruptRealtimePlayback()} type="button">
+              <ShieldAlert size={16} />
+              打断 TTS
+            </button>
+            <button className="secondary-button" disabled={!realtimeSession || realtimeSession.status !== "speaking"} onClick={() => void completeRealtimePlayback()} type="button">
+              <CheckCircle2 size={16} />
+              播放完成
+            </button>
+          </div>
+        </div>
+        {realtimeLastReply && <div className="form-result">AI：{realtimeLastReply}</div>}
+        {realtimeSession && (
+          <div className="realtime-event-list">
+            {realtimeSession.events.slice(-8).map((event) => (
+              <div className="timeline-item" key={event.id}>
+                <span>{event.actor}</span>
+                <strong>{event.type} · {event.status}</strong>
+                <p>{event.text}</p>
+                <small>
+                  {event.detail} {event.latencyMs ? `· ${event.latencyMs} ms` : ""}
+                </small>
+              </div>
+            ))}
+          </div>
+        )}
+      </article>
     );
   }
 
@@ -4037,6 +4361,8 @@ function App() {
                 </div>
               </div>
             </article>
+
+            {renderRealtimePipelinePanel()}
 
             <article className="panel span-2">
               <div className="panel-title">

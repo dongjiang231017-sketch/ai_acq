@@ -171,7 +171,7 @@ button {
   margin: 0 0 4px;
   color: #6f7f96;
   font-size: 12px;
-  font-weight: 720;
+  font-weight: 900;
 }
 
 .topbar h1,
@@ -889,6 +889,92 @@ button:disabled {
   display: grid;
   align-content: center;
   gap: 6px;
+}
+
+.realtime-voice-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.realtime-pipeline-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.realtime-pipeline-summary div {
+  border: 1px solid #e2ebf6;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.realtime-pipeline-summary span {
+  display: block;
+  color: #738299;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.realtime-pipeline-summary strong {
+  display: block;
+  margin-top: 8px;
+  color: #26364d;
+  font-size: 16px;
+  font-weight: 950;
+  overflow-wrap: anywhere;
+}
+
+.realtime-pipeline-steps,
+.realtime-event-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.realtime-call-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.realtime-call-form label {
+  display: grid;
+  gap: 8px;
+  color: #53647b;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.realtime-call-form .wide {
+  grid-column: span 2;
+}
+
+.realtime-call-form input,
+.realtime-call-form select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #dbe6f3;
+  border-radius: 12px;
+  padding: 0 12px;
+  color: #26364d;
+  font-weight: 850;
+}
+
+.realtime-call-form button {
+  min-height: 44px;
+}
+
+.realtime-session-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.realtime-actions {
+  align-content: center;
 }
 
 .lead-picker,
@@ -1754,7 +1840,7 @@ button:disabled {
   color: #2473f6;
   padding: 4px 8px;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 720;
   white-space: nowrap;
 }
 
@@ -2614,9 +2700,21 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .realtime-pipeline-summary,
+  .realtime-pipeline-steps,
+  .realtime-event-list,
+  .realtime-session-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .line-test-row,
-  .line-test-form {
+  .line-test-form,
+  .realtime-call-form {
     grid-template-columns: 1fr;
+  }
+
+  .realtime-call-form .wide {
+    grid-column: auto;
   }
 
   .flow-node-grid,
@@ -2717,6 +2815,10 @@ button:disabled {
   .form-grid,
   .line-health-grid,
   .line-preflight-steps,
+  .realtime-pipeline-summary,
+  .realtime-pipeline-steps,
+  .realtime-event-list,
+  .realtime-session-board,
   .flow-node-grid,
   .rule-detail-grid,
   .record-grid,

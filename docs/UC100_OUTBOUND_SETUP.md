@@ -1,6 +1,6 @@
 # UC100 实体电话卡外呼接入准备
 
-这份文档用于 UC100 到货前后的开发联调。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口和真实 originate 适配器。
+这份文档用于 UC100 到货前后的开发联调。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器，以及设备未识卡前可用的实时语音管线模拟接口。
 
 ## 当前可先做
 
@@ -11,7 +11,8 @@
 5. 在 AI 外呼系统的「真实线路接入」面板做无拨号预检。
 6. 使用 `python -m app.tools.uc100_preflight` 做命令行无拨号预检。
 7. 参考 `docs/UC100_ASTERISK_SNIPPETS.md` 准备 Asterisk AMI、PJSIP trunk 和 dialplan。
-8. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
+8. 在 AI 外呼系统的「实时语音管线」面板创建模拟通话，验证 ASR、意图路由、LLM、TTS 分块和打断状态机。
+9. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
 
 ## 推荐架构
 
@@ -20,8 +21,8 @@
   -> UC100
   -> SIP trunk
   -> Asterisk
-  -> FastAPI / Redis worker
-  -> ASR / LLM / TTS
+  -> FastAPI / Redis worker / 实时媒体桥
+  -> 流式 ASR / 快速意图路由 / LLM / 流式 TTS
   -> 通话记录 / 人工接管
 ```
 
@@ -141,6 +142,52 @@ python -m app.tools.uc100_preflight --phone 你的测试手机号 --json
 curl http://localhost:8000/api/outbound/telephony/health
 ```
 
+实时语音管线模拟验证：
+
+```bash
+curl http://localhost:8000/api/outbound/realtime/pipeline
+```
+
+创建模拟实时通话：
+
+```bash
+curl -X POST http://localhost:8000/api/outbound/realtime/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "merchantName": "模拟火锅店",
+    "phone": "13800000000",
+    "voice": {
+      "voiceId": "qwen_tts_ethan",
+      "voiceName": "晨煦（Ethan）",
+      "voiceType": "system",
+      "provider": "Qwen-TTS",
+      "externalVoiceId": "Ethan"
+    }
+  }'
+```
+
+发送客户一句话，模拟 ASR 最终文本、意图路由、回复生成和 TTS 分块：
+
+```bash
+curl -X POST http://localhost:8000/api/outbound/realtime/sessions/会话ID/utterances \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"你们这个怎么收费？","bargeIn":true}'
+```
+
+客户插话或人工触发打断：
+
+```bash
+curl -X POST http://localhost:8000/api/outbound/realtime/sessions/会话ID/interrupt
+```
+
+模拟 AI 播放完成并回到监听：
+
+```bash
+curl -X POST http://localhost:8000/api/outbound/realtime/sessions/会话ID/playback-complete
+```
+
+这组接口不会真实拨号，也不会调用真实 ASR/LLM/TTS 供应商；它用于设备对接前先把外呼会话状态、音色选择、打断处理和前端操作闭环跑顺。音色来自「声音档案」：客户可选系统音色或已授权可用的复刻音色。
+
 单号试拨：
 
 ```bash
@@ -165,7 +212,7 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 ## 现在还没做的硬件相关实现
 
 - Asterisk 事件回调持久化：接通、忙线、未接、挂断、失败需要从 AMI event 更新通话记录。
-- 实时音频流进入 ASR，再把 TTS 音频送回通话。
+- Asterisk ExternalMedia/AudioSocket 把真实电话音频流接入 ASR，再把 TTS 音频送回通话。
 - 人工接管时从 AI 通话转人工坐席。
 
-第一阶段代码已经提供 AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器和单号试拨接口。真实批量外呼仍需要在单号测试稳定后再开启。
+第一阶段代码已经提供 AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器、单号试拨接口和实时语音管线模拟通话。真实批量外呼仍需要在单号测试稳定后再开启。

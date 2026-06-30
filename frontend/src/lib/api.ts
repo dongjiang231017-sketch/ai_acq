@@ -158,6 +158,78 @@ export type TelephonyTestCallResult = {
   rawPayload: string;
 };
 
+export type RealtimePipelineStep = {
+  key: string;
+  label: string;
+  status: string;
+  provider: string;
+  latencyMs: number;
+  detail: string;
+};
+
+export type RealtimePipeline = {
+  mode: string;
+  bridgeMode: string;
+  targetLatencyMs: number;
+  estimatedLatencyMs: number;
+  estimatedAiCostPerMinute: number;
+  readyForMockCall: boolean;
+  readyForAsteriskMedia: boolean;
+  nextStep: string;
+  steps: RealtimePipelineStep[];
+};
+
+export type RealtimeVoiceSelection = {
+  voiceId: string;
+  voiceName: string;
+  voiceType: string;
+  provider: string;
+  externalVoiceId?: string | null;
+};
+
+export type RealtimeEvent = {
+  id: string;
+  at: string;
+  type: string;
+  actor: string;
+  status: string;
+  text: string;
+  detail: string;
+  latencyMs: number;
+};
+
+export type RealtimeSession = {
+  id: string;
+  status: string;
+  mode: string;
+  bridgeMode: string;
+  merchantName: string;
+  phone?: string | null;
+  voice: RealtimeVoiceSelection;
+  currentIntent: string;
+  currentNode: string;
+  interruptions: number;
+  costEstimatePerMinute: number;
+  latencyEstimateMs: number;
+  startedAt: string;
+  updatedAt: string;
+  events: RealtimeEvent[];
+};
+
+export type RealtimeTurn = {
+  session: RealtimeSession;
+  asrText: string;
+  intent: string;
+  reply: string;
+  interrupted: boolean;
+  ttsChunks: Array<{
+    index: number;
+    text: string;
+    durationMs: number;
+    provider: string;
+  }>;
+};
+
 export type DmOverview = {
   accounts: number;
   activeAccounts: number;
@@ -708,6 +780,25 @@ export const api = {
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  realtimePipeline: () => request<RealtimePipeline>("/outbound/realtime/pipeline"),
+  createRealtimeSession: (payload: { merchantName: string; phone?: string | null; voice: RealtimeVoiceSelection }) =>
+    request<RealtimeSession>("/outbound/realtime/sessions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  realtimeUtterance: (sessionId: string, payload: { text: string; bargeIn?: boolean }) =>
+    request<RealtimeTurn>(`/outbound/realtime/sessions/${sessionId}/utterances`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  interruptRealtimeSession: (sessionId: string) =>
+    request<RealtimeSession>(`/outbound/realtime/sessions/${sessionId}/interrupt`, {
+      method: "POST",
+    }),
+  completeRealtimePlayback: (sessionId: string) =>
+    request<RealtimeSession>(`/outbound/realtime/sessions/${sessionId}/playback-complete`, {
+      method: "POST",
     }),
   dmOverview: () => request<DmOverview>("/direct-messages/overview"),
   dmConfig: () => request<DmConfig>("/direct-messages/config"),

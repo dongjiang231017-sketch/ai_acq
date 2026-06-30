@@ -167,3 +167,94 @@ class TelephonyTestCallRead(BaseModel):
     gateway_status: Annotated[str, Field(alias="gatewayStatus")]
     message: str
     raw_payload: Annotated[str, Field(alias="rawPayload")]
+
+
+class RealtimePipelineStepRead(BaseModel):
+    key: str
+    label: str
+    status: str
+    provider: str
+    latency_ms: Annotated[int, Field(alias="latencyMs")]
+    detail: str
+
+
+class RealtimePipelineRead(BaseModel):
+    mode: str
+    bridge_mode: Annotated[str, Field(alias="bridgeMode")]
+    target_latency_ms: Annotated[int, Field(alias="targetLatencyMs")]
+    estimated_latency_ms: Annotated[int, Field(alias="estimatedLatencyMs")]
+    estimated_ai_cost_per_minute: Annotated[float, Field(alias="estimatedAiCostPerMinute")]
+    ready_for_mock_call: Annotated[bool, Field(alias="readyForMockCall")]
+    ready_for_asterisk_media: Annotated[bool, Field(alias="readyForAsteriskMedia")]
+    next_step: Annotated[str, Field(alias="nextStep")]
+    steps: list[RealtimePipelineStepRead]
+
+
+class RealtimeVoiceSelection(BaseModel):
+    voice_id: Annotated[str, Field(alias="voiceId")]
+    voice_name: Annotated[str, Field(alias="voiceName")]
+    voice_type: Annotated[str, Field(alias="voiceType")] = "system"
+    provider: str = "Qwen-TTS"
+    external_voice_id: Annotated[str | None, Field(alias="externalVoiceId")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class RealtimeSessionCreate(BaseModel):
+    merchant_name: Annotated[str, Field(alias="merchantName", min_length=1, max_length=120)] = "模拟商家"
+    phone: Annotated[str | None, Field(max_length=40)] = None
+    voice: RealtimeVoiceSelection
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class RealtimeUtteranceCreate(BaseModel):
+    text: Annotated[str, Field(min_length=1, max_length=500)]
+    barge_in: Annotated[bool, Field(alias="bargeIn")] = True
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class RealtimeEventRead(BaseModel):
+    id: str
+    at: datetime
+    type: str
+    actor: str
+    status: str
+    text: str
+    detail: str
+    latency_ms: Annotated[int, Field(alias="latencyMs")]
+
+
+class RealtimeTtsChunkRead(BaseModel):
+    index: int
+    text: str
+    duration_ms: Annotated[int, Field(alias="durationMs")]
+    provider: str
+
+
+class RealtimeSessionRead(BaseModel):
+    id: str
+    status: str
+    mode: str
+    bridge_mode: Annotated[str, Field(alias="bridgeMode")]
+    merchant_name: Annotated[str, Field(alias="merchantName")]
+    phone: str | None
+    voice: RealtimeVoiceSelection
+    current_intent: Annotated[str, Field(alias="currentIntent")]
+    current_node: Annotated[str, Field(alias="currentNode")]
+    interruptions: int
+    cost_estimate_per_minute: Annotated[float, Field(alias="costEstimatePerMinute")]
+    latency_estimate_ms: Annotated[int, Field(alias="latencyEstimateMs")]
+    started_at: Annotated[datetime, Field(alias="startedAt")]
+    updated_at: Annotated[datetime, Field(alias="updatedAt")]
+    events: list[RealtimeEventRead]
+
+
+class RealtimeTurnRead(BaseModel):
+    session: RealtimeSessionRead
+    asr_text: Annotated[str, Field(alias="asrText")]
+    intent: str
+    reply: str
+    interrupted: bool
+    tts_chunks: Annotated[list[RealtimeTtsChunkRead], Field(alias="ttsChunks")]
