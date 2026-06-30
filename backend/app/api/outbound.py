@@ -17,7 +17,11 @@ from app.schemas.task import (
     RecallRuleRead,
     TaskRead,
     TelephonyConfigRead,
+    TelephonyHealthRead,
+    TelephonyTestCallCreate,
+    TelephonyTestCallRead,
 )
+from app.services.asterisk_ami import AsteriskAmiError, check_asterisk_health, originate_test_call
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
 
@@ -81,6 +85,30 @@ def telephony_config() -> dict[str, object]:
         "asteriskAmiPort": settings.asterisk_ami_port,
         "asteriskUsernameConfigured": bool(settings.asterisk_ami_username),
         "asteriskTrunkName": settings.asterisk_trunk_name,
+        "asteriskMaxChannels": settings.asterisk_max_channels,
+        "asteriskLiveCallEnabled": settings.asterisk_live_call_enabled,
+        "asteriskBulkCallEnabled": settings.asterisk_bulk_call_enabled,
+    }
+
+
+@router.get("/telephony/health", response_model=TelephonyHealthRead)
+def telephony_health() -> dict[str, object]:
+    return check_asterisk_health().as_dict()
+
+
+@router.post("/telephony/test-call", response_model=TelephonyTestCallRead)
+def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, object]:
+    try:
+        result = originate_test_call(payload.phone, caller_id=payload.caller_id)
+    except AsteriskAmiError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "accepted": result.accepted,
+        "actionId": result.action_id,
+        "channel": result.channel,
+        "gatewayStatus": result.status,
+        "message": result.message,
+        "rawPayload": result.raw_payload,
     }
 
 

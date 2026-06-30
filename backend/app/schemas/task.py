@@ -115,3 +115,37 @@ class TelephonyConfigRead(BaseModel):
     asterisk_ami_port: Annotated[int, Field(alias="asteriskAmiPort")]
     asterisk_username_configured: Annotated[bool, Field(alias="asteriskUsernameConfigured")]
     asterisk_trunk_name: Annotated[str, Field(alias="asteriskTrunkName")]
+    asterisk_max_channels: Annotated[int, Field(alias="asteriskMaxChannels")]
+    asterisk_live_call_enabled: Annotated[bool, Field(alias="asteriskLiveCallEnabled")]
+    asterisk_bulk_call_enabled: Annotated[bool, Field(alias="asteriskBulkCallEnabled")]
+
+
+class TelephonyHealthRead(BaseModel):
+    checked_at: Annotated[datetime, Field(alias="checkedAt")]
+    gateway_mode: Annotated[str, Field(alias="gatewayMode")]
+    configured: bool
+    live_call_enabled: Annotated[bool, Field(alias="liveCallEnabled")]
+    bulk_call_enabled: Annotated[bool, Field(alias="bulkCallEnabled")]
+    ami_reachable: Annotated[bool, Field(alias="amiReachable")]
+    authenticated: bool
+    ping_ok: Annotated[bool, Field(alias="pingOk")]
+    trunk_configured: Annotated[bool, Field(alias="trunkConfigured")]
+    trunk_reachable: Annotated[bool | None, Field(alias="trunkReachable")]
+    trunk_status: Annotated[str, Field(alias="trunkStatus")]
+    max_channels: Annotated[int, Field(alias="maxChannels")]
+    ready_for_test_call: Annotated[bool, Field(alias="readyForTestCall")]
+    errors: list[str]
+
+
+class TelephonyTestCallCreate(BaseModel):
+    phone: Annotated[str, Field(min_length=3, max_length=40)]
+    caller_id: Annotated[str | None, Field(alias="callerId")] = None
+
+
+class TelephonyTestCallRead(BaseModel):
+    accepted: bool
+    action_id: Annotated[str, Field(alias="actionId")]
+    channel: str
+    gateway_status: Annotated[str, Field(alias="gatewayStatus")]
+    message: str
+    raw_payload: Annotated[str, Field(alias="rawPayload")]

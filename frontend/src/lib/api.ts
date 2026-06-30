@@ -102,6 +102,35 @@ export type TelephonyConfig = {
   asteriskAmiPort: number;
   asteriskUsernameConfigured: boolean;
   asteriskTrunkName: string;
+  asteriskMaxChannels: number;
+  asteriskLiveCallEnabled: boolean;
+  asteriskBulkCallEnabled: boolean;
+};
+
+export type TelephonyHealth = {
+  checkedAt: string;
+  gatewayMode: string;
+  configured: boolean;
+  liveCallEnabled: boolean;
+  bulkCallEnabled: boolean;
+  amiReachable: boolean;
+  authenticated: boolean;
+  pingOk: boolean;
+  trunkConfigured: boolean;
+  trunkReachable: boolean | null;
+  trunkStatus: string;
+  maxChannels: number;
+  readyForTestCall: boolean;
+  errors: string[];
+};
+
+export type TelephonyTestCallResult = {
+  accepted: boolean;
+  actionId: string;
+  channel: string;
+  gatewayStatus: string;
+  message: string;
+  rawPayload: string;
 };
 
 export type DmOverview = {
@@ -622,6 +651,12 @@ export const api = {
   callScripts: () => request<CallScript[]>("/outbound/scripts"),
   recallRules: () => request<RecallRule[]>("/outbound/recall-rules"),
   telephonyConfig: () => request<TelephonyConfig>("/outbound/telephony/config"),
+  telephonyHealth: () => request<TelephonyHealth>("/outbound/telephony/health"),
+  createTelephonyTestCall: (payload: { phone: string; callerId?: string | null }) =>
+    request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   dmOverview: () => request<DmOverview>("/direct-messages/overview"),
   dmConfig: () => request<DmConfig>("/direct-messages/config"),
   dmAccounts: () => request<DmAccount[]>("/direct-messages/accounts"),

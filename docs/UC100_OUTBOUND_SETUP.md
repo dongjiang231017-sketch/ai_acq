@@ -54,11 +54,25 @@ ASTERISK_HOST=127.0.0.1
 ASTERISK_AMI_PORT=5038
 ASTERISK_AMI_USERNAME=your-ami-user
 ASTERISK_AMI_PASSWORD=your-ami-password
+ASTERISK_AMI_TIMEOUT_SECONDS=5
 ASTERISK_ORIGINATE_CONTEXT=from-ai-acq
+ASTERISK_ORIGINATE_EXTENSION=s
+ASTERISK_ORIGINATE_CHANNEL_TEMPLATE=PJSIP/{phone}@{trunk}
+ASTERISK_ORIGINATE_TIMEOUT_MS=30000
+ASTERISK_CALLER_ID=AI获客
 ASTERISK_TRUNK_NAME=uc100
+ASTERISK_MAX_CHANNELS=1
+ASTERISK_LIVE_CALL_ENABLED=false
+ASTERISK_BULK_CALL_ENABLED=false
 ```
 
 不要提交 `.env`，不要把 AMI 密码写进 Git。
+
+安全开关：
+
+- `ASTERISK_LIVE_CALL_ENABLED=true` 只允许单号试拨接口提交真实拨号。
+- `ASTERISK_BULK_CALL_ENABLED=true` 才允许外呼任务批量使用真实线路。
+- 设备首次联调时保持 `ASTERISK_BULK_CALL_ENABLED=false`，先确认一个号码能稳定接通。
 
 ## 本地验证命令
 
@@ -101,6 +115,20 @@ python -m app.workers.outbound_worker --once
 curl http://localhost:8000/api/outbound/telephony/config
 ```
 
+检查 UC100/Asterisk 线路：
+
+```bash
+curl http://localhost:8000/api/outbound/telephony/health
+```
+
+单号试拨：
+
+```bash
+curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"你的测试手机号"}'
+```
+
 ## UC100 到货后的检查顺序
 
 1. 插 SIM 卡并确认能正常注册运营商网络。
@@ -110,13 +138,13 @@ curl http://localhost:8000/api/outbound/telephony/config
 5. 从 Asterisk CLI 手动拨一个测试号码。
 6. 确认通话状态、挂断原因、录音或音频流是否可用。
 7. 再把 `TELEPHONY_GATEWAY_MODE` 从 `simulator` 切到 `asterisk`。
-8. 接入真实 originate 适配器前，先用 1 张卡、1 路并发测试。
+8. 打开 `ASTERISK_LIVE_CALL_ENABLED=true`，在 AI 外呼系统里做单号试拨。
+9. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
 
 ## 现在还没做的硬件相关实现
 
-- Asterisk AMI originate 的真实拨号适配器。
-- Asterisk 事件回调解析：接通、忙线、未接、挂断、失败。
+- Asterisk 事件回调持久化：接通、忙线、未接、挂断、失败需要从 AMI event 更新通话记录。
 - 实时音频流进入 ASR，再把 TTS 音频送回通话。
 - 人工接管时从 AI 通话转人工坐席。
 
-这些必须等 UC100 和 Asterisk 能互通后再做真实联调。现在代码里 `AsteriskGateway` 会故意报错，避免误以为已经接上真实线路。
+第一阶段代码已经提供 AMI 健康检查、受开关保护的真实 originate 适配器和单号试拨接口。真实批量外呼仍需要在单号测试稳定后再开启。

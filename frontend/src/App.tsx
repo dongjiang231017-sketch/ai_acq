@@ -1394,6 +1394,8 @@ function App() {
       api.reportExports(),
       api.settingsOverview(),
       api.systemSettings(),
+      api.telephonyConfig(),
+      api.telephonyHealth(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -1505,6 +1507,8 @@ function App() {
         return nextId;
       });
     }
+    if (results[32].status === "fulfilled") setTelephonyConfig(results[32].value);
+    if (results[33].status === "fulfilled") setTelephonyHealth(results[33].value);
     setIsLoading(false);
   }
 
@@ -1581,6 +1585,36 @@ function App() {
     setLiveCalls(liveData);
     setLeads(leadData);
     setActiveOutboundTab("实时监听");
+  }
+
+  async function refreshTelephonyStatus() {
+    setTelephonyMessage("正在检查 UC100/Asterisk 线路...");
+    const [config, health] = await Promise.all([api.telephonyConfig(), api.telephonyHealth()]);
+    setTelephonyConfig(config);
+    setTelephonyHealth(health);
+    setTelephonyMessage(telephonyReadinessDetail(config, health));
+  }
+
+  async function submitTelephonyTestCall(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!telephonyTestForm.phone.trim()) return;
+    setIsTestingTelephony(true);
+    setTelephonyTestResult(null);
+    setTelephonyMessage("正在提交单号试拨请求...");
+    try {
+      const result = await api.createTelephonyTestCall({
+        phone: telephonyTestForm.phone.trim(),
+        callerId: telephonyTestForm.callerId.trim() || null,
+      });
+      setTelephonyTestResult(result);
+      setTelephonyMessage(result.accepted ? "已提交到 UC100/Asterisk，请观察被叫手机和线路事件。" : result.message);
+      const health = await api.telephonyHealth();
+      setTelephonyHealth(health);
+    } catch (error) {
+      setTelephonyMessage(error instanceof Error ? error.message : "测试拨号失败");
+    } finally {
+      setIsTestingTelephony(false);
+    }
   }
 
   async function submitDmTask(event: React.FormEvent<HTMLFormElement>) {
@@ -3419,6 +3453,78 @@ function App() {
 
         {showRealtime && (
           <section className="content-grid outbound-main">
+            <article className="panel span-2 line-health-panel">
+              <div className="panel-title">
+                <div>
+                  <p>UC100 / Asterisk</p>
+                  <h2>真实线路接入</h2>
+                </div>
+                <button className="secondary-button" onClick={refreshTelephonyStatus} type="button">
+                  <RefreshCw size={16} className={isLoading ? "spin" : ""} />
+                  检查线路
+                </button>
+              </div>
+              <div className="line-health-grid">
+                <div>
+                  <span>线路模式</span>
+                  <strong>{telephonyConfig.gatewayMode === "asterisk" ? "真实线路" : "模拟线路"}</strong>
+                </div>
+                <div>
+                  <span>线路状态</span>
+                  <strong>{telephonyReadinessLabel(telephonyHealth)}</strong>
+                </div>
+                <div>
+                  <span>AMI</span>
+                  <strong>{telephonyHealth.authenticated ? "已登录" : telephonyHealth.amiReachable ? "已连接" : "未连接"}</strong>
+                </div>
+                <div>
+                  <span>Trunk</span>
+                  <strong>{telephonyConfig.asteriskTrunkName || "待配置"}</strong>
+                </div>
+                <div>
+                  <span>通道上限</span>
+                  <strong>{telephonyHealth.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
+                </div>
+                <div>
+                  <span>拨号开关</span>
+                  <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨" : "未开启"}</strong>
+                </div>
+              </div>
+              <div className="line-test-row">
+                <form className="line-test-form" onSubmit={submitTelephonyTestCall}>
+                  <label>
+                    测试号码
+                    <input
+                      placeholder="输入自己的手机号"
+                      value={telephonyTestForm.phone}
+                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, phone: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    主叫显示
+                    <input
+                      placeholder="默认 AI获客"
+                      value={telephonyTestForm.callerId}
+                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, callerId: event.target.value })}
+                    />
+                  </label>
+                  <button className="primary-button" disabled={isTestingTelephony || !telephonyTestForm.phone.trim()} type="submit">
+                    <PhoneCall size={16} />
+                    {isTestingTelephony ? "提交中" : "单号试拨"}
+                  </button>
+                </form>
+                <div className="line-test-result">
+                  <strong>{telephonyMessage}</strong>
+                  <span>{telephonyHealth.errors[0] ?? telephonyHealth.trunkStatus}</span>
+                  {telephonyTestResult && (
+                    <small>
+                      {telephonyTestResult.gatewayStatus} · {telephonyTestResult.actionId} · {telephonyTestResult.channel}
+                    </small>
+                  )}
+                </div>
+              </div>
+            </article>
+
             <article className="panel span-2">
               <div className="panel-title">
                 <div>

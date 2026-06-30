@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -5,6 +6,7 @@ from typing import Protocol
 from app.core.config import settings
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
+from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError
 
 
 @dataclass(frozen=True)
@@ -108,11 +110,62 @@ class SimulatorGateway:
 
 class AsteriskGateway:
     def place_call(self, attempt: CallAttempt) -> CallResult:
-        if not settings.asterisk_ami_username or not settings.asterisk_ami_password:
-            raise RuntimeError("Asterisk AMI credentials are not configured")
-        raise RuntimeError(
-            "Asterisk gateway is configured but the live originate adapter is not enabled yet; "
-            "keep TELEPHONY_GATEWAY_MODE=simulator until UC100 and Asterisk are reachable."
+        if not settings.asterisk_live_call_enabled:
+            raise RuntimeError("Asterisk live call is disabled; set ASTERISK_LIVE_CALL_ENABLED=true after UC100 line testing.")
+        if not settings.asterisk_bulk_call_enabled:
+            raise RuntimeError("Asterisk bulk outbound is disabled; enable ASTERISK_BULK_CALL_ENABLED only after one-number tests pass.")
+        if not attempt.lead.phone:
+            return CallResult(
+                duration_seconds=0,
+                intent_level="无效",
+                current_node="号码缺失",
+                outcome="失败",
+                transcript="系统：该商家没有电话，未提交到 UC100 线路。",
+                need_handoff=False,
+                recall_at=None,
+                lead_status="号码缺失",
+                gateway_call_id=None,
+                gateway_status="skipped",
+                raw_payload='{"provider":"asterisk","reason":"missing_phone"}',
+            )
+
+        try:
+            with AsteriskAmiClient() as client:
+                result = client.originate(
+                    attempt.lead.phone,
+                    variables={
+                        "AI_ACQ_TASK_ID": attempt.task.id,
+                        "AI_ACQ_LEAD_ID": attempt.lead.id,
+                        "AI_ACQ_SEAT": attempt.ai_seat,
+                    },
+                )
+        except AsteriskAmiError as exc:
+            return CallResult(
+                duration_seconds=0,
+                intent_level="D",
+                current_node="线路提交失败",
+                outcome="失败",
+                transcript=f"系统：UC100/Asterisk 外呼提交失败：{exc}",
+                need_handoff=False,
+                recall_at=None,
+                lead_status="外呼失败",
+                gateway_call_id=None,
+                gateway_status="failed",
+                raw_payload=json.dumps({"provider": "asterisk", "error": str(exc)}, ensure_ascii=False),
+            )
+
+        return CallResult(
+            duration_seconds=0,
+            intent_level="待判定",
+            current_node="已提交线路网关",
+            outcome="拨号已提交" if result.accepted else "失败",
+            transcript=f"系统：已通过 UC100/Asterisk 提交外呼请求。{result.message}",
+            need_handoff=False,
+            recall_at=None,
+            lead_status="外呼中" if result.accepted else "外呼失败",
+            gateway_call_id=result.action_id,
+            gateway_status=result.status,
+            raw_payload=result.raw_payload,
         )
 
 

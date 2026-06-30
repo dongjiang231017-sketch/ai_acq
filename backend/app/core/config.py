@@ -27,8 +27,16 @@ class Settings(BaseSettings):
     asterisk_ami_port: int = 5038
     asterisk_ami_username: str = ""
     asterisk_ami_password: str = ""
+    asterisk_ami_timeout_seconds: int = 5
     asterisk_originate_context: str = "from-ai-acq"
+    asterisk_originate_extension: str = "s"
+    asterisk_originate_channel_template: str = "PJSIP/{phone}@{trunk}"
+    asterisk_originate_timeout_ms: int = 30000
+    asterisk_caller_id: str = "AI获客"
     asterisk_trunk_name: str = "uc100"
+    asterisk_max_channels: int = 1
+    asterisk_live_call_enabled: bool = False
+    asterisk_bulk_call_enabled: bool = False
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"
