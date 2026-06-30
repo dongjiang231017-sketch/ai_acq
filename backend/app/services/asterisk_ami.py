@@ -11,6 +11,10 @@ class AsteriskAmiError(RuntimeError):
     pass
 
 
+class AsteriskAmiValidationError(AsteriskAmiError):
+    pass
+
+
 @dataclass(frozen=True)
 class AmiResponse:
     response: str
@@ -46,7 +50,7 @@ class AsteriskHealth:
 
     @property
     def ready_for_test_call(self) -> bool:
-        return self.configured and self.authenticated and self.ping_ok and self.trunk_configured and self.trunk_reachable is not False
+        return self.configured and self.authenticated and self.ping_ok and self.trunk_configured and self.trunk_reachable is True
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -168,19 +172,22 @@ class AsteriskAmiClient:
     def originate(self, phone: str, caller_id: str | None = None, variables: dict[str, str] | None = None) -> AsteriskOriginateResult:
         action_id = f"ai-acq-{uuid4().hex}"
         channel = render_originate_channel(phone)
-        payload = {
+        payload: dict[str, str | list[str]] = {
             "Action": "Originate",
             "ActionID": action_id,
             "Channel": channel,
             "Context": settings.asterisk_originate_context,
             "Exten": settings.asterisk_originate_extension,
             "Priority": "1",
-            "CallerID": caller_id or settings.asterisk_caller_id,
+            "CallerID": clean_ami_field_value(caller_id or settings.asterisk_caller_id, "AMI CallerID"),
             "Timeout": str(settings.asterisk_originate_timeout_ms),
             "Async": "true",
         }
         if variables:
-            payload["Variable"] = "|".join(f"{key}={value}" for key, value in variables.items())
+            payload["Variable"] = [
+                f"{clean_ami_field_value(key, 'AMI Variable')}={clean_ami_field_value(value, 'AMI Variable')}"
+                for key, value in variables.items()
+            ]
         response = self.send_action(payload)
         accepted = response.ok
         return AsteriskOriginateResult(
@@ -201,10 +208,15 @@ class AsteriskAmiClient:
             ),
         )
 
-    def send_action(self, fields: dict[str, str]) -> AmiResponse:
+    def send_action(self, fields: dict[str, str | list[str]]) -> AmiResponse:
         if self._socket is None:
             raise AsteriskAmiError("Asterisk AMI 尚未连接")
-        lines = [f"{key}: {value}" for key, value in fields.items()]
+        lines: list[str] = []
+        for key, value in fields.items():
+            header_name = clean_ami_field_value(key, "AMI header")
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                lines.append(f"{header_name}: {clean_ami_field_value(item, header_name)}")
         payload = "\r\n".join(lines) + "\r\n\r\n"
         try:
             self._socket.sendall(payload.encode("utf-8"))
@@ -240,11 +252,31 @@ class AsteriskAmiClient:
         return b"".join(chunks).decode("utf-8", errors="replace")
 
 
+def clean_ami_field_value(value: object, field_name: str) -> str:
+    text = str(value)
+    if any(char in text for char in ("\r", "\n", "\x00")):
+        raise AsteriskAmiValidationError(f"{field_name} 不能包含换行或控制字符")
+    return text
+
+
+def normalize_originate_phone(phone: str) -> str:
+    if any(char in phone for char in ("\r", "\n", "\x00")):
+        raise AsteriskAmiValidationError("测试号码不能包含换行或控制字符")
+    normalized = "".join(char for char in phone.strip() if char not in {" ", "\t", "-", "(", ")"})
+    if not normalized:
+        raise AsteriskAmiValidationError("测试号码不能为空")
+    allowed = set("0123456789+*#,")
+    if any(char not in allowed for char in normalized):
+        raise AsteriskAmiValidationError("测试号码只能包含数字、+、*、#、逗号、空格、横线或括号")
+    return normalized
+
+
 def render_originate_channel(phone: str) -> str:
-    return settings.asterisk_originate_channel_template.format(
-        phone=phone,
+    channel = settings.asterisk_originate_channel_template.format(
+        phone=normalize_originate_phone(phone),
         trunk=settings.asterisk_trunk_name,
     )
+    return clean_ami_field_value(channel, "AMI Channel")
 
 
 def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
@@ -317,6 +349,9 @@ def check_asterisk_health() -> AsteriskHealth:
 def originate_test_call(phone: str, caller_id: str | None = None) -> AsteriskOriginateResult:
     if not settings.asterisk_live_call_enabled:
         raise AsteriskAmiError("真实线路拨号开关未启用，请先设置 ASTERISK_LIVE_CALL_ENABLED=true")
+    render_originate_channel(phone)
+    if caller_id:
+        clean_ami_field_value(caller_id, "AMI CallerID")
     with AsteriskAmiClient() as client:
         return client.originate(phone, caller_id=caller_id, variables={"AI_ACQ_TEST_CALL": "1"})
 

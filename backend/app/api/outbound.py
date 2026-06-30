@@ -21,7 +21,13 @@ from app.schemas.task import (
     TelephonyTestCallCreate,
     TelephonyTestCallRead,
 )
-from app.services.asterisk_ami import AsteriskAmiError, check_asterisk_health, originate_test_call
+from app.services.asterisk_ami import (
+    AsteriskAmiError,
+    AsteriskAmiValidationError,
+    check_asterisk_health,
+    originate_test_call,
+)
+from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
 
@@ -100,6 +106,8 @@ def telephony_health() -> dict[str, object]:
 def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, object]:
     try:
         result = originate_test_call(payload.phone, caller_id=payload.caller_id)
+    except AsteriskAmiValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
@@ -163,7 +171,10 @@ def start_outbound_task(task_id: str, db: Session = Depends(get_db)) -> Outreach
         db.refresh(task)
         return task
 
-    return run_outbound_task(task.id, db)
+    try:
+        return run_outbound_task(task.id, db)
+    except OutboundGatewayConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/records", response_model=list[CallRecordRead])

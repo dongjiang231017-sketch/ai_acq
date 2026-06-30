@@ -3,6 +3,7 @@ import logging
 import time
 
 from app.db.session import SessionLocal
+from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import pop_outbound_task
 from app.services.outbound_runner import run_outbound_task
 
@@ -15,7 +16,11 @@ def process_once(timeout_seconds: int = 5) -> bool:
         return False
 
     with SessionLocal() as db:
-        run_outbound_task(task_id, db)
+        try:
+            run_outbound_task(task_id, db)
+        except OutboundGatewayConfigurationError as exc:
+            logger.error("outbound task %s did not start: %s", task_id, exc)
+            return True
     logger.info("processed outbound task %s", task_id)
     return True
 

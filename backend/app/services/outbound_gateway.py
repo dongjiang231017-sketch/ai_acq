@@ -6,7 +6,11 @@ from typing import Protocol
 from app.core.config import settings
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
-from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError
+from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, render_originate_channel
+
+
+class OutboundGatewayConfigurationError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -111,9 +115,9 @@ class SimulatorGateway:
 class AsteriskGateway:
     def place_call(self, attempt: CallAttempt) -> CallResult:
         if not settings.asterisk_live_call_enabled:
-            raise RuntimeError("Asterisk live call is disabled; set ASTERISK_LIVE_CALL_ENABLED=true after UC100 line testing.")
+            raise OutboundGatewayConfigurationError("真实线路拨号开关未启用，请先完成 UC100 单号试拨。")
         if not settings.asterisk_bulk_call_enabled:
-            raise RuntimeError("Asterisk bulk outbound is disabled; enable ASTERISK_BULK_CALL_ENABLED only after one-number tests pass.")
+            raise OutboundGatewayConfigurationError("批量真实外呼未启用，请确认单号试拨稳定后再开启。")
         if not attempt.lead.phone:
             return CallResult(
                 duration_seconds=0,
@@ -130,6 +134,7 @@ class AsteriskGateway:
             )
 
         try:
+            render_originate_channel(attempt.lead.phone)
             with AsteriskAmiClient() as client:
                 result = client.originate(
                     attempt.lead.phone,

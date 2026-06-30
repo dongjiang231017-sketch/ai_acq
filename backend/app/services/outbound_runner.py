@@ -6,7 +6,12 @@ from sqlalchemy.orm import Session
 
 from app.models.lead import MerchantLead
 from app.models.task import CallRecord, OutreachTask
-from app.services.outbound_gateway import CallAttempt, OutboundGateway, get_outbound_gateway
+from app.services.outbound_gateway import (
+    CallAttempt,
+    OutboundGateway,
+    OutboundGatewayConfigurationError,
+    get_outbound_gateway,
+)
 
 
 def get_task_leads(db: Session, task: OutreachTask) -> list[MerchantLead]:
@@ -45,34 +50,40 @@ def run_outbound_task(task_id: str, db: Session, gateway: OutboundGateway | None
     task.intent_count = 0
     task.failed_count = 0
 
-    for index, lead in enumerate(leads):
-        ai_seat = f"AI-{index % max(task.concurrency, 1) + 1:02d}"
-        result = active_gateway.place_call(CallAttempt(task=task, lead=lead, ai_seat=ai_seat, sequence=index))
-        record = CallRecord(
-            task_id=task.id,
-            lead_id=lead.id,
-            merchant_name=lead.name,
-            phone=lead.phone,
-            ai_seat=ai_seat,
-            duration_seconds=result.duration_seconds,
-            intent_level=result.intent_level,
-            current_node=result.current_node,
-            outcome=result.outcome,
-            transcript=result.transcript,
-            gateway_call_id=result.gateway_call_id,
-            gateway_status=result.gateway_status,
-            raw_payload=result.raw_payload,
-            need_handoff=result.need_handoff,
-            recall_at=result.recall_at,
-        )
-        db.add(record)
-        lead.status = result.lead_status
-        if record.outcome in {"有意向", "已接通", "稍后联系"}:
-            task.connected_count += 1
-        if record.intent_level in {"A", "B"}:
-            task.intent_count += 1
-        if record.outcome == "失败":
-            task.failed_count += 1
+    try:
+        for index, lead in enumerate(leads):
+            ai_seat = f"AI-{index % max(task.concurrency, 1) + 1:02d}"
+            result = active_gateway.place_call(CallAttempt(task=task, lead=lead, ai_seat=ai_seat, sequence=index))
+            record = CallRecord(
+                task_id=task.id,
+                lead_id=lead.id,
+                merchant_name=lead.name,
+                phone=lead.phone,
+                ai_seat=ai_seat,
+                duration_seconds=result.duration_seconds,
+                intent_level=result.intent_level,
+                current_node=result.current_node,
+                outcome=result.outcome,
+                transcript=result.transcript,
+                gateway_call_id=result.gateway_call_id,
+                gateway_status=result.gateway_status,
+                raw_payload=result.raw_payload,
+                need_handoff=result.need_handoff,
+                recall_at=result.recall_at,
+            )
+            db.add(record)
+            lead.status = result.lead_status
+            if record.outcome in {"有意向", "已接通", "稍后联系"}:
+                task.connected_count += 1
+            if record.intent_level in {"A", "B"}:
+                task.intent_count += 1
+            if record.outcome == "失败":
+                task.failed_count += 1
+    except OutboundGatewayConfigurationError:
+        task.status = "启动失败"
+        task.finished_at = datetime.utcnow()
+        db.commit()
+        raise
 
     task.completed_count = len(leads)
     task.status = "已完成"
