@@ -1051,6 +1051,10 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.voice-default-copy .voice-library-count {
+  color: #2473f6;
+}
+
 .voice-default-actions,
 .voice-preview-actions {
   display: flex;
@@ -1271,6 +1275,63 @@ button:disabled {
   border: 1px solid #ffd1d1;
   background: #fff7f7;
   color: #b42318;
+}
+
+.voice-id-cell {
+  min-width: 220px;
+  max-width: 320px;
+}
+
+.voice-id-cell code {
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  display: block;
+  background: #f8fbff;
+  color: #25344d;
+  padding: 8px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.muted-cell {
+  color: #8897ad;
+  font-weight: 900;
+}
+
+.voice-record-status {
+  min-height: 26px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #eef4fb;
+  color: #53647e;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.voice-record-status.is-ready {
+  background: #e8fff4;
+  color: #12a76c;
+}
+
+.voice-record-status.is-failed {
+  background: #fff0f0;
+  color: #c0362c;
+}
+
+.voice-result-cell {
+  min-width: 260px;
+  max-width: 420px;
+  color: #53647e;
+  font-weight: 800;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .funnel-list,

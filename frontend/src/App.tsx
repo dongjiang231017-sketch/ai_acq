@@ -3205,7 +3205,13 @@ function App() {
 
         <section className="metrics outbound-metrics">
           <MetricCard icon={<Headphones size={20} />} label="克隆档案" value={voiceOverview.profiles} detail="客户/员工授权" tone="blue" />
-          <MetricCard icon={<Radio size={20} />} label="系统音色" value={systemVoices.length || voiceOverview.systemVoices} detail={activeSystemVoice?.name ?? voiceOverview.defaultVoice} tone="green" />
+          <MetricCard
+            icon={<Radio size={20} />}
+            label="声音库"
+            value={availableCloneVoiceRecords.length + (systemVoices.length || voiceOverview.systemVoices)}
+            detail={`复刻 ${availableCloneVoiceRecords.length} / 系统 ${systemVoices.length || voiceOverview.systemVoices}`}
+            tone="green"
+          />
           <MetricCard icon={<ShieldAlert size={20} />} label="克隆服务" value={voiceProviderStatus.status || voiceOverview.cloneEngineStatus} detail={voiceProviderStatus.engineName || voiceOverview.cloneEngineName || "未配置真实引擎"} tone="amber" />
           <MetricCard icon={<Activity size={20} />} label="使用记录" value={voiceOverview.usageRecords} detail="审计留痕" tone="rose" />
         </section>
@@ -3380,6 +3386,9 @@ function App() {
                     {activeSystemVoice
                       ? `${activeSystemVoice.provider} · ${activeSystemVoice.voiceParam} · ${activeSystemVoice.gender} · ${activeSystemVoice.style} · ${activeSystemVoice.scenario}`
                       : `${systemVoices.length || voiceOverview.systemVoices} 个系统音色可用`}
+                  </small>
+                  <small className="voice-library-count">
+                    声音库 · 已复刻 {availableCloneVoiceRecords.length} · 系统 {systemVoices.length || voiceOverview.systemVoices}
                   </small>
                 </div>
                 <div className="voice-default-actions">
@@ -3692,11 +3701,20 @@ function App() {
                   <tbody>
                     {customerVoiceCloneRecords.map((record) => (
                       <tr key={record.id}>
-                        <td>{record.clonedVoiceName}</td>
-                        <td>{record.externalVoiceId || "未生成"}</td>
+                        <td>
+                          <strong>{record.clonedVoiceName}</strong>
+                          <small>{record.status === "可用" ? "已进入声音库" : "复刻记录"}</small>
+                        </td>
+                        <td className="voice-id-cell">
+                          {record.externalVoiceId ? <code>{record.externalVoiceId}</code> : <span className="muted-cell">未生成</span>}
+                        </td>
                         <td>{record.sampleCount} 条 / {record.sampleMinutes} 分钟</td>
                         <td>{record.engine}</td>
-                        <td>{record.status}</td>
+                        <td>
+                          <span className={`voice-record-status ${record.status === "可用" ? "is-ready" : record.status === "失败" ? "is-failed" : ""}`}>
+                            {record.status}
+                          </span>
+                        </td>
                         <td>
                           {record.previewAudioUrl ? (
                             <audio controls preload="none" src={apiAssetUrl(record.previewAudioUrl)} />
@@ -3704,7 +3722,7 @@ function App() {
                             "暂无"
                           )}
                         </td>
-                        <td>{record.result}</td>
+                        <td className="voice-result-cell">{record.result}</td>
                         <td>{new Date(record.createdAt).toLocaleString()}</td>
                       </tr>
                     ))}
