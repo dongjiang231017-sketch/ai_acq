@@ -125,7 +125,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             "warn" if not bridge_ready else "pass",
             "mock_media" if not bridge_ready else "asterisk_external_media",
             120,
-            "今天使用模拟媒体入口；UC100 识卡、Asterisk trunk 和 AMI 单号试拨通过后切到 ExternalMedia/AudioSocket。",
+            "今天使用模拟媒体入口；UC100 识卡、客户端内置 Asterisk trunk 和 AMI 单号试拨通过后切到 ExternalMedia/AudioSocket。",
         ),
         _pipeline_step("asr", "流式 ASR", "pass", "Paraformer realtime adapter", 380, "按 WebSocket 流式输入设计，当前用文本模拟最终识别事件。"),
         _pipeline_step("router", "快速意图路由", "pass", "local intent rules", 50, "价格、拒绝、稍后联系、加微信、身份确认等高频意图先走规则。"),
@@ -142,7 +142,7 @@ def build_realtime_pipeline() -> dict[str, object]:
         "estimatedAiCostPerMinute": 0.04,
         "readyForMockCall": True,
         "readyForAsteriskMedia": bridge_ready,
-        "nextStep": "可先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接 Asterisk 媒体桥。",
+        "nextStep": "可先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接客户端内置 Asterisk 媒体桥。",
         "steps": steps,
     }
 

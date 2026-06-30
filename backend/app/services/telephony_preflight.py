@@ -40,7 +40,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "网关模式",
                 "warn",
                 "当前仍是模拟线路，代码不会访问 UC100。",
-                "实机联调时设置 TELEPHONY_GATEWAY_MODE=asterisk。",
+                "实机联调时让后端读取客户端生成的 backend-asterisk.env，并设置 TELEPHONY_GATEWAY_MODE=asterisk。",
             )
         )
 
@@ -53,7 +53,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "AMI 账号",
                 "fail",
                 "AMI 用户名或密码未配置。",
-                "在 backend/.env 配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。",
+                "优先使用桌面客户端内置 Asterisk 生成的 backend-asterisk.env；开发调试才手工配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。",
             )
         )
 
@@ -65,8 +65,8 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "ami_reachable",
                 "AMI 连接",
                 "fail",
-                "后端连不上 Asterisk AMI。",
-                "检查 ASTERISK_HOST、ASTERISK_AMI_PORT、Asterisk manager.conf bindaddr/permit、防火墙。",
+                "后端连不上客户端内置 Asterisk AMI。",
+                "检查客户端 sidecar 是否已启动、ASTERISK_HOST、ASTERISK_AMI_PORT、manager.conf bindaddr/permit、防火墙。",
             )
         )
     else:
@@ -170,7 +170,7 @@ def _next_step(
     if first_fail:
         return first_fail.action or first_fail.detail
     if not ready_for_device_test:
-        return "先把网关切到 Asterisk，并确认 AMI 登录、Ping、trunk 可达。"
+        return "先启动客户端内置 Asterisk，把网关切到 Asterisk，并确认 AMI 登录、Ping、trunk 可达。"
     if not ready_for_single_number_test:
         return "设备链路已基本可测；打开 ASTERISK_LIVE_CALL_ENABLED=true 后做单号试拨。"
     if not ready_for_bulk_tasks:

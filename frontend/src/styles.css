@@ -716,6 +716,108 @@ button:disabled {
   gap: 16px;
 }
 
+.asterisk-sidecar-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.85fr) auto;
+  gap: 12px;
+  align-items: stretch;
+  border: 1px solid #dce7f5;
+  border-left-width: 4px;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.asterisk-sidecar-strip.is-pass {
+  border-left-color: #0c9f6f;
+}
+
+.asterisk-sidecar-strip.is-warn {
+  border-left-color: #b77a00;
+}
+
+.asterisk-sidecar-strip.is-fail {
+  border-left-color: #d64545;
+}
+
+.asterisk-sidecar-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.asterisk-sidecar-main strong,
+.asterisk-sidecar-check strong {
+  display: block;
+  color: #26364d;
+  font-size: 15px;
+  font-weight: 950;
+  line-height: 1.35;
+}
+
+.asterisk-sidecar-main small,
+.asterisk-sidecar-check small {
+  display: block;
+  margin-top: 5px;
+  color: #65768f;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.asterisk-sidecar-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.asterisk-sidecar-meta div {
+  border: 1px solid #e4edf7;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+}
+
+.asterisk-sidecar-meta span {
+  display: block;
+  color: #738299;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.asterisk-sidecar-meta strong {
+  display: block;
+  margin-top: 5px;
+  color: #26364d;
+  font-size: 13px;
+  font-weight: 950;
+  overflow-wrap: anywhere;
+}
+
+.asterisk-sidecar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.asterisk-sidecar-checks {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.asterisk-sidecar-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border-top: 1px solid #e5edf7;
+  padding-top: 10px;
+}
+
 .line-health-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -2945,6 +3047,18 @@ button:disabled {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .asterisk-sidecar-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .asterisk-sidecar-actions {
+    justify-content: flex-start;
+  }
+
+  .asterisk-sidecar-checks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .line-preflight-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3063,6 +3177,8 @@ button:disabled {
 @media (max-width: 560px) {
   .nav-list,
   .form-grid,
+  .asterisk-sidecar-meta,
+  .asterisk-sidecar-checks,
   .line-health-grid,
   .line-preflight-steps,
   .intercept-summary,

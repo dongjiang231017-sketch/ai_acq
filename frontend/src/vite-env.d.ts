@@ -49,6 +49,37 @@ type AiAcqDesktopCommentAutomationResult = AiAcqDesktopCommentCaptureResult & {
   dmActions: AiAcqDesktopDmAction[];
 };
 
+type AiAcqDesktopAsteriskCheck = {
+  key: string;
+  label: string;
+  status: "pass" | "warn" | "fail" | string;
+  detail: string;
+};
+
+type AiAcqDesktopAsteriskStatus = {
+  deliveryMode: string;
+  runtimeMode: string;
+  runtimeFound: boolean;
+  runtimePath: string;
+  status: "running" | "starting" | "stopped" | "blocked" | string;
+  running: boolean;
+  managedPid: number | null;
+  amiHost: string;
+  amiPort: number;
+  sipPort: number;
+  trunkName: string;
+  uc100Host: string;
+  uc100SipPort: number;
+  maxChannels: number;
+  configDir: string;
+  stateDir: string;
+  backendEnvPath: string;
+  backendEnvReady: boolean;
+  checks: AiAcqDesktopAsteriskCheck[];
+  lastExit: { code: number | null; signal: string | null; at: string } | null;
+  nextStep: string;
+};
+
 interface Window {
   aiAcqDesktop?: {
     isDesktopClient: boolean;
@@ -68,5 +99,8 @@ interface Window {
       dmMessage?: string;
       allowSend?: boolean;
     }) => Promise<AiAcqDesktopCommentAutomationResult>;
+    getAsteriskSidecarStatus: () => Promise<AiAcqDesktopAsteriskStatus>;
+    startAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;
+    stopAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;
   };
 }

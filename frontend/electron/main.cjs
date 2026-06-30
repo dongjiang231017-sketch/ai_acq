@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, webContents } = require("electron");
 const path = require("path");
+const { createAsteriskSidecar } = require("./asterisk-sidecar.cjs");
 
 const PLATFORM_SESSION_DOMAINS = {
   "美团": ["meituan.com"],
@@ -12,6 +13,7 @@ const SESSION_MARKERS = ["auth", "login", "passport", "session", "sid", "sso", "
 
 const userDataDir = path.join(__dirname, "..", ".electron-user-data");
 app.setPath("userData", userDataDir);
+const asteriskSidecar = createAsteriskSidecar({ userDataDir });
 
 function domainsForPlatform(platform) {
   return PLATFORM_SESSION_DOMAINS[platform] ?? [];
@@ -774,6 +776,12 @@ ipcMain.handle("comment-intercept:capture", async (_event, payload) => {
 
 ipcMain.handle("comment-intercept:automate", async (_event, payload) => runCommentAutomation(payload));
 
+ipcMain.handle("asterisk-sidecar:status", async () => asteriskSidecar.status());
+
+ipcMain.handle("asterisk-sidecar:start", async () => asteriskSidecar.start());
+
+ipcMain.handle("asterisk-sidecar:stop", async () => asteriskSidecar.stop());
+
 function createWindow() {
   const window = new BrowserWindow({
     width: 1440,
@@ -809,4 +817,8 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  void asteriskSidecar.stop();
 });

@@ -1,8 +1,8 @@
 # UC100 / Asterisk 配置样例
 
-这份样例用于把 UC100 作为 Asterisk 的 `PJSIP` trunk，再由 AI 外呼系统通过 AMI 提交 `Originate`。
+这份样例用于把 UC100 作为客户端内置 Asterisk sidecar 的 `PJSIP` trunk，再由 AI 外呼系统通过本机 AMI 提交 `Originate`。
 
-实际字段会因 UC100 固件和现场网络不同而变化。请把 `UC100_IP`、`AMI_PASSWORD`、`UC100_SIP_USER`、`UC100_SIP_PASSWORD` 替换为现场值，不要提交真实密码。
+实际字段会因 UC100 固件和现场网络不同而变化。客户交付版优先由桌面客户端生成配置和 AMI 密钥；手工调试时请把 `UC100_IP`、`AMI_PASSWORD`、`UC100_SIP_USER`、`UC100_SIP_PASSWORD` 替换为现场值，不要提交真实密码。
 
 ## 1. manager.conf
 
@@ -11,15 +11,14 @@
 enabled = yes
 webenabled = no
 port = 5038
-bindaddr = 0.0.0.0
+bindaddr = 127.0.0.1
 
 [ai_acq]
 secret = AMI_PASSWORD
 read = system,call,command,agent,user,originate
 write = system,call,command,agent,user,originate
-; 建议只允许后端所在机器访问
+; 客户端 sidecar 只允许客户电脑本机后端访问
 permit = 127.0.0.1/255.255.255.255
-; permit = BACKEND_SERVER_IP/255.255.255.255
 ```
 
 对应 `backend/.env`：
@@ -32,7 +31,7 @@ ASTERISK_AMI_PORT=5038
 
 ## 2. pjsip.conf：Asterisk 主动呼叫 UC100 IP
 
-如果 UC100 在局域网有固定 IP，且 Asterisk 直接把呼叫送到 UC100：
+如果 UC100 在局域网有固定 IP，且客户端内置 Asterisk 直接把呼叫送到 UC100：
 
 ```ini
 [transport-udp]
@@ -52,7 +51,8 @@ from_user = UC100_SIP_USER
 
 [uc100]
 type = aor
-contact = sip:UC100_IP:5060
+; 当前 UC100 实机 WAN SIP 常见监听是 5080；如果接 UC100 LAN 侧再改为 5060。
+contact = sip:UC100_IP:5080
 qualify_frequency = 30
 
 [uc100-auth]
@@ -76,7 +76,7 @@ ASTERISK_ORIGINATE_CHANNEL_TEMPLATE=PJSIP/{phone}@{trunk}
 
 ## 3. pjsip.conf：UC100 注册到 Asterisk
 
-如果 UC100 配置为向 Asterisk 注册，常见写法是：
+如果 UC100 配置为向客户端内置 Asterisk 注册，常见写法是：
 
 ```ini
 [uc100]
@@ -135,7 +135,7 @@ asterisk -rx "dialplan show from-ai-acq"
 asterisk -rx "channel originate PJSIP/你的测试手机号@uc100 extension s@from-ai-acq"
 ```
 
-如果这条命令不能让手机响铃，先修 Asterisk/UC100/SIM 卡链路，不要改 AI 外呼系统。
+如果这条命令不能让手机响铃，先修客户端 sidecar、UC100、SIM 卡链路，不要改 AI 外呼系统。
 
 ## 6. 系统预检
 

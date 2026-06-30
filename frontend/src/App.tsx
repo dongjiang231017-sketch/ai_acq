@@ -1192,6 +1192,21 @@ function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHeal
   return health.trunkStatus || "UC100 线路待测试";
 }
 
+function asteriskSidecarStatusText(status?: AiAcqDesktopAsteriskStatus | null) {
+  if (!status) return "待检测";
+  if (status.running && status.status === "running") return "已运行";
+  if (status.status === "starting") return "启动中";
+  if (status.runtimeFound) return "可启动";
+  return "缺少运行时";
+}
+
+function asteriskSidecarBadgeStatus(status?: AiAcqDesktopAsteriskStatus | null) {
+  if (!status) return "warn";
+  if (status.running && status.status === "running") return "pass";
+  if (!status.runtimeFound) return "fail";
+  return "warn";
+}
+
 function telephonyPreflightStatusText(status: string) {
   if (status === "pass") return "PASS";
   if (status === "fail") return "FAIL";
@@ -1399,6 +1414,8 @@ function App() {
   const [isCheckingDmLogin, setIsCheckingDmLogin] = useState(false);
   const [checkingDmAccountId, setCheckingDmAccountId] = useState<string | null>(null);
   const [isDesktopClient, setIsDesktopClient] = useState(false);
+  const [asteriskSidecarStatus, setAsteriskSidecarStatus] = useState<AiAcqDesktopAsteriskStatus | null>(null);
+  const [isStartingAsteriskSidecar, setIsStartingAsteriskSidecar] = useState(false);
   const [selectedDmLoginAccountId, setSelectedDmLoginAccountId] = useState<string | null>(null);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
@@ -1687,6 +1704,11 @@ function App() {
   useEffect(() => {
     setIsDesktopClient(Boolean(window.aiAcqDesktop?.isDesktopClient));
   }, []);
+
+  useEffect(() => {
+    if (!isDesktopClient || !window.aiAcqDesktop?.getAsteriskSidecarStatus) return;
+    void refreshAsteriskSidecarStatus();
+  }, [isDesktopClient]);
 
   useEffect(() => {
     if (activeModule !== "dm" || activeDmTab !== "评论截流") return;
@@ -1989,6 +2011,38 @@ function App() {
     setActiveOutboundTab("实时监听");
   }
 
+  async function refreshAsteriskSidecarStatus() {
+    if (!isDesktopClient || !window.aiAcqDesktop?.getAsteriskSidecarStatus) {
+      setAsteriskSidecarStatus(null);
+      return;
+    }
+    try {
+      const status = await window.aiAcqDesktop.getAsteriskSidecarStatus();
+      setAsteriskSidecarStatus(status);
+    } catch (error) {
+      setTelephonyMessage(error instanceof Error ? error.message : "内置 Asterisk 状态读取失败");
+    }
+  }
+
+  async function startAsteriskSidecar() {
+    if (!isDesktopClient || !window.aiAcqDesktop?.startAsteriskSidecar) {
+      setTelephonyMessage("请在客户桌面客户端中启动内置 Asterisk。");
+      return;
+    }
+    setIsStartingAsteriskSidecar(true);
+    setTelephonyMessage("正在启动客户端内置 Asterisk...");
+    try {
+      const status = await window.aiAcqDesktop.startAsteriskSidecar();
+      setAsteriskSidecarStatus(status);
+      setTelephonyMessage(status.nextStep);
+      await refreshTelephonyStatus();
+    } catch (error) {
+      setTelephonyMessage(error instanceof Error ? error.message : "内置 Asterisk 启动失败");
+    } finally {
+      setIsStartingAsteriskSidecar(false);
+    }
+  }
+
   async function refreshTelephonyStatus() {
     setIsCheckingTelephony(true);
     setTelephonyMessage("正在预检 UC100/Asterisk 线路...");
@@ -1998,6 +2052,7 @@ function App() {
       setTelephonyHealth(preflight.health);
       setTelephonyPreflight(preflight);
       setTelephonyMessage(preflight.nextStep || telephonyReadinessDetail(config, preflight.health));
+      await refreshAsteriskSidecarStatus();
     } catch (error) {
       setTelephonyMessage(error instanceof Error ? error.message : "线路预检失败");
     } finally {
@@ -4679,7 +4734,7 @@ function App() {
             <article className="panel span-2 line-health-panel">
               <div className="panel-title">
                 <div>
-                  <p>UC100 / Asterisk</p>
+                  <p>客户端Asterisk / UC100</p>
                   <h2>真实线路接入</h2>
                 </div>
                 <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
@@ -4687,6 +4742,83 @@ function App() {
                   {isCheckingTelephony ? "预检中" : "预检线路"}
                 </button>
               </div>
+              <div className={`asterisk-sidecar-strip is-${asteriskSidecarBadgeStatus(asteriskSidecarStatus)}`}>
+                <div className="asterisk-sidecar-main">
+                  <span className={`line-preflight-badge is-${asteriskSidecarBadgeStatus(asteriskSidecarStatus)}`}>
+                    {asteriskSidecarStatus?.running ? "PASS" : asteriskSidecarStatus?.runtimeFound ? "WARN" : "FAIL"}
+                  </span>
+                  <div>
+                    <strong>客户端内置 Asterisk：{isDesktopClient ? asteriskSidecarStatusText(asteriskSidecarStatus) : "仅桌面客户端可用"}</strong>
+                    <small>
+                      {isDesktopClient
+                        ? asteriskSidecarStatus?.nextStep ?? "正在等待客户端侧线路运行时检测。"
+                        : "网页预览只用于查看功能；客户交付时由桌面客户端管理 Asterisk 和本机 AMI 配置。"}
+                    </small>
+                  </div>
+                </div>
+                <div className="asterisk-sidecar-meta">
+                  <div>
+                    <span>AMI</span>
+                    <strong>
+                      {asteriskSidecarStatus ? `${asteriskSidecarStatus.amiHost}:${asteriskSidecarStatus.amiPort}` : "127.0.0.1:5038"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>UC100</span>
+                    <strong>
+                      {asteriskSidecarStatus ? `${asteriskSidecarStatus.uc100Host}:${asteriskSidecarStatus.uc100SipPort}` : "192.168.10.100:5080"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>配置</span>
+                    <strong>{asteriskSidecarStatus?.backendEnvReady ? "已生成" : "待生成"}</strong>
+                  </div>
+                </div>
+                <div className="asterisk-sidecar-actions">
+                  <button
+                    className="primary-button"
+                    disabled={
+                      !isDesktopClient ||
+                      isStartingAsteriskSidecar ||
+                      Boolean(asteriskSidecarStatus?.running) ||
+                      Boolean(asteriskSidecarStatus && !asteriskSidecarStatus.runtimeFound)
+                    }
+                    onClick={startAsteriskSidecar}
+                    type="button"
+                  >
+                    <Zap size={16} />
+                    {asteriskSidecarStatus?.running
+                      ? "已启动"
+                      : isStartingAsteriskSidecar
+                        ? "启动中"
+                        : asteriskSidecarStatus && !asteriskSidecarStatus.runtimeFound
+                          ? "缺少运行时"
+                          : "启动内置Asterisk"}
+                  </button>
+                  <button
+                    className="secondary-button icon-only"
+                    disabled={!isDesktopClient || isStartingAsteriskSidecar}
+                    onClick={() => void refreshAsteriskSidecarStatus()}
+                    title="刷新内置 Asterisk 状态"
+                    type="button"
+                  >
+                    <RefreshCw size={16} />
+                  </button>
+                </div>
+              </div>
+              {asteriskSidecarStatus && (
+                <div className="asterisk-sidecar-checks">
+                  {asteriskSidecarStatus.checks.map((check) => (
+                    <div className="asterisk-sidecar-check" key={check.key}>
+                      <span className={`line-preflight-badge is-${check.status}`}>{telephonyPreflightStatusText(check.status)}</span>
+                      <div>
+                        <strong>{check.label}</strong>
+                        <small>{check.detail}</small>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="line-health-grid">
                 <div>
                   <span>线路模式</span>

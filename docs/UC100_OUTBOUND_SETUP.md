@@ -1,16 +1,16 @@
 # UC100 实体电话卡外呼接入准备
 
-这份文档用于 UC100 到货前后的开发联调。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器，以及设备未识卡前可用的实时语音管线模拟接口。
+这份文档用于 UC100 到货前后的开发联调和客户交付。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器、客户端内置 Asterisk sidecar 管理入口，以及设备未识卡前可用的实时语音管线模拟接口。
 
 ## 当前可先做
 
 1. 使用模拟网关跑通外呼任务。
 2. 使用 Redis 队列验证 worker 消费任务。
 3. 在通话记录中保存 `gateway_call_id`、`gateway_status`、`raw_payload`。
-4. 准备 PostgreSQL、Redis、Asterisk 的本地或测试环境。
+4. 客户交付版使用桌面客户端内置 Asterisk sidecar；本机 Asterisk 只用于开发验证。
 5. 在 AI 外呼系统的「真实线路接入」面板做无拨号预检。
 6. 使用 `python -m app.tools.uc100_preflight` 做命令行无拨号预检。
-7. 参考 `docs/UC100_ASTERISK_SNIPPETS.md` 准备 Asterisk AMI、PJSIP trunk 和 dialplan。
+7. 参考 `docs/CLIENT_ASTERISK_SIDECAR.md` 和 `docs/UC100_ASTERISK_SNIPPETS.md` 准备 sidecar、PJSIP trunk 和 dialplan。
 8. 在 AI 外呼系统的「实时语音管线」面板创建模拟通话，验证 ASR、意图路由、LLM、TTS 分块和打断状态机。
 9. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
 
@@ -20,7 +20,7 @@
 实体 SIM 卡
   -> UC100
   -> SIP trunk
-  -> Asterisk
+  -> 客户端内置 Asterisk sidecar
   -> FastAPI / Redis worker / 实时媒体桥
   -> 流式 ASR / 快速意图路由 / LLM / 流式 TTS
   -> 通话记录 / 人工接管
@@ -50,7 +50,7 @@ OUTBOUND_QUEUE_NAME=ai_acq:outbound_tasks
 OUTBOUND_QUEUE_ENABLED=true
 ```
 
-Asterisk/UC100 模式预留配置：
+Asterisk/UC100 模式预留配置。客户交付版优先由桌面客户端生成 `backend-asterisk.env`，开发调试才手工写入：
 
 ```env
 TELEPHONY_GATEWAY_MODE=asterisk
@@ -199,10 +199,10 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 ## UC100 到货后的检查顺序
 
 1. 插 SIM 卡并确认能正常注册运营商网络。
-2. 给 UC100 配置固定局域网 IP。
-3. 按 `docs/UC100_ASTERISK_SNIPPETS.md` 在 Asterisk 配置 UC100 SIP/PJSIP trunk。
-4. 在 Asterisk 配置 AMI 用户，只开放测试环境访问。
-5. 从 Asterisk CLI 手动拨一个测试号码。
+2. 确认客户电脑和 UC100 在同一现场网络，并记录 UC100 WAN 地址。
+3. 打开桌面客户端，在 AI 外呼系统的「真实线路接入」面板检测/启动内置 Asterisk。
+4. 确认客户端已生成 `backend-asterisk.env`，后端读取该文件后再切 `TELEPHONY_GATEWAY_MODE=asterisk`。
+5. 按 `docs/UC100_ASTERISK_SNIPPETS.md` 检查 sidecar 的 UC100 SIP/PJSIP trunk。
 6. 确认通话状态、挂断原因、录音或音频流是否可用。
 7. 运行 `python -m app.tools.uc100_preflight --phone 你的测试手机号`，先让 AMI/trunk/Channel 检查通过。
 8. 再把 `TELEPHONY_GATEWAY_MODE` 从 `simulator` 切到 `asterisk`。
@@ -215,4 +215,4 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 - Asterisk ExternalMedia/AudioSocket 把真实电话音频流接入 ASR，再把 TTS 音频送回通话。
 - 人工接管时从 AI 通话转人工坐席。
 
-第一阶段代码已经提供 AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器、单号试拨接口和实时语音管线模拟通话。真实批量外呼仍需要在单号测试稳定后再开启。
+第一阶段代码已经提供客户端内置 Asterisk sidecar 状态/启动入口、AMI 健康检查、预检 API/CLI、受开关保护的真实 originate 适配器、单号试拨接口和实时语音管线模拟通话。真实批量外呼仍需要在单号测试稳定后再开启。
