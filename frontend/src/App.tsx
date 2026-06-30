@@ -1238,8 +1238,9 @@ function App() {
     if (!activeLoginAccount) return null;
     return dmPlatformConfigs.find((config) => config.platform === activeLoginAccount.platform) ?? null;
   }, [activeLoginAccount, dmPlatformConfigs]);
+  const activeLoginSession = dmLoginSession?.accountId === activeLoginAccount?.id ? dmLoginSession : null;
   const activeLoginUrl =
-    personalLoginUrl(activeLoginAccount?.platform ?? "", dmLoginSession?.loginUrl) ||
+    personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginSession?.loginUrl) ||
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginConfig?.homeUrl) ||
     personalLoginUrl(activeLoginAccount?.platform ?? "", activeLoginAccount ? platformLoginUrls[activeLoginAccount.platform] : "") ||
     "";
@@ -1329,12 +1330,12 @@ function App() {
     if (!viewport) return;
 
     viewport.replaceChildren();
-    if (!isDesktopClient || !dmLoginEntryReady || !dmLoginSession || !activeLoginAccount || !activeLoginUrl) return;
+    if (!isDesktopClient || !dmLoginEntryReady || !activeLoginSession || !activeLoginAccount || !activeLoginUrl) return;
 
     const webview = document.createElement("webview") as DmLoginWebviewElement;
     webview.className = "native-login-webview";
     webview.setAttribute("src", activeLoginUrl);
-    webview.setAttribute("partition", `persist:dm-${dmLoginSession.profileKey || dmLoginSession.accountId}`);
+    webview.setAttribute("partition", `persist:dm-${activeLoginSession.profileKey || activeLoginSession.accountId}`);
     webview.setAttribute("data-account-id", activeLoginAccount.id);
     webview.setAttribute("data-platform", activeLoginAccount.platform);
 
@@ -1359,7 +1360,7 @@ function App() {
       webview.remove();
       if (nativeLoginWebviewRef.current === webview) nativeLoginWebviewRef.current = null;
     };
-  }, [activeLoginAccount, activeLoginUrl, dmLoginEntryReady, dmLoginSession, isDesktopClient]);
+  }, [activeLoginAccount, activeLoginUrl, activeLoginSession, dmLoginEntryReady, isDesktopClient]);
 
   async function loadData() {
     setIsLoading(true);
@@ -1757,6 +1758,7 @@ function App() {
     setSelectedDmLoginAccountId(accountId);
     if (dmLoginSession?.accountId !== accountId) {
       setDmLoginEntryReady(false);
+      setDmLoginSession(null);
     }
     const account = dmAccounts.find((item) => item.id === accountId);
     setDmLoginMessage(
