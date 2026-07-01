@@ -76,6 +76,7 @@ class RealtimeSession:
     started_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
     events: list[RealtimeEvent] = field(default_factory=list)
+    conversation_history: list[dict[str, str]] = field(default_factory=list)
 
     def add_event(
         self,
@@ -142,7 +143,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             ),
         ),
         _pipeline_step("asr", "流式 ASR", "pass", settings.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
-        _pipeline_step("router", "快速意图路由", "pass", "local intent rules", 40, "价格、拒绝、稍后联系、加微信、身份确认等高频意图先走规则。"),
+        _pipeline_step("router", "快速意图路由", "pass", "context policy", 35, "拒绝、结束、稍后联系走规则；其余先用上下文电话策略，避免实时电话空等。"),
         _pipeline_step(
             "llm",
             "LLM 生成",
@@ -150,7 +151,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             settings.deepseek_chat_model if llm_ready else "local rules fallback",
             320 if llm_ready else 0,
             (
-                "DeepSeek 以非思考模式生成电话短句，失败时自动回退本地规则。"
+                "DeepSeek 可作为复杂场景增强；电话主链路优先使用上下文策略，慢或失败不会卡住通话。"
                 if llm_ready
                 else "未配置 DeepSeek 运行时密钥；真实电话会先使用本地规则兜底。"
             ),
@@ -160,7 +161,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             "流式 TTS",
             "pass",
             settings.dashscope_realtime_tts_model,
-            120,
+            140,
             "默认使用 Qwen-TTS 实时系统音色增量播放；客户在声音档案明确选择复刻音色时才切换到克隆音色。",
         ),
         _pipeline_step("barge_in", "打断处理", "pass", "VAD + playback queue cancel", 80, "AI 说话时收到客户插话会停止当前 TTS 并重新进入 listening。"),
@@ -230,8 +231,15 @@ def handle_customer_utterance(session_id: str, text: str, barge_in: bool = True)
     session.add_event("intent", "router", "matched", intent, f"路由到话术节点：{node}。", latency_ms=50)
 
     fallback_reply = _build_reply(clean_text, intent, session.merchant_name)
-    reply_result = generate_realtime_reply(clean_text, intent, session.merchant_name, fallback_reply)
+    reply_result = generate_realtime_reply(
+        clean_text,
+        intent,
+        session.merchant_name,
+        fallback_reply,
+        list(session.conversation_history),
+    )
     reply = reply_result.reply
+    _append_session_conversation_turn(session, clean_text, reply)
     session.add_event(
         "llm_reply",
         "assistant",
@@ -316,6 +324,13 @@ def _require_session(session_id: str) -> RealtimeSession:
     return session
 
 
+def _append_session_conversation_turn(session: RealtimeSession, customer_text: str, assistant_reply: str) -> None:
+    session.conversation_history.append({"role": "user", "content": customer_text.strip()})
+    session.conversation_history.append({"role": "assistant", "content": assistant_reply.strip()})
+    if len(session.conversation_history) > 8:
+        del session.conversation_history[: len(session.conversation_history) - 8]
+
+
 def _pipeline_step(key: str, label: str, status: str, provider: str, latency_ms: int, detail: str) -> dict[str, object]:
     return {
         "key": key,
@@ -361,7 +376,7 @@ def _classify_intent(text: str) -> tuple[str, str]:
     ]
     if any(keyword in clean for keyword in call_screening_keywords):
         return "身份确认", "身份说明"
-    if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "贵"]):
+    if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "贵", "付费", "要钱", "花钱", "付钱"]):
         return "价格异议", "价格说明"
     rejection_keywords = [
         "不需要",
@@ -482,6 +497,9 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "能带来",
         "有用吗",
         "靠谱吗",
+        "保证",
+        "承诺",
+        "保底",
     ]
     if any(keyword in clean for keyword in effect_keywords):
         return "效果询问", "效果说明"
@@ -500,6 +518,24 @@ def _classify_intent(text: str) -> tuple[str, str]:
     ]
     if any(keyword in clean for keyword in cooperation_keywords):
         return "合作咨询", "方案说明"
+    identity_keywords = [
+        "你是谁",
+        "谁",
+        "哪里",
+        "干嘛",
+        "做什么",
+        "做啥",
+        "什么公司",
+        "什么事",
+        "什么东西",
+        "什么意思",
+        "你们",
+        "来电原因",
+    ]
+    if compact in {"喂", "喂喂", "你好"}:
+        return "身份确认", "身份说明"
+    if any(keyword in clean for keyword in identity_keywords) or "who" in lower:
+        return "身份确认", "身份说明"
     clarification_keywords = [
         "听不清",
         "听不到",
@@ -516,28 +552,20 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "说一遍",
         "重复一遍",
         "重新说",
+        "信号不好",
+        "断断续续",
+        "反应慢",
+        "太慢",
+        "卡",
+        "没解决",
+        "没回答",
+        "别换",
+        "我问你",
         "不是",
         "不对",
     ]
     if any(keyword in clean for keyword in clarification_keywords):
         return "听不清/澄清", "重新说明"
-    identity_keywords = [
-        "你是谁",
-        "哪里",
-        "干嘛",
-        "做什么",
-        "做啥",
-        "什么公司",
-        "什么事",
-        "什么东西",
-        "什么意思",
-        "你们",
-        "来电原因",
-    ]
-    if compact in {"喂", "喂喂", "你好"}:
-        return "身份确认", "身份说明"
-    if any(keyword in clean for keyword in identity_keywords) or "who" in lower:
-        return "身份确认", "身份说明"
     return "需求探索", "资格确认"
 
 

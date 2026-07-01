@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     realtime_tts_voice_id: str = ""
     realtime_tts_voice_name: str = ""
     realtime_tts_voice_type: str = "system"
-    realtime_llm_timeout_seconds: float = 0.9
-    realtime_call_opening_text: str = "您好，我是做本地生活团购服务的，想占您半分钟，可以吗？"
+    realtime_llm_timeout_seconds: float = 1.2
+    realtime_call_opening_text: str = "您好，我做视频号团购获客，方便说半分钟吗？"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
     realtime_reply_max_chars: int = 48
     realtime_barge_rms_threshold: int = 2600

@@ -212,6 +212,7 @@ class AudioSocketCallSession:
         self._recognition: Recognition | None = None
         self._audio_capture: CallAudioCapture | None = None
         self._intent_counts: dict[str, int] = {}
+        self._conversation_history: list[dict[str, str]] = []
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
 
     def run(self) -> None:
@@ -356,10 +357,12 @@ class AudioSocketCallSession:
                 self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
                 continue
             turn_count, fallback_reply = self._reply_for_turn(text, intent)
-            reply_result = generate_realtime_reply(text, intent, "您的门店", fallback_reply)
+            history_snapshot = list(self._conversation_history)
+            reply_result = generate_realtime_reply(text, intent, "您的门店", fallback_reply, history_snapshot)
             if self.stop_event.is_set():
                 continue
             reply = reply_result.reply
+            self._append_conversation_turn(text, reply)
             self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node, turnCount=turn_count)
             self.logger.emit(
                 "llm_reply",
@@ -368,6 +371,7 @@ class AudioSocketCallSession:
                 strategy=reply_result.strategy,
                 latencyMs=reply_result.latency_ms,
                 fallbackUsed=reply_result.fallback_used,
+                historyTurns=len(history_snapshot),
                 error=reply_result.error,
             )
             close_after = intent in {"明确拒绝", "礼貌结束"}
@@ -401,6 +405,12 @@ class AudioSocketCallSession:
         if intent == "需求探索" and turn_count > 0:
             return turn_count, "如果您方便，我可以先发一份案例资料，您看完再决定。"
         return turn_count, _build_reply(text, intent, "您的门店")
+
+    def _append_conversation_turn(self, customer_text: str, assistant_reply: str) -> None:
+        self._conversation_history.append({"role": "user", "content": customer_text.strip()})
+        self._conversation_history.append({"role": "assistant", "content": assistant_reply.strip()})
+        if len(self._conversation_history) > 8:
+            del self._conversation_history[: len(self._conversation_history) - 8]
 
     def _drain_latest_customer_text(self, generation: int, text: str) -> tuple[int, str]:
         latest_generation = generation
