@@ -323,7 +323,8 @@ match = ${state.uc100Host}
       `[from-ai-acq]
 exten => s,1,NoOp(AI ACQ realtime outbound call answered)
  same => n,Answer()
- same => n,AudioSocket(${state.audioSocketUuid},${state.audioSocketHost}:${state.audioSocketPort})
+ same => n,Set(AI_ACQ_CALL_UUID=\${UUID()})
+ same => n,AudioSocket(\${AI_ACQ_CALL_UUID},${state.audioSocketHost}:${state.audioSocketPort})
  same => n,Hangup()
 
 [from-uc100]

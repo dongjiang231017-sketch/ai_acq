@@ -50,8 +50,9 @@ class BridgeConfig:
     opening_text: str
     log_path: Path
     workspace: str | None
-    barge_rms_threshold: int = 900
-    barge_frames: int = 4
+    barge_rms_threshold: int = 2200
+    barge_frames: int = 6
+    tts_gain: float = 1.0
 
 
 class JsonlEventLogger:
@@ -225,14 +226,20 @@ class AudioSocketCallSession:
             self._handle_audio(payload)
 
     def _handle_audio(self, payload: bytes) -> None:
+        rms = _pcm_rms(payload)
+        if self.speaking_event.is_set():
+            if rms >= self.config.barge_rms_threshold:
+                self._loud_frames += 1
+            else:
+                self._loud_frames = 0
+            if self._loud_frames >= self.config.barge_frames and time.monotonic() - self._last_barge_at > 0.8:
+                self.cancel_pending_speech("客户插话，停止后续 TTS 音频帧并继续听客户说话。", source="rms", rms=rms)
+                if self._recognition:
+                    self._recognition.send_audio_frame(payload)
+            return
+        self._loud_frames = 0
         if self._recognition:
             self._recognition.send_audio_frame(payload)
-        if self.speaking_event.is_set() and _pcm_rms(payload) >= self.config.barge_rms_threshold:
-            self._loud_frames += 1
-        else:
-            self._loud_frames = 0
-        if self._loud_frames >= self.config.barge_frames and time.monotonic() - self._last_barge_at > 0.8:
-            self.cancel_pending_speech("客户插话，停止后续 TTS 音频帧并继续听客户说话。", source="rms", rms=_pcm_rms(payload))
 
     def _turn_worker(self) -> None:
         while not self.stop_event.is_set():
@@ -261,7 +268,7 @@ class AudioSocketCallSession:
                 fallbackUsed=reply_result.fallback_used,
                 error=reply_result.error,
             )
-            close_after = intent == "明确拒绝"
+            close_after = intent in {"明确拒绝", "礼貌结束"}
             reason = "closing_reply" if close_after else "reply"
             threading.Thread(target=self._speak, args=(reply, reason, generation, close_after), daemon=True).start()
 
@@ -349,13 +356,13 @@ class AudioSocketCallSession:
                             break
                         frame = pending[:PCM_FRAME_BYTES]
                         pending = pending[PCM_FRAME_BYTES:]
-                        self._send_frame(AUDIO_SOCKET_KIND_AUDIO, frame)
+                        self._send_frame(AUDIO_SOCKET_KIND_AUDIO, _scale_pcm16(frame, self.config.tts_gain))
                         sent += len(frame)
                         time.sleep(PCM_FRAME_SECONDS)
                     if self.stop_event.is_set() or self._speech_is_obsolete(generation):
                         break
                 if pending and not self.stop_event.is_set() and not self._speech_is_obsolete(generation):
-                    self._send_frame(AUDIO_SOCKET_KIND_AUDIO, pending)
+                    self._send_frame(AUDIO_SOCKET_KIND_AUDIO, _scale_pcm16(pending, self.config.tts_gain))
                     sent += len(pending)
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("tts_error", callId=self.call_id, text=text, error=str(exc))
@@ -572,6 +579,9 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         opening_text=args.opening_text or settings.realtime_call_opening_text,
         log_path=Path(args.log_path or settings.realtime_call_event_log_path).expanduser(),
         workspace=workspace,
+        barge_rms_threshold=max(1, settings.realtime_barge_rms_threshold),
+        barge_frames=max(1, settings.realtime_barge_frames),
+        tts_gain=max(0.1, min(3.0, settings.realtime_tts_gain)),
     )
 
 
@@ -709,6 +719,7 @@ def config_summary(config: BridgeConfig) -> dict[str, object]:
         "logPath": str(config.log_path),
         "bargeRmsThreshold": config.barge_rms_threshold,
         "bargeFrames": config.barge_frames,
+        "ttsGain": config.tts_gain,
     }
 
 
@@ -739,6 +750,20 @@ def _pcm_rms(payload: bytes) -> int:
     for (sample,) in struct.iter_unpack("<h", payload[: sample_count * 2]):
         total += sample * sample
     return int((total / sample_count) ** 0.5)
+
+
+def _scale_pcm16(payload: bytes, gain: float) -> bytes:
+    if not payload or abs(gain - 1.0) < 0.01:
+        return payload
+    usable = (len(payload) // 2) * 2
+    output = bytearray(usable + (len(payload) - usable))
+    output.clear()
+    for (sample,) in struct.iter_unpack("<h", payload[:usable]):
+        scaled = int(sample * gain)
+        output.extend(max(-32768, min(32767, scaled)).to_bytes(2, "little", signed=True))
+    if usable < len(payload):
+        output.extend(payload[usable:])
+    return bytes(output)
 
 
 def parse_args() -> argparse.Namespace:

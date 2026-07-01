@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     realtime_call_opening_text: str = "您好，我是本地生活服务顾问，想跟您聊下视频号团购获客，方便吗？"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
     realtime_reply_max_chars: int = 48
+    realtime_barge_rms_threshold: int = 2200
+    realtime_barge_frames: int = 6
+    realtime_tts_gain: float = 1.4
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"

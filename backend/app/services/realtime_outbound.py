@@ -336,7 +336,21 @@ def _optional_text(value: object) -> str | None:
 
 
 def _classify_intent(text: str) -> tuple[str, str]:
-    lower = text.lower()
+    clean = text.strip()
+    lower = clean.lower()
+    call_screening_keywords = [
+        "姓名",
+        "来电原因",
+        "此人是否方便",
+        "是否方便接听",
+        "帮你确认",
+        "帮您确认",
+        "请说明",
+        "电话秘书",
+        "智能助理",
+    ]
+    if any(keyword in clean for keyword in call_screening_keywords):
+        return "身份确认", "身份说明"
     if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "贵"]):
         return "价格异议", "价格说明"
     rejection_keywords = [
@@ -353,11 +367,53 @@ def _classify_intent(text: str) -> tuple[str, str]:
     ]
     if any(keyword in text for keyword in rejection_keywords):
         return "明确拒绝", "礼貌结束"
+    end_keywords = [
+        "ok了",
+        "ok 了",
+        "好了",
+        "可以了",
+        "先这样",
+        "挂了",
+        "结束",
+        "别说了",
+        "不用说",
+        "不用讲",
+        "到这",
+    ]
+    if any(keyword in lower or keyword in clean for keyword in end_keywords):
+        return "礼貌结束", "礼貌结束"
     if any(keyword in text for keyword in ["忙", "晚点", "稍后", "改天"]):
         return "稍后联系", "预约复拨"
     if any(keyword in text for keyword in ["微信", "资料", "发我", "加一下"]):
         return "加微信/发资料", "留资转化"
-    if any(keyword in text for keyword in ["你是谁", "哪里", "干嘛", "什么公司", "什么", "你们", "来电原因"]) or "who" in lower:
+    clarification_keywords = [
+        "听不清",
+        "听不到",
+        "听不见",
+        "没听清",
+        "没听到",
+        "没听见",
+        "听不懂",
+        "说什么",
+        "明白什么",
+        "拧不到",
+        "那什么",
+    ]
+    if any(keyword in clean for keyword in clarification_keywords):
+        return "听不清/澄清", "重新说明"
+    identity_keywords = [
+        "你是谁",
+        "哪里",
+        "干嘛",
+        "什么公司",
+        "什么事",
+        "什么意思",
+        "你们",
+        "来电原因",
+    ]
+    if clean in {"喂", "喂。", "喂？", "你好", "你好。"}:
+        return "身份确认", "身份说明"
+    if any(keyword in clean for keyword in identity_keywords) or "who" in lower:
         return "身份确认", "身份说明"
     return "需求探索", "资格确认"
 
@@ -369,6 +425,8 @@ def _build_reply(text: str, intent: str, merchant_name: str) -> str:
         "稍后联系": "可以，我不多打扰。今天下午还是明天上午再跟您确认方便？",
         "加微信/发资料": "可以，我把视频号团购入驻资料和同品类案例发您，您看完再沟通。",
         "身份确认": "我是本地生活服务顾问，主要帮商家做视频号团购曝光和到店转化。",
+        "听不清/澄清": "抱歉，我说简单点：我是本地生活服务顾问，想问您是否了解视频号团购获客。",
+        "礼貌结束": "好的，那我不多打扰了，祝您生意顺利。",
     }
     if intent in replies:
         return replies[intent]
@@ -414,6 +472,16 @@ def _normalize_live_event(payload: dict[str, Any]) -> dict[str, object] | None:
         return None
     at = str(payload.get("at") or "")
     call_id = str(payload.get("callId") or "") or None
+    probe_noise_events = {
+        "socket_connected",
+        "call_error",
+        "call_disconnected",
+        "hangup_before_uuid",
+        "uuid_timeout",
+        "frame_before_uuid",
+    }
+    if not call_id and event_type in probe_noise_events:
+        return None
     digest_source = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return {
         "id": hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:16],

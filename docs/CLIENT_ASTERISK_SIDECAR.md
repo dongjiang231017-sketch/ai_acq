@@ -90,7 +90,8 @@ AI_ACQ_ASTERISK_LOCAL_NET=172.16.0.0/12
 sidecar 的拨号上下文会在电话接通后执行：
 
 ```text
-AudioSocket(<sidecar-generated-uuid>,127.0.0.1:9019)
+Set(AI_ACQ_CALL_UUID=${UUID()})
+AudioSocket(${AI_ACQ_CALL_UUID},127.0.0.1:9019)
 ```
 
 后端实时桥由客户本机 Python 后端启动：
@@ -108,6 +109,7 @@ python -m app.tools.realtime_audio_bridge
 
 - `DASHSCOPE_API_KEY` 已配置。
 - `DEEPSEEK_API_KEY` 已配置时，实时桥会使用 DeepSeek 生成电话短句；未配置时走本地规则兜底。
+- 每通电话使用 Asterisk `${UUID()}` 生成独立 `callId`，接通、ASR、TTS、打断、挂断事件都按该 `callId` 串联。
 - 至少一个可用的实时 TTS voice：优先 `REALTIME_TTS_VOICE_ID`，否则使用声音档案中最新的可用复刻 `external_voice_id`。
 - `ASTERISK_AUDIO_SOCKET_HOST` 和 `ASTERISK_AUDIO_SOCKET_PORT` 与 sidecar 生成的 `backend-asterisk.env` 一致。
 

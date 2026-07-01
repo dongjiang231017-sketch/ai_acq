@@ -146,6 +146,17 @@ exten => _X.,1,NoOp(Inbound call from UC100: ${CALLERID(all)})
 
 后续接实时 ASR/TTS 时，再把 `Playback(hello-world)` 换成音频桥接、ARI/ExternalMedia 或其它实时媒体方案。
 
+实时 AudioSocket 桥接配置如下。每次接通都必须先生成独立 UUID，便于后端把接通、ASR、LLM、TTS、打断和挂断事件归到同一通电话：
+
+```ini
+[from-ai-acq]
+exten => s,1,NoOp(AI ACQ realtime outbound call answered)
+ same => n,Answer()
+ same => n,Set(AI_ACQ_CALL_UUID=${UUID()})
+ same => n,AudioSocket(${AI_ACQ_CALL_UUID},127.0.0.1:9019)
+ same => n,Hangup()
+```
+
 ## 5. Asterisk CLI 检查
 
 ```bash

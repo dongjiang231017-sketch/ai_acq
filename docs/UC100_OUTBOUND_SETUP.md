@@ -243,6 +243,16 @@ python -m app.tools.realtime_audio_bridge
 
 `--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。前端「实时语音管线」会读取同一份事件，显示 ASR、DeepSeek 回复、TTS 播放和打断结果。
 
+现场电话链路调音参数：
+
+```env
+REALTIME_BARGE_RMS_THRESHOLD=2200
+REALTIME_BARGE_FRAMES=6
+REALTIME_TTS_GAIN=1.4
+```
+
+AI 播放期间，普通回声和底噪不会送入 ASR；只有连续达到阈值的来音才触发打断。客户现场如果频繁误打断，先上调 `REALTIME_BARGE_RMS_THRESHOLD`；如果客户听到的 AI 声音偏小，可以小幅上调 `REALTIME_TTS_GAIN`。
+
 单号试拨：
 
 ```bash
