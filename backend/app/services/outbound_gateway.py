@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
 from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, render_originate_channel
+from app.services.voice_gateway_profiles import voice_gateway_label
 
 
 class OutboundGatewayConfigurationError(RuntimeError):
@@ -114,8 +115,9 @@ class SimulatorGateway:
 
 class AsteriskGateway:
     def place_call(self, attempt: CallAttempt) -> CallResult:
+        gateway = voice_gateway_label()
         if not settings.asterisk_live_call_enabled:
-            raise OutboundGatewayConfigurationError("真实线路拨号开关未启用，请先完成 UC100 单号试拨。")
+            raise OutboundGatewayConfigurationError("真实线路拨号开关未启用，请先完成语音网关单号试拨。")
         if not settings.asterisk_bulk_call_enabled:
             raise OutboundGatewayConfigurationError("批量真实外呼未启用，请确认单号试拨稳定后再开启。")
         if not attempt.lead.phone:
@@ -124,7 +126,7 @@ class AsteriskGateway:
                 intent_level="无效",
                 current_node="号码缺失",
                 outcome="失败",
-                transcript="系统：该商家没有电话，未提交到 UC100 线路。",
+                transcript=f"系统：该商家没有电话，未提交到{gateway}线路。",
                 need_handoff=False,
                 recall_at=None,
                 lead_status="号码缺失",
@@ -150,7 +152,7 @@ class AsteriskGateway:
                 intent_level="D",
                 current_node="线路提交失败",
                 outcome="失败",
-                transcript=f"系统：UC100/Asterisk 外呼提交失败：{exc}",
+                transcript=f"系统：语音网关/Asterisk 外呼提交失败：{exc}",
                 need_handoff=False,
                 recall_at=None,
                 lead_status="外呼失败",
@@ -164,7 +166,7 @@ class AsteriskGateway:
             intent_level="待判定",
             current_node="已提交线路网关",
             outcome="拨号已提交" if result.accepted else "失败",
-            transcript=f"系统：已通过 UC100/Asterisk 提交外呼请求。{result.message}",
+            transcript=f"系统：已通过语音网关/Asterisk 提交外呼请求。{result.message}",
             need_handoff=False,
             recall_at=None,
             lead_status="外呼中" if result.accepted else "外呼失败",

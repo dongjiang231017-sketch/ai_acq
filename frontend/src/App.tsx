@@ -65,6 +65,7 @@ import {
   TelephonyHealth,
   TelephonyPreflight,
   TelephonyTestCallResult,
+  VoiceGatewayProfile,
   VoiceCloneRecord,
   VoiceOverview,
   VoiceProfile,
@@ -186,8 +187,28 @@ const fallbackOverview: OutboundOverview = {
   intentCount: 58,
 };
 
+const fallbackVoiceGatewayProfile: VoiceGatewayProfile = {
+  key: "uc100_sip_volte",
+  label: "语音网关（UC100 测试档案）",
+  vendor: "ZHY",
+  model: "UC100",
+  category: "sip_volte_gateway",
+  transport: "sip_udp",
+  host: "192.168.10.100",
+  sipPort: 5080,
+  trunkName: "uc100",
+  maxChannels: 1,
+  lineType: "sim_volte",
+  adminUrl: "http://192.168.10.100/",
+  discoveryMode: "manual_or_lan_scan",
+  tested: true,
+  capabilities: ["sip_registration", "sip_to_volte", "asterisk_audiosocket"],
+  notes: ["UC100 是当前测试档案；客户现场可替换为其他语音网关适配器。"],
+};
+
 const fallbackTelephonyConfig: TelephonyConfig = {
   gatewayMode: "simulator",
+  voiceGatewayProfile: fallbackVoiceGatewayProfile,
   queueEnabled: false,
   queueName: "ai_acq:outbound_tasks",
   redisUrlConfigured: true,
@@ -203,6 +224,7 @@ const fallbackTelephonyConfig: TelephonyConfig = {
 const fallbackTelephonyHealth: TelephonyHealth = {
   checkedAt: new Date().toISOString(),
   gatewayMode: "simulator",
+  voiceGatewayProfile: fallbackVoiceGatewayProfile,
   configured: false,
   liveCallEnabled: false,
   bulkCallEnabled: false,
@@ -219,17 +241,18 @@ const fallbackTelephonyHealth: TelephonyHealth = {
 
 const fallbackTelephonyPreflight: TelephonyPreflight = {
   checkedAt: fallbackTelephonyHealth.checkedAt,
+  voiceGatewayProfile: fallbackVoiceGatewayProfile,
   readyForDeviceTest: false,
   readyForSingleNumberTest: false,
   readyForBulkTasks: false,
-  nextStep: "先配置 AMI 账号、UC100 trunk，并切到 Asterisk 真实线路模式。",
+  nextStep: "先配置 AMI 账号、语音网关 trunk，并切到 Asterisk 真实线路模式。",
   health: fallbackTelephonyHealth,
   steps: [
     {
       key: "gateway_mode",
       label: "网关模式",
       status: "warn",
-      detail: "当前仍是模拟线路，代码不会访问 UC100。",
+      detail: "当前仍是模拟线路，代码不会访问语音网关。",
       action: "实机联调时设置 TELEPHONY_GATEWAY_MODE=asterisk。",
     },
     {
@@ -251,10 +274,32 @@ const fallbackRealtimePipeline: RealtimePipeline = {
   readyForMockCall: true,
   readyForAsteriskMedia: false,
   nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接 Asterisk 媒体桥。",
+  routeOptions: [
+    {
+      key: "omni",
+      label: "极速人声 Omni",
+      mode: "omni_realtime_interruptible",
+      summary: "端到端实时语音，适合追求自然衔接和低延迟。",
+      estimatedLatencyMs: 720,
+      estimatedAiCostPerMinute: 0.09,
+      readyForAsteriskMedia: false,
+      isActive: false,
+    },
+    {
+      key: "pipeline",
+      label: "低成本分段 Pipeline",
+      mode: "half_duplex_interruptible",
+      summary: "ASR、语义路由/LLM、流式 TTS 分段执行，适合成本敏感场景。",
+      estimatedLatencyMs: 1055,
+      estimatedAiCostPerMinute: 0.04,
+      readyForAsteriskMedia: false,
+      isActive: true,
+    },
+  ],
   steps: [
     {
       key: "media_bridge",
-      label: "UC100/Asterisk 媒体桥",
+      label: "语音网关/Asterisk 媒体桥",
       status: "warn",
       provider: "mock_media",
       latencyMs: 120,
@@ -307,6 +352,7 @@ const fallbackRealtimeLiveEvents: RealtimeLiveEvents = {
   logPath: "/tmp/ai-acq-realtime-call-events.jsonl",
   hasEvents: false,
   latestAt: null,
+  score: null,
   events: [],
 };
 
@@ -1198,7 +1244,7 @@ function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHeal
   if (!health.pingOk) return "AMI Ping 未通过";
   if (health.trunkReachable === false) return health.trunkStatus;
   if (!health.liveCallEnabled) return "单号试拨开关未开启";
-  return health.trunkStatus || "UC100 线路待测试";
+  return health.trunkStatus || "语音网关线路待测试";
 }
 
 function asteriskSidecarStatusText(status?: AiAcqDesktopAsteriskStatus | null) {
@@ -1245,6 +1291,7 @@ function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
 }
 
 function telephonyVerificationStageText(result: TelephonyTestCallResult) {
+  if (result.verificationStage === "realtime_conversation_confirmed") return "真人实时对话已验收";
   if (result.verificationStage === "realtime_media_confirmed") return "线路与实时媒体已验收";
   if (result.verificationStage === "gateway_signaling_only") return "网关侧响应，未证明手机响铃";
   if (result.verificationStage === "cellular_answered_no_media_proof") return "线路接通，待媒体链路验收";
@@ -1253,8 +1300,11 @@ function telephonyVerificationStageText(result: TelephonyTestCallResult) {
 }
 
 function telephonyVerificationSummary(result: TelephonyTestCallResult) {
-  if (result.acceptanceReady) return "已达到实时通话验收";
-  return result.acceptanceNote || "还需要 UC100 蜂窝侧、手机接听和实时媒体日志共同确认。";
+  if (result.conversationConfirmed) return "已达到真人实时对话验收";
+  if (result.callScreeningDetected && !result.humanSpeechConfirmed) return "检测到电话助理/秘书，还未确认真人接听。";
+  if (result.mediaLoopConfirmed && !result.humanSpeechConfirmed) return "媒体桥已接通，但还没识别到真人客户语音。";
+  if (result.humanSpeechConfirmed && !result.aiSpeechConfirmed) return "已识别真人语音，AI 首句还未确认播出。";
+  return result.acceptanceNote || "还需要语音网关线路侧、手机接听和实时媒体日志共同确认。";
 }
 
 function realtimePipelineStatusText(status: string) {
@@ -1272,12 +1322,25 @@ function realtimeSessionStatusText(status: string) {
 
 function realtimeLiveEventTitle(type: string) {
   if (type === "call_connected") return "电话接通";
+  if (type === "remote_speech_started") return "听到对端声音";
+  if (type === "human_speech_confirmed") return "真人已说话";
+  if (type === "call_screening_detected") return "电话助理";
+  if (type === "system_prompt_ignored") return "系统提示已忽略";
+  if (type === "audio_capture_started") return "开始录音证据";
+  if (type === "audio_capture_saved") return "录音证据已保存";
   if (type === "asr_final") return "客户语音";
   if (type === "llm_reply") return "AI 回复";
   if (type === "tts_start") return "开始播放";
   if (type === "tts_interrupted") return "播放打断";
   if (type === "tts_done") return "播放完成";
   if (type === "barge_in") return "客户插话";
+  if (type === "barge_recovery_ready") return "恢复监听";
+  if (type === "barge_turn_committed") return "打断兜底回复";
+  if (type === "barge_transcription_replaces_forced_response") return "转写接管回复";
+  if (type === "barge_transcription_after_forced_response") return "打断转写已记录";
+  if (type === "omni_input_buffer_event") return "语音缓冲";
+  if (type === "omni_no_audio_response") return "无音频兜底";
+  if (type === "omni_unavailable") return "实时模型断开";
   if (type === "call_disconnected") return "电话结束";
   return type;
 }
@@ -1402,12 +1465,13 @@ function App() {
     callerId: "",
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
-  const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认 UC100/Asterisk 可用后再做单号试拨。");
+  const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认语音网关/Asterisk 可用后再做单号试拨。");
   const [isCheckingTelephony, setIsCheckingTelephony] = useState(false);
   const [isTestingTelephony, setIsTestingTelephony] = useState(false);
   const [realtimeForm, setRealtimeForm] = useState({
     merchantName: "模拟火锅店",
     phone: "",
+    conversationRoute: "omni" as "pipeline" | "omni",
     voiceChoice: `system:${fallbackSystemVoices[0]?.id ?? "qwen_tts_ethan"}`,
     customerText: "你们这个怎么收费？",
   });
@@ -1737,6 +1801,16 @@ function App() {
     [availableCloneVoiceRecords, systemVoices],
   );
   const activeRealtimeVoiceOption = realtimeVoiceOptions.find((option) => option.key === realtimeForm.voiceChoice) ?? realtimeVoiceOptions[0];
+  const backendActiveRealtimeRoute = realtimePipeline.routeOptions.find((option) => option.isActive);
+  const activeRealtimeRoute =
+    backendActiveRealtimeRoute ??
+    realtimePipeline.routeOptions.find((option) => option.key === realtimeForm.conversationRoute) ??
+    fallbackRealtimePipeline.routeOptions[0];
+  useEffect(() => {
+    if (!backendActiveRealtimeRoute || realtimeSession) return;
+    if (backendActiveRealtimeRoute.key === realtimeForm.conversationRoute) return;
+    setRealtimeForm((current) => ({ ...current, conversationRoute: backendActiveRealtimeRoute.key }));
+  }, [backendActiveRealtimeRoute, realtimeForm.conversationRoute, realtimeSession]);
   const activeVoiceProfile = customerVoiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? customerVoiceProfiles[0];
   const activeVoiceProfileSamples = activeVoiceProfile
     ? customerVoiceSamples.filter((sample) => sample.profileId === activeVoiceProfile.id)
@@ -2122,7 +2196,7 @@ function App() {
 
   async function refreshTelephonyStatus() {
     setIsCheckingTelephony(true);
-    setTelephonyMessage("正在预检 UC100/Asterisk 线路...");
+    setTelephonyMessage("正在预检语音网关/Asterisk 线路...");
     try {
       const [config, preflight] = await Promise.all([api.telephonyConfig(), api.telephonyPreflight(telephonyTestForm.phone)]);
       setTelephonyConfig(config);
@@ -2182,6 +2256,7 @@ function App() {
           merchantName: realtimeForm.merchantName.trim() || "模拟商家",
           phone: realtimeForm.phone.trim() || null,
           voice,
+          conversationRoute: realtimeForm.conversationRoute,
         }),
       ]);
       setRealtimePipeline(pipeline);
@@ -2209,6 +2284,7 @@ function App() {
           merchantName: realtimeForm.merchantName.trim() || "模拟商家",
           phone: realtimeForm.phone.trim() || null,
           voice,
+          conversationRoute: realtimeForm.conversationRoute,
         });
       }
       const turn = await api.realtimeUtterance(activeSession.id, {
@@ -3211,8 +3287,8 @@ function App() {
         </div>
         <div className="realtime-pipeline-summary">
           <div>
-            <span>模式</span>
-            <strong>{realtimePipeline.mode === "half_duplex_interruptible" ? "半双工可打断" : realtimePipeline.mode}</strong>
+            <span>当前路线</span>
+            <strong>{activeRealtimeRoute?.label ?? (realtimePipeline.mode === "half_duplex_interruptible" ? "半双工可打断" : realtimePipeline.mode)}</strong>
           </div>
           <div>
             <span>媒体桥</span>
@@ -3256,6 +3332,25 @@ function App() {
             />
           </label>
           <label className="wide">
+            对话路线
+            <select
+              value={realtimeForm.conversationRoute}
+              onChange={(event) => {
+                const nextRoute = event.target.value as "pipeline" | "omni";
+                setRealtimeForm({ ...realtimeForm, conversationRoute: nextRoute });
+                setRealtimeSession(null);
+                setRealtimeLastReply("");
+                setRealtimeMessage("已切换对话路线，请重新创建或发送一句模拟通话。");
+              }}
+            >
+              {realtimePipeline.routeOptions.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label} - ¥{option.estimatedAiCostPerMinute.toFixed(2)}/分钟 · {option.estimatedLatencyMs}ms
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="wide">
             本次外呼音色
             <select
               value={activeRealtimeVoiceOption?.key ?? realtimeForm.voiceChoice}
@@ -3284,7 +3379,7 @@ function App() {
           <div className="line-test-result">
             <strong>{realtimeSession ? realtimeSessionStatusText(realtimeSession.status) : "未开始"}</strong>
             <span>{realtimeMessage}</span>
-            {activeRealtimeVoiceOption && <small>{activeRealtimeVoiceOption.label} · {activeRealtimeVoiceOption.detail}</small>}
+            {activeRealtimeVoiceOption && <small>{activeRealtimeRoute?.label} · {activeRealtimeVoiceOption.label} · {activeRealtimeVoiceOption.detail}</small>}
           </div>
           <div className="line-test-result">
             <strong>{realtimeSession?.currentIntent ?? "待识别"}</strong>
@@ -3315,6 +3410,26 @@ function App() {
                 </small>
               </div>
             ))}
+          </div>
+        )}
+        {realtimeLiveEvents.score && (
+          <div className="realtime-score-board">
+            <div className="line-test-result">
+              <strong>{realtimeLiveEvents.score.score} 分</strong>
+              <span>{realtimeLiveEvents.score.summary}</span>
+              <small>{realtimeLiveEvents.score.callId ? `Call ${realtimeLiveEvents.score.callId.slice(0, 8)}` : "最近真实通话"}</small>
+            </div>
+            <div className="realtime-score-grid">
+              {realtimeLiveEvents.score.metrics.map((metric) => (
+                <div className="line-preflight-step" key={metric.name}>
+                  <span className={`line-preflight-badge is-${metric.status}`}>{metric.score}</span>
+                  <div>
+                    <strong>{metric.name}</strong>
+                    <em>{metric.detail}</em>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
         <div className="realtime-event-list">
@@ -4890,7 +5005,7 @@ function App() {
             <article className="panel span-2 line-health-panel">
               <div className="panel-title">
                 <div>
-                  <p>客户端Asterisk / UC100</p>
+                  <p>客户端Asterisk / 语音网关</p>
                   <h2>真实线路接入</h2>
                 </div>
                 <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
@@ -4920,10 +5035,18 @@ function App() {
                     </strong>
                   </div>
                   <div>
-                    <span>UC100</span>
+                    <span>语音网关</span>
                     <strong>
-                      {asteriskSidecarStatus ? `${asteriskSidecarStatus.uc100Host}:${asteriskSidecarStatus.uc100SipPort}` : "192.168.10.100:5080"}
+                      {asteriskSidecarStatus
+                        ? `${asteriskSidecarStatus.voiceGatewayHost ?? asteriskSidecarStatus.uc100Host}:${
+                            asteriskSidecarStatus.voiceGatewaySipPort ?? asteriskSidecarStatus.uc100SipPort
+                          }`
+                        : `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
                     </strong>
+                  </div>
+                  <div>
+                    <span>档案</span>
+                    <strong>{asteriskSidecarStatus?.voiceGatewayLabel ?? telephonyConfig.voiceGatewayProfile.label}</strong>
                   </div>
                   <div>
                     <span>配置</span>
@@ -4990,16 +5113,50 @@ function App() {
                 </div>
                 <div>
                   <span>Trunk</span>
-                  <strong>{telephonyConfig.asteriskTrunkName || "待配置"}</strong>
+                  <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName || "待配置"}</strong>
                 </div>
                 <div>
                   <span>通道上限</span>
-                  <strong>{telephonyHealth.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
+                  <strong>{telephonyConfig.voiceGatewayProfile.maxChannels || telephonyHealth.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
                 </div>
                 <div>
                   <span>拨号开关</span>
                   <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨" : "未开启"}</strong>
                 </div>
+              </div>
+              <div className="line-preflight gateway-profile-strip">
+                <div className="line-preflight-header">
+                  <div>
+                    <span>网关适配档案</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
+                  </div>
+                  <small>{telephonyConfig.voiceGatewayProfile.tested ? "已实测档案" : "待现场验证档案"}</small>
+                </div>
+                <p>
+                  {telephonyConfig.voiceGatewayProfile.vendor} {telephonyConfig.voiceGatewayProfile.model} ·{" "}
+                  {telephonyConfig.voiceGatewayProfile.lineType} · {telephonyConfig.voiceGatewayProfile.discoveryMode}
+                </p>
+                <div className="line-health-grid">
+                  <div>
+                    <span>当前地址</span>
+                    <strong>
+                      {telephonyConfig.voiceGatewayProfile.host}:{telephonyConfig.voiceGatewayProfile.sipPort}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>后台入口</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.adminUrl || "待发现"}</strong>
+                  </div>
+                  <div>
+                    <span>设备类型</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.category}</strong>
+                  </div>
+                  <div>
+                    <span>能力</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.capabilities.slice(0, 2).join(" / ") || "待配置"}</strong>
+                  </div>
+                </div>
+                {telephonyConfig.voiceGatewayProfile.notes[0] && <small>{telephonyConfig.voiceGatewayProfile.notes[0]}</small>}
               </div>
               <div className="line-preflight">
                 <div className="line-preflight-header">
@@ -5054,13 +5211,20 @@ function App() {
                       {telephonyTestResult.gatewayStatus} · {telephonyTestResult.actionId} · {telephonyTestResult.channel}
                     </small>
                   )}
-                  {telephonyTestResult && (
-                    <small>
-                      验收层级：{telephonyVerificationStageText(telephonyTestResult)} · 蜂窝侧
-                      {telephonyTestResult.cellularConfirmed ? "已确认" : "未确认"} · 媒体链路
-                      {telephonyTestResult.mediaLoopConfirmed ? "已确认" : "未确认"}
-                    </small>
-                  )}
+	                  {telephonyTestResult && (
+	                    <small>
+	                      验收层级：{telephonyVerificationStageText(telephonyTestResult)} · 蜂窝侧
+	                      {telephonyTestResult.cellularConfirmed ? "已确认" : "未确认"} · 媒体链路
+	                      {telephonyTestResult.mediaLoopConfirmed ? "已确认" : "未确认"}
+	                    </small>
+	                  )}
+	                  {telephonyTestResult && (
+	                    <small>
+	                      真人语音{telephonyTestResult.humanSpeechConfirmed ? "已确认" : "未确认"} · AI首句
+	                      {telephonyTestResult.aiSpeechConfirmed ? "已播出" : "未确认"} · 电话助理
+	                      {telephonyTestResult.callScreeningDetected ? "已检测" : "未检测"}
+	                    </small>
+	                  )}
                   {telephonyTestResult && <small>{telephonyVerificationSummary(telephonyTestResult)}</small>}
                   {telephonyTestResult && telephonyTestPayloadSummary(telephonyTestResult) && (
                     <small>{telephonyTestPayloadSummary(telephonyTestResult)}</small>

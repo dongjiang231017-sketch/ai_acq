@@ -1,15 +1,372 @@
 from __future__ import annotations
 
+import re
+
+from app.services.realtime_sales_brain import build_omni_sales_instruction
+
 
 def build_video_group_buying_sales_instructions() -> str:
     return "\n".join(
         [
             "你是视频号团购本地生活业务的实时外呼销售助手。",
-            "目标：先回答客户当前问题，再用一句话推进到加微信/发资料/约时间。每次最多两句、60个汉字以内，口语化，别像念稿。",
+            "目标：先回答客户当前问题。只有客户问题已回答、且客户没有拒绝资料/微信时，才用一句话推进到加微信/发资料/约时间。每次最多两句、80个汉字以内，口语化，别像念稿。",
+            "全程只用普通话和简体中文回复，不要粤语、方言、繁体字或英文夹杂。",
             "业务素材：视频号团购能帮门店拿微信生态同城曝光，设计团购套餐，引导附近用户到店，并把客户沉淀到私域；适合餐饮、美业、休闲娱乐、到店服务等本地商家。",
             "服务内容：门店品类诊断、套餐设计、页面资料、上架代办、投放和数据复盘。不要承诺保底成交，不要说效果一定好或数据很可观，只能建议小范围测试曝光、咨询和到店数据。",
+            "和美团区别：美团偏搜索、评价和平台成交；视频号团购偏微信内容推荐、同城曝光、朋友圈/社群传播和私域沉淀。不要说替代美团，要说补充微信生态流量。",
             "常见异议：问费用时说是付费服务，先判断适不适合再报价；说麻烦时强调可代办；说已有抖音/美团时说明视频号是微信同城流量补充；说考虑时争取先发资料。",
-            "合规要求：客户明确拒绝、说别联系或要挂电话时，礼貌结束并表示不再打扰；不要主动说自己不是机器人、不是 AI 或是真人，客户问是否 AI/机器人时，坦诚说明是智能语音助手。",
-            "声音风格：自然、短句、有停顿感；不要连续大段介绍，不要机械重复开场白。",
+            "客户如果说不需要资料、不加微信、别重复、直接回答、你说重点，就立刻停止发资料/加微信推进，本通后续只回答问题或礼貌结束。",
+            "合规要求：客户明确拒绝、说别联系或要挂电话时，礼貌结束并表示不再打扰；不要主动说自己不是机器人、不是 AI、是真人或智能助手。只有客户明确问是否 AI/机器人时，才坦诚说明是智能语音助手。",
+            "电话助理处理：如果听到电话助理、秘书或系统提示要求说明姓名和来电原因，只用一句话回答身份和来电原因，请求转接负责人；不要展开销售，不要说“加微信”。",
+            "真实电销风格：先听懂对方的问题和情绪，再回答；客户质疑时先承接一句，不要硬推，不要把同一句换个词反复念。",
+            "声音风格：自然、短句、有停顿感；像带笑意的人在解释，允许说“明白”“对，这点您问得对”，不要连续大段介绍，不要连续两轮说同一句推进话术。",
+            "插话处理：客户插话后直接接客户刚说的话回答，禁止解释上一句为什么停了，禁止说“系统没听清”“我重新识别一下”等技术解释。",
+            "销售方法：每轮按真实电销处理，识别客户情绪、销售阶段和异议类型；先承接，再回答，再轻轻问一个选择题。客户不耐烦时只答问题或结束。",
         ],
+    )
+
+
+def classify_realtime_call_input(text: str) -> str:
+    clean = " ".join(text.strip().split())
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
+    if not compact:
+        return "empty"
+    system_keywords = [
+        "通话已不再录音",
+        "此通话已不再录音",
+        "开始录音",
+        "停止录音",
+        "正在录音",
+        "暂时无法接听",
+        "暫時無法接聽",
+        "用户无法接听",
+        "无法接听",
+        "无法接通",
+        "無法接聽",
+        "语音信箱",
+        "語音信箱",
+        "语音留言",
+        "语音录音",
+        "录制留言",
+        "录音完成",
+        "提示音后",
+        "提示音後",
+        "请在提示音后",
+        "提示音后录制",
+        "留言后",
+        "挂断即可",
+        "若要留言",
+        "请留言",
+        "請留言",
+    ]
+    if any(keyword in clean for keyword in system_keywords):
+        return "system_prompt"
+    screening_keywords = [
+        "姓名",
+        "请留下",
+        "請留下",
+        "留下您的姓名",
+        "留下你的姓名",
+        "来电原因",
+        "來電原因",
+        "方便接听",
+        "方便接聽",
+        "此人是否方便",
+        "确认此人",
+        "確認此人",
+        "为您确认",
+        "為您確認",
+        "能为帮您确认",
+        "能帮您确认",
+        "幫你確認",
+        "帮你确认",
+        "帮您确认",
+        "請說明",
+        "请说明",
+        "请先说明",
+        "请说出",
+        "请先说",
+        "来意",
+        "电话助理",
+        "電話助理",
+        "电话秘书",
+        "電話秘書",
+        "请不要挂断",
+        "請不要掛斷",
+        "不要挂断电话",
+        "不要掛斷電話",
+    ]
+    if any(keyword in clean for keyword in screening_keywords):
+        return "call_screening"
+    rejection_keywords = [
+        "放个屁",
+        "滚",
+        "扯淡",
+        "骗子",
+        "神经病",
+        "有病",
+        "别说了",
+        "不用说了",
+        "不用讲了",
+        "别联系",
+        "别打",
+        "不要打",
+        "不需要你们",
+    ]
+    if any(keyword in compact for keyword in rejection_keywords):
+        return "rejection"
+    repetition_keywords = [
+        "重复",
+        "一直说",
+        "总是说",
+        "总说",
+        "老说",
+        "老是说",
+        "别重复",
+        "不要重复",
+        "不要总",
+        "你怎么总",
+        "你老是",
+    ]
+    if any(keyword in compact for keyword in repetition_keywords):
+        return "repetition_complaint"
+    direct_answer_keywords = [
+        "不需要资料",
+        "不用资料",
+        "不要资料",
+        "别发资料",
+        "不用发资料",
+        "不需要加微信",
+        "不用加微信",
+        "不要加微信",
+        "不加微信",
+        "直接回答",
+        "说重点",
+        "讲重点",
+        "别推",
+        "不要推",
+    ]
+    if any(keyword in compact for keyword in direct_answer_keywords):
+        return "direct_answer_only"
+    if compact in {"不需要", "不用", "不要", "不用了", "不需要了", "不要了", "没兴趣", "不感兴趣", "算了", "算了吧"}:
+        return "terminal_close"
+    terminal_keywords = [
+        "先这样",
+        "就这样",
+        "就这样吧",
+        "这样吧",
+        "到这",
+        "到这里",
+        "挂了",
+        "我挂了",
+        "挂电话",
+        "再见",
+        "拜拜",
+        "结束吧",
+        "不聊了",
+        "不说了",
+        "不用了",
+        "不需要了",
+        "我不需要",
+        "不要了",
+        "没兴趣",
+        "不感兴趣",
+    ]
+    if any(keyword in compact for keyword in terminal_keywords):
+        return "terminal_close"
+    if compact in {"你好你", "您好你", "喂你", "你好您", "您好您", "你谁", "谁", "谁啊", "谁呀", "哪位", "您哪位", "你哪位"}:
+        return "identity_handoff"
+    identity_keywords = [
+        "你是谁",
+        "您是谁",
+        "哪位",
+        "你咋",
+        "咋的",
+        "什么情况",
+        "什么公司",
+        "什么事",
+        "来电原因",
+        "做什么",
+        "做啥",
+        "干嘛",
+        "不知道你是谁",
+        "不知道您是谁",
+        "你谁",
+        "谁啊",
+        "谁呀",
+        "您哪位",
+        "你哪位",
+    ]
+    if any(keyword in compact for keyword in identity_keywords):
+        return "identity_handoff"
+    audio_issue_keywords = [
+        "听不清",
+        "聽不清",
+        "没听清",
+        "沒聽清",
+        "你说什么",
+        "你說什麼",
+        "你讲什么",
+        "你講什麼",
+        "啥也没说",
+        "啥也沒說",
+        "我没说",
+        "我沒說",
+        "出问题",
+        "出問題",
+        "断了",
+        "斷了",
+        "卡了",
+        "不会说话",
+        "不會說話",
+        "你不会",
+        "你不會",
+    ]
+    if any(keyword in compact for keyword in audio_issue_keywords):
+        return "audio_issue"
+    greeting_keywords = [
+        "喂",
+        "你好",
+        "您好",
+        "在",
+        "在在",
+        "在听",
+        "在聽",
+        "什么事",
+        "什麼事",
+        "你说",
+        "你說",
+    ]
+    if len(compact) <= 8 and any(keyword in compact for keyword in greeting_keywords):
+        return "human_greeting"
+    return "human_speech"
+
+
+def _format_omni_recent_history(recent_history: list[dict[str, str]] | None) -> str:
+    rows: list[str] = []
+    for turn in (recent_history or [])[-6:]:
+        role = (turn.get("role") or "").strip().lower()
+        content = " ".join(str(turn.get("content") or "").strip().split())
+        if not content:
+            continue
+        label = "客户" if role == "user" else "AI"
+        rows.append(f"{label}：{content[:70]}")
+    return "\n".join(rows)
+
+
+def _omni_context_prefix(
+    recent_history: list[dict[str, str]] | None,
+    first_human_after_screening: bool,
+    last_reply: str,
+) -> str:
+    lines = [
+        "回复规则：先回答客户当前这句话；不要复读上一轮；不要提技术状态或上一句为什么停了；最多两句，普通话。",
+    ]
+    history = _format_omni_recent_history(recent_history)
+    if history:
+        lines.append(f"最近对话：\n{history}")
+    if first_human_after_screening:
+        lines.append("客户可能刚从手机电话助理/来电筛选转接过来，可能没听到前面说明；用一句自然身份说明重新衔接。")
+    if last_reply:
+        lines.append(f"上一句AI回复：{last_reply[:70]}。本轮不要重复这句。")
+    return "\n".join(lines)
+
+
+def build_omni_turn_instruction(
+    text: str,
+    signal: str,
+    *,
+    recent_history: list[dict[str, str]] | None = None,
+    first_human_after_screening: bool = False,
+    last_reply: str = "",
+) -> str:
+    clean = " ".join(text.strip().split())
+    context = _omni_context_prefix(recent_history, first_human_after_screening, last_reply)
+    sales_instruction = build_omni_sales_instruction(
+        clean,
+        signal,
+        recent_history=recent_history,
+        first_human_after_screening=first_human_after_screening,
+        last_reply=last_reply,
+    )
+    if signal == "call_screening":
+        return (
+            "这句话来自电话助理或电话秘书，不是真人客户。只用普通话原句回答："
+            "您好，我这边做视频号团购到店获客，来电想确认门店微信同城曝光合作，麻烦转接负责人，谢谢。"
+            "只说这一句，不要展开销售，不要说加微信，不要用粤语。"
+        )
+    if signal == "rejection":
+        return (
+            f"{context}\n客户明确拒绝或情绪很差：{clean}。"
+            "只礼貌结束，不要继续解释业务，不要再问问题，不要说加微信或发资料。"
+            "只说这句：好的，不打扰了，再见。"
+            "只用普通话，不要粤语。"
+        )
+    if signal == "terminal_close":
+        return (
+            f"{context}\n客户已经说要结束、挂电话或不需要继续：{clean}。"
+            "不要自我介绍，不要解释业务，不要问问题，不要说标记不再跟进。"
+            "只说这句：好的，不打扰了，再见。"
+            "只用普通话，不要粤语。"
+        )
+    if signal == "human_greeting":
+        if first_human_after_screening or any(keyword in last_reply for keyword in ["电话助理", "转接负责人", "来电原因"]):
+            return (
+                f"{context}\n{sales_instruction}\n真人客户刚从电话助理转接过来，只说了：{clean}。"
+                "不要重复电话助理那句，不要长开场，不要问二十秒。"
+                "只说这句：您好，我在。我是做视频号团购到店获客的，给您来电是想确认门店是否需要微信同城曝光。"
+                "只用普通话，不要粤语。"
+            )
+        if last_reply and any(keyword in last_reply for keyword in ["方便听我说", "确认门店", "团购曝光合作"]):
+            return (
+                f"{context}\n{sales_instruction}\n客户只是打招呼或说了半句：{clean}。"
+                "上一句已经开场过，本轮禁止重复开场，禁止再说“方便听我说二十秒吗”。"
+                "只说这句：好，我短说：视频号团购是帮门店做可下单套餐，再用微信同城曝光引到店。"
+                "只用普通话，不要粤语。"
+            )
+        return (
+            f"{context}\n{sales_instruction}\n客户刚接电话说：{clean}。先确认对方听得到，再用一句短开场："
+            "您好，我是做视频号团购到店获客的，想确认门店是否需要微信同城曝光，方便听我说一句吗？"
+            "只用普通话，不要粤语。"
+        )
+    if signal == "identity_handoff":
+        return (
+            f"{context}\n{sales_instruction}\n客户问身份或没听到开头：{clean}。"
+            "只回答身份和来电原因，不要推进业务，不要问费用/效果/美团区别，不要解释系统："
+            "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
+            "禁止主动说自己是智能助手，禁止主动说发资料。"
+        )
+    if signal == "audio_issue":
+        return (
+            f"{context}\n{sales_instruction}\n客户反馈通话不清楚或没听懂：{clean}。"
+            "不要解释上一句为什么停了，不要道歉一大段，不要追问费用/效果/美团。换短说法："
+            "只说这句：我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
+            "只用普通话，不要粤语。"
+        )
+    if any(keyword in clean for keyword in ["没有提", "没提", "没有问", "没问", "不是费用", "别猜", "不要猜", "理解错"]):
+        return (
+            f"{context}\n{sales_instruction}\n客户在纠正你刚才误判了他的意思：{clean}。"
+            "本轮必须先承认理解错，不要继续猜费用、效果、美团，也不要推进资料或加微信。"
+            "只说这句：明白，是我刚才理解错了。您是想问我是谁，还是让我直接说来电目的？"
+            "只用普通话，不要粤语。"
+        )
+    if signal == "repetition_complaint":
+        return (
+            f"{context}\n{sales_instruction}\n客户觉得你在重复或没有答到点：{clean}。"
+            "先承接情绪：明白，我不重复刚才那句。"
+            "然后换角度直接回答客户真正问题；如果客户没给具体问题，只问：您是想听费用、效果，还是和美团区别？"
+            "本轮禁止推进资料或加微信。"
+        )
+    if signal == "direct_answer_only":
+        return (
+            f"{context}\n{sales_instruction}\n客户要求直接回答或拒绝资料/微信：{clean}。"
+            "本轮停止发资料、加微信、约时间推进，只回答当前问题。"
+            "如果客户提到美团/抖音/已有渠道，就说明视频号是微信同城和私域补充，不替代原渠道。"
+            "如果客户没有明确问题，只用一句话问他最关心费用、效果还是流程。"
+        )
+    return (
+        f"{context}\n{sales_instruction}\n客户刚说：{clean}。先直接回答客户这句话，再按素材用一句话推进到发资料或约时间。"
+        "如果客户要求只回答问题、指出你重复、或拒绝资料/微信，就不要再推进发资料或加微信，只直接回答。"
+        "除非客户明确要资料，否则不要主动说发资料；除非客户问是否AI，否则不要主动说智能助手。"
+        "最多两句，只用普通话，不要粤语。"
     )

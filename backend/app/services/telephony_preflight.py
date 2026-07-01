@@ -3,6 +3,7 @@ from datetime import datetime
 
 from app.core.config import settings
 from app.services.asterisk_ami import AsteriskAmiError, check_asterisk_health, render_originate_channel
+from app.services.voice_gateway_profiles import current_voice_gateway_profile
 
 
 @dataclass(frozen=True)
@@ -28,21 +29,32 @@ def _step(key: str, label: str, status: str, detail: str, action: str = "") -> T
 
 
 def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object]:
+    profile = current_voice_gateway_profile()
     health = check_asterisk_health()
     steps: list[TelephonyPreflightStep] = []
 
     if settings.telephony_gateway_mode == "asterisk":
-        steps.append(_step("gateway_mode", "网关模式", "pass", "当前已切到 Asterisk/UC100 真实线路模式。"))
+        steps.append(_step("gateway_mode", "网关模式", "pass", f"当前已切到 Asterisk/{profile.label} 真实线路模式。"))
     else:
         steps.append(
             _step(
                 "gateway_mode",
                 "网关模式",
                 "warn",
-                "当前仍是模拟线路，代码不会访问 UC100。",
+                "当前仍是模拟线路，代码不会访问语音网关。",
                 "实机联调时让后端读取客户端生成的 backend-asterisk.env，并设置 TELEPHONY_GATEWAY_MODE=asterisk。",
             )
         )
+
+    steps.append(
+        _step(
+            "gateway_profile",
+            "语音网关档案",
+            "pass" if profile.host else "warn",
+            f"{profile.label} · {profile.host}:{profile.sip_port} · trunk {profile.trunk_name} · {profile.max_channels} 路",
+            "设备 IP 变化时用客户端重新发现/重新绑定语音网关；UC100 只是当前已测试档案。",
+        )
+    )
 
     if health.configured:
         steps.append(_step("ami_credentials", "AMI 账号", "pass", "AMI 用户名和密码已配置。"))
@@ -80,14 +92,14 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
         steps.append(_step("ami_auth", "AMI 登录", "warn", "AMI 未连接，暂不能验证登录。"))
 
     if health.trunk_configured:
-        steps.append(_step("trunk_name", "Trunk 名称", "pass", f"当前 trunk 名称：{settings.asterisk_trunk_name}。"))
+        steps.append(_step("trunk_name", "Trunk 名称", "pass", f"当前 trunk 名称：{profile.trunk_name}。"))
     else:
-        steps.append(_step("trunk_name", "Trunk 名称", "fail", "Asterisk trunk 名称未配置。", "设置 ASTERISK_TRUNK_NAME，例如 uc100。"))
+        steps.append(_step("trunk_name", "Trunk 名称", "fail", "Asterisk trunk 名称未配置。", "设置 VOICE_GATEWAY_TRUNK_NAME 或 ASTERISK_TRUNK_NAME。"))
 
     if health.trunk_reachable is True:
         steps.append(_step("trunk_reachable", "Trunk 可达", "pass", health.trunk_status))
     elif health.trunk_reachable is False:
-        steps.append(_step("trunk_reachable", "Trunk 可达", "fail", health.trunk_status, "检查 UC100 SIP 注册、PJSIP endpoint 名称和网络。"))
+        steps.append(_step("trunk_reachable", "Trunk 可达", "fail", health.trunk_status, "检查语音网关 SIP 注册、PJSIP endpoint 名称和现场网络。"))
     elif health.authenticated:
         steps.append(
             _step(
@@ -151,6 +163,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
 
     return {
         "checkedAt": datetime.utcnow(),
+        "voiceGatewayProfile": profile.as_dict(),
         "readyForDeviceTest": ready_for_device_test,
         "readyForSingleNumberTest": ready_for_single_number_test,
         "readyForBulkTasks": ready_for_bulk_tasks,
@@ -170,7 +183,7 @@ def _next_step(
     if first_fail:
         return first_fail.action or first_fail.detail
     if not ready_for_device_test:
-        return "先启动客户端内置 Asterisk，把网关切到 Asterisk，并确认 AMI 登录、Ping、trunk 可达。"
+        return "先启动客户端内置 Asterisk，把线路切到 Asterisk，并确认 AMI 登录、Ping、语音网关 trunk 可达。"
     if not ready_for_single_number_test:
         return "设备链路已基本可测；打开 ASTERISK_LIVE_CALL_ENABLED=true 后做单号试拨。"
     if not ready_for_bulk_tasks:

@@ -71,8 +71,16 @@ type AiAcqDesktopAsteriskStatus = {
   amiPort: number;
   sipPort: number;
   trunkName: string;
+  voiceGatewayProfile: string;
+  voiceGatewayLabel: string;
+  voiceGatewayHost: string;
+  voiceGatewaySipPort: number;
+  voiceGatewayRegisterEnabled: boolean;
   uc100Host: string;
   uc100SipPort: number;
+  uc100RegisterEnabled?: boolean;
+  asteriskAdvertisedHost?: string;
+  asteriskLocalNet?: string;
   maxChannels: number;
   audioSocketHost: string;
   audioSocketPort: number;

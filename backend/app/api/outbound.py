@@ -49,6 +49,7 @@ from app.services.realtime_outbound import (
     read_realtime_live_events,
 )
 from app.services.telephony_preflight import build_telephony_preflight
+from app.services.voice_gateway_profiles import current_voice_gateway_profile
 
 router = APIRouter()
 
@@ -101,16 +102,18 @@ def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
 
 @router.get("/telephony/config", response_model=TelephonyConfigRead)
 def telephony_config() -> dict[str, object]:
+    profile = current_voice_gateway_profile()
     return {
         "gatewayMode": settings.telephony_gateway_mode,
+        "voiceGatewayProfile": profile.as_dict(),
         "queueEnabled": settings.outbound_queue_enabled,
         "queueName": settings.outbound_queue_name,
         "redisUrlConfigured": bool(settings.redis_url),
         "asteriskHost": settings.asterisk_host,
         "asteriskAmiPort": settings.asterisk_ami_port,
         "asteriskUsernameConfigured": bool(settings.asterisk_ami_username),
-        "asteriskTrunkName": settings.asterisk_trunk_name,
-        "asteriskMaxChannels": settings.asterisk_max_channels,
+        "asteriskTrunkName": profile.trunk_name,
+        "asteriskMaxChannels": profile.max_channels,
         "asteriskLiveCallEnabled": settings.asterisk_live_call_enabled,
         "asteriskBulkCallEnabled": settings.asterisk_bulk_call_enabled,
     }
@@ -135,16 +138,26 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    media_loop_confirmed = result.media_loop_confirmed or _wait_realtime_media_confirmed_since(
+    conversation_status = _wait_realtime_conversation_status_since(
         started_at,
         timeout_seconds=6.0 if result.cellular_confirmed else 0.0,
     )
-    acceptance_ready = result.acceptance_ready or (result.cellular_confirmed and media_loop_confirmed)
+    media_loop_confirmed = result.media_loop_confirmed or conversation_status["mediaLoopConfirmed"]
+    human_speech_confirmed = conversation_status["humanSpeechConfirmed"]
+    ai_speech_confirmed = conversation_status["aiSpeechConfirmed"]
+    call_screening_detected = conversation_status["callScreeningDetected"]
+    conversation_confirmed = result.cellular_confirmed and human_speech_confirmed and ai_speech_confirmed
+    acceptance_ready = result.acceptance_ready or conversation_confirmed
     acceptance_note = result.acceptance_note
     verification_stage = result.verification_stage
-    if result.cellular_confirmed and media_loop_confirmed:
+    if conversation_confirmed:
+        verification_stage = "realtime_conversation_confirmed"
+        acceptance_note = "已确认真人客户语音，且 AI 首句已实际播入电话；实时对话验收通过。"
+    elif result.cellular_confirmed and media_loop_confirmed:
         verification_stage = "realtime_media_confirmed"
-        acceptance_note = "Asterisk 收到接通事件，AudioSocket 已出现实时 ASR/LLM/TTS 媒体事件；实时通话验收通过。"
+        acceptance_note = "线路和实时媒体桥已接通，但还没同时确认真人语音和 AI 首句播出。"
+    if call_screening_detected and not human_speech_confirmed:
+        acceptance_note = "检测到电话助理/秘书提示，已说明来电原因；还未确认真人客户接听。"
     return {
         "accepted": result.accepted,
         "actionId": result.action_id,
@@ -155,36 +168,68 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "verificationStage": verification_stage,
         "cellularConfirmed": result.cellular_confirmed,
         "mediaLoopConfirmed": media_loop_confirmed,
+        "humanSpeechConfirmed": human_speech_confirmed,
+        "aiSpeechConfirmed": ai_speech_confirmed,
+        "callScreeningDetected": call_screening_detected,
+        "conversationConfirmed": conversation_confirmed,
         "acceptanceReady": acceptance_ready,
         "acceptanceNote": acceptance_note,
     }
 
 
-def _wait_realtime_media_confirmed_since(started_at: datetime, timeout_seconds: float = 0.0) -> bool:
+def _wait_realtime_conversation_status_since(started_at: datetime, timeout_seconds: float = 0.0) -> dict[str, bool]:
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
-        if _realtime_media_confirmed_since(started_at):
-            return True
-        if time.monotonic() >= deadline:
-            return False
+        status = _realtime_conversation_status_since(started_at)
+        if status["conversationConfirmed"] or time.monotonic() >= deadline:
+            return status
+        if status["callScreeningDetected"] and time.monotonic() >= deadline - 1.0:
+            return status
         time.sleep(0.25)
 
 
-def _realtime_media_confirmed_since(started_at: datetime) -> bool:
-    media_event_types = {"call_connected", "asr_final", "llm_reply", "tts_start", "tts_done", "tts_interrupted"}
-    events_payload = read_realtime_live_events(limit=120)
+def _realtime_conversation_status_since(started_at: datetime) -> dict[str, bool]:
+    media_event_types = {
+        "call_connected",
+        "audio_capture_started",
+        "remote_speech_started",
+        "asr_final",
+        "tts_start",
+        "tts_done",
+        "tts_interrupted",
+        "call_screening_detected",
+        "human_speech_confirmed",
+    }
+    status = {
+        "mediaLoopConfirmed": False,
+        "humanSpeechConfirmed": False,
+        "aiSpeechConfirmed": False,
+        "callScreeningDetected": False,
+        "conversationConfirmed": False,
+    }
+    events_payload = read_realtime_live_events(limit=160)
     for event in events_payload.get("events", []):
-        if str(event.get("type") or "") not in media_event_types:
+        event_type = str(event.get("type") or "")
+        if event_type not in media_event_types:
             continue
         at_text = str(event.get("at") or "")
         try:
             event_at = datetime.fromisoformat(at_text.replace("Z", ""))
         except ValueError:
             continue
-        if event_at >= started_at:
-            return True
-    return False
-
+        if event_at < started_at:
+            continue
+        status["mediaLoopConfirmed"] = True
+        if event_type == "human_speech_confirmed":
+            status["humanSpeechConfirmed"] = True
+        if event_type in {"tts_start", "tts_done"}:
+            raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+            sent_bytes = int(raw.get("sentBytes") or raw.get("bytes") or 0)
+            status["aiSpeechConfirmed"] = status["aiSpeechConfirmed"] or sent_bytes > 0
+        if event_type == "call_screening_detected":
+            status["callScreeningDetected"] = True
+    status["conversationConfirmed"] = status["humanSpeechConfirmed"] and status["aiSpeechConfirmed"]
+    return status
 
 @router.get("/realtime/pipeline", response_model=RealtimePipelineRead)
 def realtime_pipeline() -> dict[str, object]:
@@ -202,6 +247,7 @@ def create_realtime_session_api(payload: RealtimeSessionCreate) -> dict[str, obj
         merchant_name=payload.merchant_name,
         phone=payload.phone,
         voice=payload.voice.model_dump(by_alias=True),
+        conversation_route=payload.conversation_route,
     )
 
 

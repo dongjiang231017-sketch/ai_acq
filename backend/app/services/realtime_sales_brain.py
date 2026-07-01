@@ -1,0 +1,601 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+
+@dataclass(frozen=True)
+class SalesTurnPlan:
+    topic: str
+    emotion: str
+    stage: str
+    answer_mode: str
+    should_advance: bool
+    repeat_risk: bool
+    direct_answer_only: bool
+    customer_summary: str
+
+
+@dataclass(frozen=True)
+class SalesBrainReply:
+    reply: str
+    strategy: str
+    plan: SalesTurnPlan
+
+
+EMOTION_ACKS = {
+    "busy": ["可以，我短说。", "明白，不耽误您。"],
+    "annoyed": ["明白，我不硬推。", "懂，我直接答重点。"],
+    "skeptical": ["您这个担心正常。", "对，这点要讲清楚。"],
+    "confused": ["我换短点说。", "我重新说简单点。"],
+    "interested": ["可以，我直接说重点。", "好，那我按重点说。"],
+    "neutral": ["明白。", ""],
+}
+
+TOPIC_ANSWERS = {
+    "identity": [
+        "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
+        "我这边是本地生活服务顾问，来电是确认视频号团购到店获客和微信同城曝光。",
+    ],
+    "price": [
+        "这是付费服务，费用看套餐设计和投放节奏，不合适不建议做。",
+        "要收费，但不是上来硬报价格，先看门店品类适不适合。",
+    ],
+    "guarantee": [
+        "效果不能空口保底，只能先测曝光、咨询和到店数据。",
+        "不能承诺一定成交，靠谱的做法是小范围测试数据再放大。",
+    ],
+    "channel_difference": [
+        "美团偏搜索下单，视频号偏微信同城推荐和私域沉淀，是补充不是替代。",
+        "简单说，美团像货架搜索；视频号更像微信同城内容推荐和私域入口。",
+    ],
+    "process": [
+        "流程是先看品类，再设计团购套餐，接着做同城曝光测试。",
+        "先判断门店适不适合，再做套餐、页面和小范围投放。",
+    ],
+    "materials": [
+        "可以，后面发案例和流程给您，您看完再判断。",
+        "可以发，电话里我先把核心点说清楚。",
+    ],
+    "owner": [
+        "方便转给负责团购或门店运营的人吗？我只说重点。",
+        "那我不多讲，麻烦转给负责到店获客的人更合适。",
+    ],
+    "source": [
+        "不方便我就标记不再联系，这通只做门店业务沟通。",
+        "您介意的话我马上标记不再联系，只做门店业务沟通。",
+    ],
+    "quality": [
+        "视频号团购，就是帮门店做可下单套餐，再用微信同城曝光引到店。",
+        "我短说：做团购套餐加微信同城曝光，目标是到店客。",
+    ],
+    "correction": [
+        "明白，是我刚才理解错了。您是想问我是谁，还是让我直接说来电目的？",
+        "对，是我刚才猜错了。您刚才是问身份，还是问这通电话具体干嘛？",
+    ],
+    "rejection": [
+        "好的，不打扰了，再见。",
+        "明白，那我不打扰了，再见。",
+    ],
+    "busy": [
+        "那我不展开，您看今天晚点还是明天上午方便？",
+        "可以，我稍后再联系，别影响您现在忙。",
+    ],
+    "open_need": [
+        "我先确认一个点，您现在更想提升到店客流，还是多一个微信曝光入口？",
+        "那我问一句，您门店现在更缺新客到店，还是团购套餐转化？",
+    ],
+}
+
+ADVANCE_LINES = {
+    "identity": "",
+    "price": "您更关心基础费用，还是先看适不适合？",
+    "guarantee": "可以先拿小测试看数据，不用一上来做大投入。",
+    "channel_difference": "已有美团也能做补充，不冲突。",
+    "process": "如果品类合适，再看套餐怎么设计。",
+    "quality": "您更想听费用、效果，还是和美团区别？",
+    "open_need": "",
+}
+
+
+def render_sales_reply(
+    text: str,
+    intent: str,
+    merchant_name: str,
+    fallback_reply: str,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> SalesBrainReply:
+    history = conversation_history or []
+    plan = plan_sales_turn(text, intent, history)
+    last_assistant = _last_history_content(history, "assistant")
+    answers = TOPIC_ANSWERS.get(plan.topic) or []
+    answer = _choose_variant(answers, text, last_assistant) if answers else fallback_reply
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if plan.topic == "identity" and compact in {"喂", "喂喂", "你好", "您好"}:
+        answer = "您好，我在。我是做视频号团购到店获客的，给您来电是确认微信同城曝光这块。"
+    if plan.topic == "identity" and _has_any(text, ["干嘛", "打电话", "什么事", "来电原因", "为什么"]):
+        answer = "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
+    ack = _choose_variant(EMOTION_ACKS.get(plan.emotion, EMOTION_ACKS["neutral"]), text + intent, last_assistant)
+    if plan.direct_answer_only and plan.topic == "open_need":
+        answer = "不推材料，我直接答。您问费用、效果或流程，我就按这个说。"
+    if plan.direct_answer_only and plan.topic == "quality":
+        answer = "我不重复。您问费用、效果或美团区别，我按这个答。"
+    if plan.topic == "quality" and _has_any(text, ["没解决", "没回答", "不是问这个", "回答我"]):
+        answer = "我刚才没答到点。您是问费用、效果、流程，还是和美团区别？"
+    if plan.topic == "correction":
+        ack = ""
+
+    if plan.topic == "open_need" and merchant_name.strip():
+        answer = answer.replace("您门店", f"{merchant_name.strip()}")
+
+    if plan.topic in {"identity", "correction", "rejection"}:
+        ack = ""
+    pieces = [ack, answer]
+    advance = ADVANCE_LINES.get(plan.topic, "")
+    if plan.should_advance and advance and not _push_forbidden(text, history):
+        pieces.append(advance)
+    reply = _polish_reply("".join(piece for piece in pieces if piece))
+    reply = _avoid_repeat(reply, last_assistant, plan)
+    return SalesBrainReply(reply=reply, strategy=f"sales_brain_{plan.topic}_{plan.emotion}", plan=plan)
+
+
+def plan_sales_turn(text: str, intent: str = "", conversation_history: list[dict[str, str]] | None = None) -> SalesTurnPlan:
+    history = conversation_history or []
+    clean = " ".join(text.strip().split())
+    topic = _detect_topic(clean, intent, history)
+    emotion = _detect_emotion(clean, history)
+    repeat_risk = _repeat_risk(clean, history)
+    direct_answer_only = _push_forbidden(clean, history) or repeat_risk
+    stage = _detect_stage(topic, intent, history)
+    should_advance = topic not in {"rejection", "busy", "source", "owner", "identity", "correction"} and not direct_answer_only
+    if emotion in {"annoyed", "busy", "confused"}:
+        should_advance = should_advance and topic == "open_need"
+    answer_mode = "direct_answer" if direct_answer_only else "answer_then_soft_advance"
+    return SalesTurnPlan(
+        topic=topic,
+        emotion=emotion,
+        stage=stage,
+        answer_mode=answer_mode,
+        should_advance=should_advance,
+        repeat_risk=repeat_risk,
+        direct_answer_only=direct_answer_only,
+        customer_summary=_customer_summary(topic, emotion),
+    )
+
+
+def build_omni_sales_instruction(
+    text: str,
+    signal: str,
+    *,
+    recent_history: list[dict[str, str]] | None = None,
+    first_human_after_screening: bool = False,
+    last_reply: str = "",
+) -> str:
+    plan = plan_sales_turn(text, signal, recent_history or [])
+    lines = [
+        f"销售行为判断：客户主题={plan.topic}，情绪={plan.emotion}，阶段={plan.stage}，回答方式={plan.answer_mode}。",
+        "像真人电销一样：先承接情绪，再直接答问题；一句话不超过35个字，最多两句。",
+        "客户重复问时必须换角度；客户不想加微信/资料时，本通后续禁止再推资料。",
+        "不要说你刚才被打断了，不要提识别、模型、系统、线路等技术词。",
+    ]
+    if first_human_after_screening:
+        lines.append("真人可能刚接上来没听到前文，先自然说明身份和来电原因。")
+    if last_reply:
+        lines.append(f"上一句AI是：{last_reply[:80]}。本轮不能复读这句。")
+    if plan.topic in TOPIC_ANSWERS:
+        lines.append("可用回答方向：" + " / ".join(TOPIC_ANSWERS[plan.topic][:2]))
+    if plan.should_advance:
+        lines.append("回答完只允许轻轻问一个选择题或下一步，不要连续推销。")
+    else:
+        lines.append("本轮只回答或礼貌收尾，不要推进成交。")
+    return "\n".join(lines)
+
+
+def score_realtime_events(events: list[dict[str, object]]) -> dict[str, object] | None:
+    call_events = _latest_call_events(events)
+    if not call_events:
+        return None
+    metrics = [
+        _metric_answer_detection(call_events),
+        _metric_latency(call_events),
+        _metric_turn_taking(call_events),
+        _metric_understanding(call_events),
+        _metric_naturalness(call_events),
+        _metric_stability(call_events),
+    ]
+    total = int(round(sum(metric["score"] * metric["weight"] for metric in metrics) / sum(metric["weight"] for metric in metrics)))
+    has_human = _has_event(call_events, "human_speech_confirmed")
+    has_screening = _has_event(call_events, "call_screening_detected")
+    if not has_human:
+        total = min(total, 58 if has_screening else 52)
+    return {
+        "callId": call_events[-1].get("callId"),
+        "score": total,
+        "status": _score_status(total),
+        "summary": _score_summary(total, metrics, human_confirmed=has_human, call_screening=has_screening),
+        "metrics": metrics,
+    }
+
+
+def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
+    combined = " ".join([text, _last_history_content(history, "user"), _last_history_content(history, "assistant")])
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if _has_any(text, ["放个屁", "滚", "扯淡", "骗子", "神经病", "有病"]):
+        return "rejection"
+    if _has_any(text, ["机器人", "ai", "AI", "念稿", "不自然", "不像人", "机械", "不会说话", "你不会"]):
+        return "quality"
+    if intent == "身份确认" or compact in {
+        "喂",
+        "喂喂",
+        "你好",
+        "您好",
+        "你好你",
+        "您好你",
+        "在",
+        "在在",
+        "你谁",
+        "谁",
+        "谁啊",
+        "谁呀",
+        "哪位",
+        "您哪位",
+        "你哪位",
+    }:
+        return "identity"
+    if intent in {"明确拒绝", "礼貌结束", "terminal_close", "rejection"} or _has_any(
+        text,
+        [
+            "别打",
+            "别联系",
+            "没兴趣",
+            "拉黑",
+            "不需要你们",
+            "不需要了",
+            "不用了",
+            "不要了",
+            "先这样",
+            "就这样",
+            "这样吧",
+            "挂了",
+            "挂电话",
+            "再见",
+            "拜拜",
+            "不聊了",
+            "不说了",
+        ],
+    ):
+        return "rejection"
+    if intent == "稍后联系" or _has_any(text, ["忙", "没空", "不方便", "开会", "晚点", "稍后"]):
+        return "busy"
+    if _has_any(text, ["没有提", "没提", "没有问", "没问", "不是费用", "别猜", "不要猜", "理解错", "猜错"]):
+        return "correction"
+    if _has_any(text, ["多少钱", "费用", "价格", "收费", "付费", "要钱", "花钱", "贵"]):
+        return "price"
+    if _has_any(text, ["美团", "大众点评", "抖音团购", "小红书", "高德", "已经做", "在做团购"]):
+        return "channel_difference"
+    if _has_any(text, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "靠谱吗", "有用吗"]):
+        return "guarantee"
+    if _has_any(text, ["怎么做", "怎么合作", "流程", "怎么弄", "具体讲", "详细讲", "介绍一下"]):
+        return "process"
+    if _has_any(text, ["多少单", "带来多少", "能带多少", "能来多少"]):
+        return "guarantee"
+    if _has_any(text, ["哪来的", "哪里来的", "怎么知道", "电话来源", "号码来源", "个人信息"]):
+        return "source"
+    if _has_any(text, ["重复", "总说", "老说", "别重复", "不要重复", "没回答", "没解决", "不是问这个"]):
+        return _infer_previous_topic(history) or "quality"
+    if _push_forbidden(text, history):
+        return "open_need"
+    if _has_any(text, ["微信", "资料", "发给我", "发我", "怎么发", "短信", "案例"]):
+        return "materials"
+    if _has_any(text, ["老板不在", "负责人", "店长", "不是我负责", "转给"]):
+        return "owner"
+    if _has_any(text, ["你是谁", "你谁", "谁啊", "谁呀", "哪位", "您哪位", "你咋", "咋的", "什么情况", "什么公司", "做什么", "做啥", "干嘛", "什么事", "来电原因", "官方"]):
+        return "identity"
+    if _has_any(text, ["听不清", "没听清", "听不懂", "说什么", "什么意思", "断断续续", "卡", "信号"]):
+        return "quality"
+    if not text.strip() and _has_any(combined, ["美团", "大众点评", "抖音团购", "小红书", "高德"]):
+        return "channel_difference"
+    return "open_need"
+
+
+def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
+    if _has_any(text, ["忙", "没空", "开会", "不方便", "快点", "赶时间"]):
+        return "busy"
+    if _has_any(text, ["别", "不要", "重复", "烦", "没解决", "没回答", "不需要", "不用", "挂了", "放个屁", "滚", "扯淡", "骗子"]):
+        return "annoyed"
+    if _has_any(text, ["保证", "靠谱吗", "真的假的", "有用吗", "怎么保证", "凭什么"]):
+        return "skeptical"
+    if _has_any(text, ["听不懂", "什么意思", "说什么", "没听清", "你是谁", "没有提", "没提", "没问", "理解错", "猜错"]):
+        return "confused"
+    if _has_any(text, ["可以", "说一下", "了解", "怎么合作", "资料", "发我"]):
+        return "interested"
+    if _repeat_risk(text, history):
+        return "annoyed"
+    return "neutral"
+
+
+def _detect_stage(topic: str, intent: str, history: list[dict[str, str]]) -> str:
+    if topic in {"identity", "quality", "correction"} or not history:
+        return "opening_repair"
+    if topic in {"price", "guarantee", "channel_difference", "source"}:
+        return "objection_handling"
+    if topic in {"process", "open_need"}:
+        return "discovery"
+    if topic in {"materials", "owner"}:
+        return "next_step"
+    if topic in {"rejection", "busy"}:
+        return "close_or_callback"
+    return intent or "conversation"
+
+
+def _customer_summary(topic: str, emotion: str) -> str:
+    return f"客户当前在问{topic}，情绪偏{emotion}"
+
+
+def _push_forbidden(text: str, history: list[dict[str, str]]) -> bool:
+    combined = " ".join([text, _last_history_content(history, "user"), _last_history_content(history, "assistant")])
+    return _has_any(combined, ["不需要资料", "不用资料", "不要资料", "别发资料", "不用发资料", "不用加微信", "不加微信", "直接回答", "说重点", "别推"])
+
+
+def _repeat_risk(text: str, history: list[dict[str, str]]) -> bool:
+    if _has_any(text, ["重复", "总说", "老说", "别重复", "不要重复"]):
+        return True
+    replies = [_normalize_reply(turn.get("content", "")) for turn in history if turn.get("role") == "assistant"]
+    return bool(len(replies) >= 2 and replies[-1] and replies[-1] == replies[-2])
+
+
+def _infer_previous_topic(history: list[dict[str, str]]) -> str | None:
+    last_user = _last_history_content(history, "user")
+    last_assistant = _last_history_content(history, "assistant")
+    combined = last_user + last_assistant
+    for topic in ("price", "guarantee", "channel_difference", "process", "identity"):
+        if _detect_topic(combined, "", []) == topic:
+            return topic
+    return None
+
+
+def _last_history_content(history: list[dict[str, str]], role: str) -> str:
+    for turn in reversed(history):
+        if (turn.get("role") or "").strip().lower() == role:
+            return str(turn.get("content") or "").strip()
+    return ""
+
+
+def _choose_variant(options: list[str], seed: str, last_assistant: str) -> str:
+    if not options:
+        return ""
+    start = sum(ord(ch) for ch in seed) % len(options)
+    for offset in range(len(options)):
+        candidate = options[(start + offset) % len(options)]
+        if _normalize_reply(candidate) != _normalize_reply(last_assistant):
+            return candidate
+    return options[start]
+
+
+def _polish_reply(reply: str) -> str:
+    cleaned = re.sub(r"\s+", "", reply)
+    cleaned = cleaned.replace("。。", "。").replace("？？", "？")
+    if len(cleaned) <= 92:
+        return cleaned
+    parts = re.split(r"(?<=[。！？])", cleaned)
+    shortened = ""
+    for part in parts:
+        if len(shortened + part) > 92:
+            break
+        shortened += part
+    return shortened or cleaned[:92]
+
+
+def _avoid_repeat(reply: str, last_assistant: str, plan: SalesTurnPlan) -> str:
+    if _normalize_reply(reply) != _normalize_reply(last_assistant):
+        return reply
+    options = TOPIC_ANSWERS.get(plan.topic, []) + ["我换个说法：" + ADVANCE_LINES.get(plan.topic, "您更想先听费用、效果，还是流程？")]
+    for candidate in options:
+        polished = _polish_reply(candidate)
+        if _normalize_reply(polished) != _normalize_reply(last_assistant):
+            return polished
+    return reply
+
+
+def _normalize_reply(text: str) -> str:
+    return re.sub(r"[\s。！？?!，,、.]+", "", str(text).lower())
+
+
+def _has_any(text: str, keywords: list[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _latest_call_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    call_ids = [str(event.get("callId") or "") for event in events if event.get("callId")]
+    if not call_ids:
+        return []
+    latest = call_ids[-1]
+    return [event for event in events if str(event.get("callId") or "") == latest]
+
+
+def _metric_answer_detection(events: list[dict[str, object]]) -> dict[str, object]:
+    has_connected = _has_event(events, "call_connected")
+    has_human = _has_event(events, "human_speech_confirmed")
+    has_ai = _has_speech_audio(events)
+    score = 100 if has_connected and has_human and has_ai else 65 if has_connected and (has_human or has_ai) else 30
+    return _metric("接通识别", score, 1.2, "真人语音和AI首句都要确认" if score < 100 else "已确认真人语音和AI播报")
+
+
+def _metric_latency(events: list[dict[str, object]]) -> dict[str, object]:
+    starts = [_event_latency(event) for event in events if event.get("type") == "tts_start"]
+    starts = [value for value in starts if value > 0]
+    if not starts:
+        return _metric("响应延迟", 35, 1.0, "没有检测到可评分的首音频延迟")
+    average = sum(starts) / len(starts)
+    score = 100 if average <= 650 else 82 if average <= 1000 else 62 if average <= 1500 else 35
+    return _metric("响应延迟", score, 1.0, f"平均首音频约 {int(average)}ms")
+
+
+def _metric_turn_taking(events: list[dict[str, object]]) -> dict[str, object]:
+    human_at = next((_parse_event_time(event) for event in events if event.get("type") == "human_speech_confirmed"), None)
+    scored_events = [
+        event
+        for event in events
+        if not human_at or ((_parse_event_time(event) or human_at) >= human_at)
+    ]
+    barge_events = [
+        event
+        for event in scored_events
+        if event.get("type") in {"barge_in", "barge_recovery_ready", "barge_turn_committed", "tts_interrupted"}
+    ]
+    if not barge_events:
+        return _metric("打断恢复", 78, 0.9, "本轮没有明显打断，按基础稳定分")
+    recovered = any(
+        _has_event_after(scored_events, start_type, {"tts_start", "llm_reply"}, within_seconds=4.5)
+        for start_type in ("barge_recovery_ready", "barge_turn_committed", "barge_in", "tts_interrupted")
+    )
+    score = 92 if recovered else 48
+    return _metric("打断恢复", score, 1.1, "打断后已重新回复" if recovered else "打断后未在4.5秒内恢复回复")
+
+
+def _metric_understanding(events: list[dict[str, object]]) -> dict[str, object]:
+    user_turns = [
+        str(event.get("text") or "")
+        for event in events
+        if event.get("type") in {"asr_final", "human_speech_confirmed"} and event.get("text")
+    ]
+    replies = [str(event.get("reply") or "") for event in events if event.get("type") == "llm_reply" and event.get("reply")]
+    if not user_turns or not replies:
+        return _metric("理解客户", 35, 1.2, "缺少客户转写或AI回复")
+    generic_count = sum(_looks_generic(reply) for reply in replies)
+    score = 95
+    if len(replies) < max(1, len(user_turns) // 2):
+        score -= 20
+    score -= min(35, generic_count * 12)
+    if _duplicate_ratio(replies) >= 0.3:
+        score -= 25
+    if _repeated_opening_count(replies) >= 2:
+        score -= 25
+    if _has_profanity(user_turns) and not _has_polite_close(replies):
+        score -= 35
+    return _metric("理解客户", max(25, score), 1.2, f"{len(user_turns)}轮客户语音，{len(replies)}轮AI回复")
+
+
+def _metric_naturalness(events: list[dict[str, object]]) -> dict[str, object]:
+    replies = [str(event.get("reply") or "") for event in events if event.get("type") == "llm_reply" and event.get("reply")]
+    if not replies:
+        return _metric("真人感", 35, 1.0, "没有AI回复文本")
+    bad = sum(_has_any(reply, ["刚才被打断", "系统", "识别", "模型", "线路", "智能助手", "机器人", "先发份资料"]) for reply in replies)
+    emotion = sum(_has_any(reply, ["明白", "可以", "对", "不急", "您问", "我换", "懂"]) for reply in replies)
+    long = sum(len(reply) > 90 for reply in replies)
+    repeated_opening = _repeated_opening_count(replies)
+    score = 82 + min(12, emotion * 4) - bad * 18 - long * 8 - max(0, repeated_opening - 1) * 22
+    return _metric("真人感", max(25, min(100, score)), 1.0, f"情绪承接 {emotion} 次，技术口吻 {bad} 次")
+
+
+def _metric_stability(events: list[dict[str, object]]) -> dict[str, object]:
+    bad_types = {"omni_unavailable", "call_error", "omni_audio_append_error", "omni_response_request_error"}
+    bad_count = sum(1 for event in events if event.get("type") in bad_types)
+    no_audio = sum(1 for event in events if event.get("type") == "omni_no_audio_response")
+    score = max(25, 100 - bad_count * 30 - no_audio * 15)
+    return _metric("链路稳定", score, 0.9, f"异常 {bad_count} 次，无音频兜底 {no_audio} 次")
+
+
+def _metric(name: str, score: int, weight: float, detail: str) -> dict[str, object]:
+    bounded = max(0, min(100, int(score)))
+    return {"name": name, "score": bounded, "status": _score_status(bounded), "weight": weight, "detail": detail}
+
+
+def _score_status(score: int) -> str:
+    if score >= 85:
+        return "pass"
+    if score >= 65:
+        return "warn"
+    return "fail"
+
+
+def _score_summary(
+    total: int,
+    metrics: list[dict[str, object]],
+    *,
+    human_confirmed: bool = True,
+    call_screening: bool = False,
+) -> str:
+    if not human_confirmed and call_screening:
+        return "只检测到电话助理，还没有确认真人客户语音。"
+    if not human_confirmed:
+        return "还没有确认真人客户语音，不能作为实时通话验收。"
+    weak = [str(metric["name"]) for metric in metrics if int(metric["score"]) < 70]
+    if total >= 85:
+        return "本轮接近可交付标准，继续观察真实客户长通话。"
+    if weak:
+        return "需要重点修正：" + "、".join(weak[:3])
+    return "整体可用，但还需要真实长通话继续压测。"
+
+
+def _has_event(events: list[dict[str, object]], event_type: str) -> bool:
+    return any(event.get("type") == event_type for event in events)
+
+
+def _has_speech_audio(events: list[dict[str, object]]) -> bool:
+    for event in events:
+        if event.get("type") not in {"tts_start", "tts_done"}:
+            continue
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        if int(raw.get("sentBytes") or raw.get("bytes") or 0) > 0:
+            return True
+    return False
+
+
+def _event_latency(event: dict[str, object]) -> int:
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    return int(event.get("latencyMs") or raw.get("firstAudioMs") or raw.get("synthMs") or 0)
+
+
+def _looks_generic(reply: str) -> bool:
+    return _has_any(reply, ["费用、效果", "更关心费用", "更想听费用"]) or len(reply.strip()) < 6
+
+
+def _duplicate_ratio(replies: list[str]) -> float:
+    normalized = [_normalize_reply(reply) for reply in replies if reply.strip()]
+    if len(normalized) <= 1:
+        return 0.0
+    return 1.0 - (len(set(normalized)) / len(normalized))
+
+
+def _repeated_opening_count(replies: list[str]) -> int:
+    opening_markers = ["方便听我说", "确认门店是否需要", "想确认门店团购曝光"]
+    return sum(_has_any(reply, opening_markers) for reply in replies)
+
+
+def _has_profanity(texts: list[str]) -> bool:
+    return any(_has_any(text, ["放个屁", "滚", "扯淡", "骗子", "神经病", "有病"]) for text in texts)
+
+
+def _has_polite_close(replies: list[str]) -> bool:
+    return any(_has_any(reply, ["不打扰", "不再跟进", "打扰您了", "祝您生意顺利"]) for reply in replies)
+
+
+def _has_event_after(
+    events: list[dict[str, object]],
+    start_type: str,
+    next_types: set[str],
+    *,
+    within_seconds: float,
+) -> bool:
+    start_times = [_parse_event_time(event) for event in events if event.get("type") == start_type]
+    next_events = [(event.get("type"), _parse_event_time(event)) for event in events if event.get("type") in next_types]
+    for start in start_times:
+        if not start:
+            continue
+        for _, candidate in next_events:
+            if candidate and 0 <= (candidate - start).total_seconds() <= within_seconds:
+                return True
+    return False
+
+
+def _parse_event_time(event: dict[str, object]) -> datetime | None:
+    text = str(event.get("at") or "")
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", ""))
+    except ValueError:
+        return None

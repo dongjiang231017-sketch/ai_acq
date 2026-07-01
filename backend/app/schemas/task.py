@@ -106,8 +106,28 @@ class OutboundOverview(BaseModel):
     intent_count: Annotated[int, Field(alias="intentCount")]
 
 
+class VoiceGatewayProfileRead(BaseModel):
+    key: str
+    label: str
+    vendor: str
+    model: str
+    category: str
+    transport: str
+    host: str
+    sip_port: Annotated[int, Field(alias="sipPort")]
+    trunk_name: Annotated[str, Field(alias="trunkName")]
+    max_channels: Annotated[int, Field(alias="maxChannels")]
+    line_type: Annotated[str, Field(alias="lineType")]
+    admin_url: Annotated[str, Field(alias="adminUrl")]
+    discovery_mode: Annotated[str, Field(alias="discoveryMode")]
+    tested: bool
+    capabilities: list[str]
+    notes: list[str]
+
+
 class TelephonyConfigRead(BaseModel):
     gateway_mode: Annotated[str, Field(alias="gatewayMode")]
+    voice_gateway_profile: Annotated[VoiceGatewayProfileRead, Field(alias="voiceGatewayProfile")]
     queue_enabled: Annotated[bool, Field(alias="queueEnabled")]
     queue_name: Annotated[str, Field(alias="queueName")]
     redis_url_configured: Annotated[bool, Field(alias="redisUrlConfigured")]
@@ -123,6 +143,7 @@ class TelephonyConfigRead(BaseModel):
 class TelephonyHealthRead(BaseModel):
     checked_at: Annotated[datetime, Field(alias="checkedAt")]
     gateway_mode: Annotated[str, Field(alias="gatewayMode")]
+    voice_gateway_profile: Annotated[VoiceGatewayProfileRead, Field(alias="voiceGatewayProfile")]
     configured: bool
     live_call_enabled: Annotated[bool, Field(alias="liveCallEnabled")]
     bulk_call_enabled: Annotated[bool, Field(alias="bulkCallEnabled")]
@@ -147,6 +168,7 @@ class TelephonyPreflightStepRead(BaseModel):
 
 class TelephonyPreflightRead(BaseModel):
     checked_at: Annotated[datetime, Field(alias="checkedAt")]
+    voice_gateway_profile: Annotated[VoiceGatewayProfileRead, Field(alias="voiceGatewayProfile")]
     ready_for_device_test: Annotated[bool, Field(alias="readyForDeviceTest")]
     ready_for_single_number_test: Annotated[bool, Field(alias="readyForSingleNumberTest")]
     ready_for_bulk_tasks: Annotated[bool, Field(alias="readyForBulkTasks")]
@@ -170,6 +192,10 @@ class TelephonyTestCallRead(BaseModel):
     verification_stage: Annotated[str, Field(alias="verificationStage")]
     cellular_confirmed: Annotated[bool, Field(alias="cellularConfirmed")]
     media_loop_confirmed: Annotated[bool, Field(alias="mediaLoopConfirmed")]
+    human_speech_confirmed: Annotated[bool, Field(alias="humanSpeechConfirmed")] = False
+    ai_speech_confirmed: Annotated[bool, Field(alias="aiSpeechConfirmed")] = False
+    call_screening_detected: Annotated[bool, Field(alias="callScreeningDetected")] = False
+    conversation_confirmed: Annotated[bool, Field(alias="conversationConfirmed")] = False
     acceptance_ready: Annotated[bool, Field(alias="acceptanceReady")]
     acceptance_note: Annotated[str, Field(alias="acceptanceNote")]
 
@@ -183,6 +209,17 @@ class RealtimePipelineStepRead(BaseModel):
     detail: str
 
 
+class RealtimeRouteOptionRead(BaseModel):
+    key: str
+    label: str
+    mode: str
+    summary: str
+    estimated_latency_ms: Annotated[int, Field(alias="estimatedLatencyMs")]
+    estimated_ai_cost_per_minute: Annotated[float, Field(alias="estimatedAiCostPerMinute")]
+    ready_for_asterisk_media: Annotated[bool, Field(alias="readyForAsteriskMedia")]
+    is_active: Annotated[bool, Field(alias="isActive")]
+
+
 class RealtimePipelineRead(BaseModel):
     mode: str
     bridge_mode: Annotated[str, Field(alias="bridgeMode")]
@@ -192,6 +229,7 @@ class RealtimePipelineRead(BaseModel):
     ready_for_mock_call: Annotated[bool, Field(alias="readyForMockCall")]
     ready_for_asterisk_media: Annotated[bool, Field(alias="readyForAsteriskMedia")]
     next_step: Annotated[str, Field(alias="nextStep")]
+    route_options: Annotated[list[RealtimeRouteOptionRead], Field(alias="routeOptions")] = []
     steps: list[RealtimePipelineStepRead]
 
 
@@ -209,6 +247,7 @@ class RealtimeSessionCreate(BaseModel):
     merchant_name: Annotated[str, Field(alias="merchantName", min_length=1, max_length=120)] = "模拟商家"
     phone: Annotated[str | None, Field(max_length=40)] = None
     voice: RealtimeVoiceSelection
+    conversation_route: Annotated[str, Field(alias="conversationRoute", pattern="^(pipeline|omni)$")] = "pipeline"
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -278,8 +317,25 @@ class RealtimeLiveEventRead(BaseModel):
     raw: dict[str, object]
 
 
+class RealtimeLiveScoreMetricRead(BaseModel):
+    name: str
+    score: int
+    status: str
+    weight: float
+    detail: str
+
+
+class RealtimeLiveScoreRead(BaseModel):
+    call_id: Annotated[str | None, Field(alias="callId")] = None
+    score: int
+    status: str
+    summary: str
+    metrics: list[RealtimeLiveScoreMetricRead]
+
+
 class RealtimeLiveEventsRead(BaseModel):
     log_path: Annotated[str, Field(alias="logPath")]
     has_events: Annotated[bool, Field(alias="hasEvents")]
     latest_at: Annotated[str | None, Field(alias="latestAt")]
+    score: RealtimeLiveScoreRead | None = None
     events: list[RealtimeLiveEventRead]

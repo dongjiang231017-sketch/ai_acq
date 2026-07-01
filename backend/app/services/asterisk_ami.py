@@ -6,6 +6,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.voice_gateway_profiles import current_voice_gateway_profile, voice_gateway_label
 
 
 class AsteriskAmiError(RuntimeError):
@@ -37,6 +38,7 @@ class AmiResponse:
 class AsteriskHealth:
     checked_at: datetime
     gateway_mode: str
+    voice_gateway_profile: dict[str, object]
     configured: bool
     live_call_enabled: bool
     bulk_call_enabled: bool
@@ -57,6 +59,7 @@ class AsteriskHealth:
         return {
             "checkedAt": self.checked_at,
             "gatewayMode": self.gateway_mode,
+            "voiceGatewayProfile": self.voice_gateway_profile,
             "configured": self.configured,
             "liveCallEnabled": self.live_call_enabled,
             "bulkCallEnabled": self.bulk_call_enabled,
@@ -131,7 +134,7 @@ def originate_verification(status: str) -> dict[str, str | bool]:
             "cellular_confirmed": False,
             "media_loop_confirmed": False,
             "acceptance_ready": False,
-            "acceptance_note": "只确认 Asterisk/UC100 SIP 侧有响应；未确认运营商蜂窝侧真实振铃，也未进入实时媒体链路。",
+            "acceptance_note": f"只确认 Asterisk/{voice_gateway_label()} SIP 侧有响应；未确认运营商蜂窝侧真实振铃，也未进入实时媒体链路。",
         }
     if status == "answered":
         return {
@@ -147,14 +150,14 @@ def originate_verification(status: str) -> dict[str, str | bool]:
             "cellular_confirmed": False,
             "media_loop_confirmed": False,
             "acceptance_ready": False,
-            "acceptance_note": "只确认 AMI 已提交拨号请求；还没有 UC100 蜂窝侧或通话媒体证据。",
+            "acceptance_note": f"只确认 AMI 已提交拨号请求；还没有{voice_gateway_label()}蜂窝侧或通话媒体证据。",
         }
     return {
         "verification_stage": "not_connected",
         "cellular_confirmed": False,
         "media_loop_confirmed": False,
         "acceptance_ready": False,
-        "acceptance_note": "外呼未达到真实接通验收；请根据线路状态继续排查 UC100、SIM/运营商和呼叫路由。",
+        "acceptance_note": f"外呼未达到真实接通验收；请根据线路状态继续排查{voice_gateway_label()}、SIM/运营商和呼叫路由。",
     }
 
 
@@ -457,9 +460,10 @@ def normalize_originate_phone(phone: str) -> str:
 
 
 def render_originate_channel(phone: str) -> str:
+    profile = current_voice_gateway_profile()
     channel = settings.asterisk_originate_channel_template.format(
         phone=normalize_originate_phone(phone),
-        trunk=settings.asterisk_trunk_name,
+        trunk=profile.trunk_name,
     )
     return clean_ami_field_value(channel, "AMI Channel")
 
@@ -480,11 +484,13 @@ def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
 
 def check_asterisk_health() -> AsteriskHealth:
     errors: list[str] = []
+    profile = current_voice_gateway_profile()
     configured = bool(settings.asterisk_ami_username and settings.asterisk_ami_password)
-    trunk_configured = bool(settings.asterisk_trunk_name)
+    trunk_configured = bool(profile.trunk_name)
     health = {
         "checked_at": datetime.utcnow(),
         "gateway_mode": settings.telephony_gateway_mode,
+        "voice_gateway_profile": profile.as_dict(),
         "configured": configured,
         "live_call_enabled": settings.asterisk_live_call_enabled,
         "bulk_call_enabled": settings.asterisk_bulk_call_enabled,
@@ -494,7 +500,7 @@ def check_asterisk_health() -> AsteriskHealth:
         "trunk_configured": trunk_configured,
         "trunk_reachable": None,
         "trunk_status": "待检测",
-        "max_channels": settings.asterisk_max_channels,
+        "max_channels": profile.max_channels,
         "errors": errors,
     }
     if not configured:
@@ -513,8 +519,8 @@ def check_asterisk_health() -> AsteriskHealth:
                 errors.append(ping.message or "AMI Ping 未通过")
             if trunk_configured:
                 commands = [
-                    f"pjsip show endpoint {settings.asterisk_trunk_name}",
-                    f"sip show peer {settings.asterisk_trunk_name}",
+                    f"pjsip show endpoint {profile.trunk_name}",
+                    f"sip show peer {profile.trunk_name}",
                 ]
                 for command in commands:
                     response = client.command(command)
@@ -587,6 +593,7 @@ def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
 
 
 def ami_call_status_message(event: dict[str, str | list[str]], status: str) -> str:
+    gateway = voice_gateway_label()
     event_name = str(event.get("Event", ""))
     dial_status = str(event.get("DialStatus", "")).upper()
     cause = str(event.get("Cause", ""))
@@ -598,13 +605,13 @@ def ami_call_status_message(event: dict[str, str | list[str]], status: str) -> s
     lower_diagnostic = diagnostic.lower()
 
     if "403" in diagnostic or "forbidden" in lower_diagnostic:
-        return "UC100 拒绝外呼：403 Forbidden。请在 UC100 后台配置允许 Asterisk/SIP 分机通过 VoLTE 线路外呼后重试。"
+        return f"{gateway} 拒绝外呼：403 Forbidden。请在语音网关后台配置允许 Asterisk/SIP 分机通过外呼线路后重试。"
     if "404" in diagnostic or "not found" in lower_diagnostic or "no_route_destination" in lower_diagnostic or (status == "failed" and cause == "3"):
-        return "UC100 找不到可用外呼路由：404 Not Found / NO_ROUTE_DESTINATION。请检查 UC100 的 SIP 到 VoLTE 呼叫路由、号码匹配规则和线路选择。"
+        return f"{gateway} 找不到可用外呼路由：404 Not Found / NO_ROUTE_DESTINATION。请检查语音网关的 SIP 到运营商线路路由、号码匹配规则和线路选择。"
     if status == "answered":
         return "电话已接通，实时音频桥已进入通话。"
     if status == "ringing":
-        return "UC100/SIP 侧已响应振铃，但尚未确认手机真实响铃；请以 UC100 话单/当前呼叫和手机来电为准。"
+        return f"{gateway}/SIP 侧已响应振铃，但尚未确认手机真实响铃；请以语音网关话单/当前呼叫和手机来电为准。"
     if status == "busy":
         return "号码忙线或被占用，请稍后重试。"
     if status == "no_answer":
@@ -612,11 +619,11 @@ def ami_call_status_message(event: dict[str, str | list[str]], status: str) -> s
     if status == "cancelled":
         return "试拨已取消或线路提前结束。"
     if status == "failed" and cause == "21":
-        return "线路拒绝外呼。请检查 UC100 的 SIP 分机/中继/呼叫路由是否允许当前 Asterisk 发起外呼。"
+        return "线路拒绝外呼。请检查语音网关的 SIP 分机/中继/呼叫路由是否允许当前 Asterisk 发起外呼。"
     if is_immediate_originate_failure(event, status, saw_ringing=False, elapsed_seconds=0):
-        return "UC100/运营商未放行外呼：呼叫没有进入振铃就被线路侧结束。请检查 UC100 的 SIP 分机、呼叫路由和 VoLTE 外呼权限。"
+        return f"{gateway}/运营商未放行外呼：呼叫没有进入振铃就被线路侧结束。请检查语音网关的 SIP 分机、呼叫路由和运营商外呼权限。"
     if status == "failed" and dial_status:
-        return f"线路外呼失败：{dial_status}。请检查 UC100 SIP 路由、SIM 卡和运营商线路状态。"
+        return f"线路外呼失败：{dial_status}。请检查语音网关 SIP 路由、SIM 卡和运营商线路状态。"
     if status == "failed" and event_name == "OriginateResponse":
         return f"Asterisk 发起外呼失败：Reason {reason or 'unknown'}。"
     return "试拨状态已更新。"

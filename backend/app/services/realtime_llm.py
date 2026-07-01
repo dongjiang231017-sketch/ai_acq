@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import settings
+from app.services.realtime_sales_brain import render_sales_reply
 
 
 @dataclass(frozen=True)
@@ -74,11 +75,12 @@ def generate_realtime_reply(
             fallback_used=True,
         )
     signal = _analyze_dialogue_signal(text, intent, history)
-    contextual_reply = _build_contextual_local_reply(text, intent, merchant_name, fallback_reply, history, signal)
+    brain_reply = render_sales_reply(text, intent, merchant_name, fallback_reply, history)
+    contextual_reply = brain_reply.reply
     if intent in _CONTEXT_LOCAL_FIRST_INTENTS or _should_answer_locally_first(signal):
         return RealtimeReplyResult(
             reply=contextual_reply,
-            strategy=f"local_semantic_{signal.topic}",
+            strategy=brain_reply.strategy,
             latency_ms=0,
             fallback_used=True,
         )
@@ -166,13 +168,39 @@ def _build_contextual_local_reply(
 
     if signal.topic == "identity":
         if compact in {"喂", "喂喂", "你好"}:
-            return _avoid_repeat("您好，我做视频号团购获客，方便说半分钟吗？", last_assistant)
+            return _avoid_repeat("您好，我在。我是做视频号团购到店获客的，给您来电是确认微信同城曝光这块。", last_assistant)
         if _has_any(clean, ["做什么", "做啥", "干嘛", "什么事", "什么意思"]):
             return _avoid_repeat("我们做视频号团购，帮门店引附近客到店。", last_assistant)
         return _avoid_repeat(
-            "我是本地生活服务顾问，做视频号团购到店获客。",
+            "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
             last_assistant,
             ["不是平台官方，是做门店团购获客服务。"],
+        )
+
+    if signal.topic == "repetition_complaint":
+        history_topic = _infer_history_topic(clean, last_user, last_assistant)
+        if history_topic == "price":
+            return _avoid_repeat("明白，我不重复。费用看套餐和投放，先判断适不适合再报价。", last_assistant)
+        if history_topic == "guarantee":
+            return _avoid_repeat("明白，我直接答：效果不能保底，只能先测曝光、咨询和到店。", last_assistant)
+        if history_topic in {"existing_channel", "channel_difference"} or _is_channel_difference_question(clean):
+            return _avoid_repeat("明白，不提资料了。美团偏搜索下单，视频号偏微信同城和私域补充。", last_assistant)
+        return _avoid_repeat("明白，我不重复刚才那句。您是想听费用、效果，还是和美团区别？", last_assistant)
+
+    if signal.topic == "direct_answer_only":
+        if _is_channel_difference_question(clean):
+            return _avoid_repeat("不发资料，我直接说：美团偏搜索成交，视频号偏微信同城曝光和私域沉淀。", last_assistant)
+        if _is_price_question(clean):
+            return _avoid_repeat("不发资料，直接说费用：这是付费服务，按套餐和投放节奏报价。", last_assistant)
+        if _has_any(clean, ["效果", "客流", "到店", "有没有用", "靠谱吗"]):
+            return _avoid_repeat("不发资料，直接说效果：先测曝光、咨询和到店数据，不空口保底。", last_assistant)
+        return _avoid_repeat("明白，不发资料。您直接问我费用、效果或流程，我就按问题答。", last_assistant)
+
+    if signal.topic == "channel_difference":
+        return _avoid_repeat(
+            "美团偏搜索、评价和平台成交；视频号偏微信同城内容和私域沉淀，是补充不是替代。",
+            last_assistant,
+            ["简单说，美团像货架搜索，视频号更像微信同城推荐和私域入口。"],
         )
 
     if signal.topic == "price":
@@ -206,9 +234,9 @@ def _build_contextual_local_reply(
 
     if signal.topic == "quality":
         return _avoid_repeat(
-            "抱歉可能信号不稳，我短说：视频号团购帮门店引流到店。",
+            "我放慢点说：视频号团购，就是帮门店做套餐和同城到店获客。",
             last_assistant,
-            ["我放慢点说：我们做视频号团购到店获客。"],
+            ["我换短点说：做视频号团购，主要是拿微信同城到店流量。"],
         )
 
     if signal.topic == "source":
@@ -218,7 +246,11 @@ def _build_contextual_local_reply(
         return _avoid_repeat("方便转给负责团购的人吗？我简单说。", last_assistant)
 
     if signal.topic == "existing_channel":
-        return _avoid_repeat("不冲突，视频号主要补微信同城流量。", last_assistant)
+        return _avoid_repeat(
+            "不冲突，美团偏搜索成交，视频号主要补微信同城推荐和私域流量。",
+            last_assistant,
+            ["已经做美团也可以，视频号是补微信生态，不替代原渠道。"],
+        )
 
     if signal.topic == "low_info":
         if _has_any(last_assistant, ["发资料", "短信", "案例"]):
@@ -237,16 +269,16 @@ def _build_contextual_local_reply(
             return _avoid_repeat("您问怎么做对吧，先定团购套餐，再投同城曝光。", last_assistant)
         if history_topic == "identity":
             return _avoid_repeat("我是本地生活服务顾问，做视频号团购到店获客。", last_assistant)
-        return _avoid_repeat("您刚才的问题我重答：视频号团购是帮门店引流到店。", last_assistant)
+        return _avoid_repeat("我换个说法：视频号团购是帮门店做可下单套餐，把附近客引到店。", last_assistant)
 
     if intent == "身份确认":
         if compact in {"喂", "喂喂", "你好"}:
-            return _avoid_repeat("您好，我做视频号团购获客，方便说半分钟吗？", last_assistant)
+            return _avoid_repeat("您好，我在。我是做视频号团购到店获客的，给您来电是确认微信同城曝光这块。", last_assistant)
         if _has_any(clean, ["做什么", "做啥", "干嘛", "什么事", "什么意思"]):
             return _avoid_repeat("我们做视频号团购，帮门店引附近客到店。", last_assistant)
         if _has_any(clean, ["你是谁", "哪里", "什么公司", "你们"]):
-            return _avoid_repeat("我是本地生活服务顾问，做视频号团购到店获客。", last_assistant)
-        return _avoid_repeat("我做视频号团购获客，想确认您方便了解吗？", last_assistant)
+            return _avoid_repeat("我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。", last_assistant)
+        return _avoid_repeat("我是做视频号团购到店获客的，主要帮门店做微信同城曝光。", last_assistant)
 
     if intent == "加微信/发资料":
         if _has_any(last_assistant, ["案例", "资料", "微信"]):
@@ -261,7 +293,7 @@ def _build_contextual_local_reply(
         if _has_any(clean + last_user, ["保证", "承诺", "保底"]):
             return _avoid_repeat("不能空口保证，只能先测曝光、咨询和到店数据。", last_assistant)
         if _has_any(clean, ["信号", "断断续续", "太慢", "反应慢", "卡"]):
-            return _avoid_repeat("抱歉可能信号不稳，我短说：视频号团购帮门店引流到店。", last_assistant)
+            return _avoid_repeat("我放慢点说：视频号团购，就是帮门店做套餐和同城到店获客。", last_assistant)
         if _has_any(clean, ["不是", "不对"]):
             return _avoid_repeat("我换个说法：不是卖广告，是做可下单的团购入口。", last_assistant)
         if _has_any(clean, ["听不懂", "什么意思", "说什么", "明白什么"]):
@@ -289,7 +321,10 @@ def _build_contextual_local_reply(
         return _avoid_repeat("先看品类，定团购套餐，小范围测试。", last_assistant)
 
     if intent == "已有渠道":
-        return _avoid_repeat("不冲突，视频号主要补微信同城流量。", last_assistant)
+        return _avoid_repeat(
+            "不冲突，美团偏搜索成交，视频号主要补微信同城推荐和私域流量。",
+            last_assistant,
+        )
 
     if intent == "找负责人":
         return _avoid_repeat("方便转给负责团购的人吗？我简单说。", last_assistant)
@@ -325,8 +360,17 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
     last_assistant = _last_history_content(conversation_history, "assistant")
     last_user = _last_history_content(conversation_history, "user")
 
-    if compact in {"喂", "喂喂", "你好"} or intent == "身份确认":
+    if compact in {"喂", "喂喂", "你好", "您好", "在", "在在", "你谁", "谁", "谁啊", "谁呀", "哪位", "您哪位", "你哪位"} or intent == "身份确认":
         return DialogueSignal("identity", direct_question=True)
+
+    if _has_any(clean, ["重复", "一直说", "总是说", "总说", "老说", "老是说", "别重复", "不要重复", "不要总", "你怎么总", "你老是"]):
+        return DialogueSignal("repetition_complaint", direct_question=True, complaint=True)
+
+    if _declines_materials_only(clean):
+        return DialogueSignal("direct_answer_only", direct_question=True)
+
+    if _is_channel_difference_question(clean):
+        return DialogueSignal("channel_difference", direct_question=True)
 
     if _has_any(
         clean,
@@ -355,7 +399,7 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
     if _has_any(clean, ["效果", "客流", "到店", "曝光", "转化", "能带来", "有用吗", "靠谱吗", "有没有用"]):
         return DialogueSignal("guarantee", direct_question=True)
 
-    if _has_any(clean, ["你是谁", "什么公司", "哪里", "你们", "来电原因", "干嘛", "做什么", "做啥", "什么事", "什么意思"]):
+    if _has_any(clean, ["你是谁", "你谁", "谁啊", "谁呀", "哪位", "您哪位", "什么公司", "哪里", "你们", "来电原因", "干嘛", "做什么", "做啥", "什么事"]):
         return DialogueSignal("identity", direct_question=True)
 
     if _has_any(clean, ["微信", "资料", "发我", "发给我", "给我发", "怎么发", "发哪里", "发到", "加一下", "短信"]):
@@ -413,8 +457,11 @@ def _should_answer_locally_first(signal: DialogueSignal) -> bool:
         "source",
         "owner",
         "existing_channel",
+        "channel_difference",
         "low_info",
         "context_repair",
+        "repetition_complaint",
+        "direct_answer_only",
     }
 
 
@@ -422,10 +469,22 @@ def _is_price_question(text: str) -> bool:
     return _has_any(text, ["多少钱", "费用", "价格", "收费", "贵", "付费", "要钱", "花钱", "付钱"])
 
 
+def _is_channel_difference_question(text: str) -> bool:
+    return _has_any(text, ["美团区别", "和美团", "跟美团", "比美团", "美团有啥区别", "美团有什么区别", "抖音区别", "和抖音", "跟抖音"])
+
+
+def _declines_materials_only(text: str) -> bool:
+    if not _has_any(text, ["不需要资料", "不用资料", "不要资料", "别发资料", "不用发资料", "不用加微信", "不加微信", "直接回答", "说重点", "讲重点"]):
+        return False
+    return not _has_any(text, ["别打", "别联系", "不要打", "拉黑", "没兴趣", "挂了"])
+
+
 def _infer_history_topic(current_text: str, last_user: str, last_assistant: str) -> str:
     combined = " ".join([current_text, last_user, last_assistant])
     if _is_price_question(combined):
         return "price"
+    if _is_channel_difference_question(combined) or _has_any(combined, ["美团", "抖音团购", "大众点评", "已有渠道"]):
+        return "channel_difference"
     if _has_any(combined, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "有用吗", "靠谱吗", "测曝光", "到店数据"]):
         return "guarantee"
     if _has_any(combined, ["怎么做", "怎么合作", "流程", "套餐", "投放", "具体说", "详细讲", "讲解"]):
@@ -455,9 +514,9 @@ def _avoid_repeat(reply: str, last_assistant: str, topic_alternatives: list[str]
         if alternative != last_assistant.strip():
             return alternative
     alternatives = [
-        "我换个说法：用视频号团购帮门店拿到店客。",
-        "简单讲，先做套餐，再看曝光和到店数据。",
-        "您主要想先了解效果，还是费用？",
+        "我换个角度说：视频号团购补的是微信同城和私域到店。",
+        "简单讲，先做套餐，再看曝光、咨询和到店数据。",
+        "您主要想先听费用、效果，还是和美团区别？",
     ]
     for alternative in alternatives:
         if alternative != last_assistant.strip():
@@ -479,6 +538,9 @@ def _request_deepseek_reply(text: str, intent: str, merchant_name: str, conversa
                     "不能自称平台官方、微信官方、视频号官方或官方合作方；只能称本地生活服务顾问。"
                     "不能承诺已合作、补贴、保底效果或未授权身份。"
                     "必须先回答客户当前问题，再轻轻推进下一步。"
+                    "客户说不要资料、不加微信、直接回答、别重复时，本轮停止推进资料和微信，只回答问题。"
+                    "客户重复追问时必须换角度回答，不要复读上一轮。客户插话后直接接着答，不解释上一句为什么停了。"
+                    "语气要像真人电销：先承接情绪，再给一个短解释，必要时问一个选择题。"
                     "客户问你是谁、做什么，就直接说明身份和服务；客户问效果、费用、怎么做、怎么发资料，"
                     "就针对问题回答；客户说没听懂，就换更短说法；客户只是嗯、好、可以，要承接上一轮继续说重点。"
                     "如果对方拒绝就礼貌结束；如果对方说忙或找别人，询问稍后联系或转给负责人。"

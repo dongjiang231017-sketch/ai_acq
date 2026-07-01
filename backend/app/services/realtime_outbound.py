@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from app.core.config import settings
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
+from app.services.realtime_sales_brain import score_realtime_events
+from app.services.voice_gateway_profiles import voice_gateway_label
 
 
 class RealtimeSessionNotFound(RuntimeError):
@@ -124,16 +126,67 @@ class RealtimeSession:
 _SESSIONS: dict[str, RealtimeSession] = {}
 
 
+def _normalize_conversation_route(route: str | None) -> str:
+    normalized = (route or settings.realtime_conversation_mode or "pipeline").strip().lower()
+    return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
+
+
+def _route_mode_label(route: str) -> str:
+    return "omni_realtime_interruptible" if route == "omni" else "half_duplex_interruptible"
+
+
+def _route_cost(route: str, voice_type: str = "system") -> float:
+    if route == "omni":
+        return 0.09
+    return _estimate_cost(voice_type)
+
+
+def _route_latency(route: str, llm_ready: bool | None = None) -> int:
+    if route == "omni":
+        return 720
+    if llm_ready is None:
+        llm_ready = deepseek_configured()
+    return 1075 if llm_ready else 755
+
+
+def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[dict[str, object]]:
+    llm_ready = deepseek_configured()
+    dashscope_ready = bool(settings.dashscope_api_key.strip())
+    return [
+        {
+            "key": "omni",
+            "label": "极速人声 Omni",
+            "mode": "omni_realtime_interruptible",
+            "summary": "端到端实时语音模型，直接听语音并直接说话，适合追求自然衔接和低延迟的正式拨测。",
+            "estimatedLatencyMs": _route_latency("omni"),
+            "estimatedAiCostPerMinute": _route_cost("omni"),
+            "readyForAsteriskMedia": bridge_ready and dashscope_ready and current_route == "omni",
+            "isActive": current_route == "omni",
+        },
+        {
+            "key": "pipeline",
+            "label": "低成本分段 Pipeline",
+            "mode": "half_duplex_interruptible",
+            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行，成本更低，适合低频授权回访和成本敏感客户。",
+            "estimatedLatencyMs": _route_latency("pipeline", llm_ready),
+            "estimatedAiCostPerMinute": _route_cost("pipeline"),
+            "readyForAsteriskMedia": bridge_ready and current_route == "pipeline",
+            "isActive": current_route == "pipeline",
+        },
+    ]
+
+
 def build_realtime_pipeline() -> dict[str, object]:
+    gateway_label = voice_gateway_label()
     audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
-    conversation_mode = (settings.realtime_conversation_mode or "pipeline").strip().lower()
+    conversation_mode = _normalize_conversation_route(settings.realtime_conversation_mode)
     if conversation_mode == "omni":
         dashscope_ready = bool(settings.dashscope_api_key.strip())
         steps = [
             _pipeline_step(
                 "media_bridge",
-                "UC100/Asterisk 媒体桥",
+                "语音网关/Asterisk 媒体桥",
                 "warn" if not bridge_ready else "pass",
                 "mock_media" if not bridge_ready else "asterisk_audiosocket",
                 120,
@@ -141,7 +194,7 @@ def build_realtime_pipeline() -> dict[str, object]:
                     f"AudioSocket 桥接服务监听 {settings.asterisk_audio_socket_host}:{settings.asterisk_audio_socket_port}，"
                     "Asterisk 接通后把电话 8k PCM 音频送入 Qwen Omni。"
                     if bridge_ready
-                    else "真实媒体桥未完全就绪；需要 Asterisk/UC100、单号试拨开关和 AudioSocket bridge 同时在线。"
+                    else f"真实媒体桥未完全就绪；需要 Asterisk/{gateway_label}、单号试拨开关和 AudioSocket bridge 同时在线。"
                 ),
             ),
             _pipeline_step(
@@ -175,13 +228,14 @@ def build_realtime_pipeline() -> dict[str, object]:
                 if bridge_ready and dashscope_ready
                 else "先启动 AudioSocket bridge 的 omni 模式，并确认 DashScope key 与 Asterisk 单号试拨开关。"
             ),
+            "routeOptions": _conversation_route_options(conversation_mode, bridge_ready),
             "steps": steps,
         }
     llm_ready = deepseek_configured()
     steps = [
         _pipeline_step(
             "media_bridge",
-            "UC100/Asterisk 媒体桥",
+            "语音网关/Asterisk 媒体桥",
             "warn" if not bridge_ready else "pass",
             "mock_media" if not bridge_ready else "asterisk_audiosocket",
             120,
@@ -189,7 +243,7 @@ def build_realtime_pipeline() -> dict[str, object]:
                 f"AudioSocket 桥接服务监听 {settings.asterisk_audio_socket_host}:{settings.asterisk_audio_socket_port}，"
                 "Asterisk 接通后把电话 8k PCM 音频送入 ASR/TTS 回路。"
                 if bridge_ready
-                else "真实媒体桥未完全就绪；需要 Asterisk/UC100、单号试拨开关和 AudioSocket bridge 同时在线。"
+                else f"真实媒体桥未完全就绪；需要 Asterisk/{gateway_label}、单号试拨开关和 AudioSocket bridge 同时在线。"
             ),
         ),
         _pipeline_step("asr", "流式 ASR", "pass", settings.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
@@ -237,11 +291,17 @@ def build_realtime_pipeline() -> dict[str, object]:
             if bridge_ready
             else "先启动 AudioSocket bridge，再打开 ASTERISK_LIVE_CALL_ENABLED=true，并从前端做单号试拨。"
         ),
+        "routeOptions": _conversation_route_options(conversation_mode, bridge_ready),
         "steps": steps,
     }
 
 
-def create_realtime_session(merchant_name: str, phone: str | None, voice: dict[str, object]) -> dict[str, object]:
+def create_realtime_session(
+    merchant_name: str,
+    phone: str | None,
+    voice: dict[str, object],
+    conversation_route: str | None = None,
+) -> dict[str, object]:
     selected_voice = RealtimeVoice(
         voice_id=str(voice.get("voiceId") or voice.get("voice_id") or "qwen_tts_ethan"),
         voice_name=str(voice.get("voiceName") or voice.get("voice_name") or "晨煦（Ethan）"),
@@ -249,19 +309,22 @@ def create_realtime_session(merchant_name: str, phone: str | None, voice: dict[s
         provider=str(voice.get("provider") or "Qwen-TTS"),
         external_voice_id=_optional_text(voice.get("externalVoiceId") or voice.get("external_voice_id")),
     )
+    route = _normalize_conversation_route(conversation_route)
     session = RealtimeSession(
         id=uuid4().hex,
         merchant_name=merchant_name,
         phone=phone,
         voice=selected_voice,
-        cost_estimate_per_minute=_estimate_cost(selected_voice.voice_type),
+        mode=_route_mode_label(route),
+        cost_estimate_per_minute=_route_cost(route, selected_voice.voice_type),
+        latency_estimate_ms=_route_latency(route),
     )
     session.add_event(
         "session_started",
         "system",
         "ready",
         "模拟实时外呼会话已创建。",
-        f"使用音色：{selected_voice.voice_name}；模式：半双工 + 可打断。",
+        f"使用音色：{selected_voice.voice_name}；路线：{'Omni 实时语音' if route == 'omni' else 'ASR+LLM+TTS 分段'}；两条路线都启用短句、情绪承接、不同问法不同回答和不机械推进策略。",
     )
     _SESSIONS[session.id] = session
     return session.as_dict()
@@ -351,6 +414,7 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
             "logPath": str(path),
             "hasEvents": False,
             "latestAt": None,
+            "score": None,
             "events": [],
         }
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -370,6 +434,7 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
         "logPath": str(path),
         "hasEvents": bool(events),
         "latestAt": events[-1]["at"] if events else None,
+        "score": score_realtime_events(events),
         "events": events,
     }
 
@@ -417,24 +482,93 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "此通话已不再录音",
         "开始录音",
         "停止录音",
+        "正在录音",
+        "暂时无法接听",
+        "用户无法接听",
+        "无法接听",
+        "无法接通",
+        "语音信箱",
+        "语音留言",
+        "语音录音",
+        "录制留言",
+        "录音完成",
+        "请在提示音后",
+        "提示音后",
+        "提示音后录制",
+        "留言后",
+        "挂断即可",
+        "若要留言",
+        "请留言",
     ]
     if any(keyword in clean for keyword in system_prompt_keywords):
         return "系统提示", "忽略系统提示"
     call_screening_keywords = [
         "姓名",
+        "请留下",
+        "留下您的姓名",
+        "留下你的姓名",
         "来电原因",
         "此人是否方便",
+        "确认此人",
+        "为您确认",
+        "能为帮您确认",
+        "能帮您确认",
         "是否方便接听",
         "帮你确认",
         "帮您确认",
         "请说明",
+        "请先说明",
+        "请说出",
+        "请先说",
+        "来意",
         "电话秘书",
+        "电话助理",
         "智能助理",
+        "请不要挂断",
+        "请不要挂断电话",
+        "不要挂断电话",
+        "不要挂断",
     ]
     if any(keyword in clean for keyword in call_screening_keywords):
         return "身份确认", "身份说明"
+    if compact in {"喂", "喂喂", "你好", "您好", "在", "在在", "你谁", "谁", "谁啊", "谁呀", "哪位", "您哪位", "你哪位"}:
+        return "身份确认", "身份说明"
     if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "贵", "付费", "要钱", "花钱", "付钱"]):
         return "价格异议", "价格说明"
+    material_only_decline = any(
+        keyword in clean
+        for keyword in [
+            "不需要资料",
+            "不用资料",
+            "不要资料",
+            "别发资料",
+            "不用发资料",
+            "不需要加微信",
+            "不用加微信",
+            "不要加微信",
+            "不加微信",
+            "直接回答",
+            "说重点",
+            "讲重点",
+        ]
+    ) and not any(keyword in clean for keyword in ["别打", "别联系", "不要打", "拉黑", "没兴趣", "挂了"])
+    style_or_repeat_complaint_keywords = [
+        "像机器人",
+        "机器人",
+        "ai",
+        "AI",
+        "念稿",
+        "不自然",
+        "机械",
+        "不会说话",
+        "不要重复",
+        "别重复",
+        "一直重复",
+        "总是重复",
+        "老说",
+    ]
+    if any(keyword in clean for keyword in style_or_repeat_complaint_keywords):
+        return "听不清/澄清", "体验修复"
     rejection_keywords = [
         "不需要",
         "不用",
@@ -446,8 +580,14 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "没兴趣",
         "拉黑",
         "取消",
+        "放个屁",
+        "滚",
+        "扯淡",
+        "骗子",
+        "神经病",
+        "有病",
     ]
-    if any(keyword in text for keyword in rejection_keywords):
+    if any(keyword in text for keyword in rejection_keywords) and not material_only_decline:
         return "明确拒绝", "礼貌结束"
     end_keywords = [
         "ok了",
@@ -455,12 +595,23 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "好了",
         "可以了",
         "先这样",
+        "就这样",
+        "就这样吧",
+        "这样吧",
         "挂了",
+        "我挂了",
+        "挂电话",
+        "再见",
+        "拜拜",
         "结束",
+        "结束吧",
         "别说了",
         "不用说",
         "不用讲",
+        "不聊了",
+        "不说了",
         "到这",
+        "到这里",
         "知道了",
         "明白了",
         "清楚了",
@@ -488,6 +639,14 @@ def _classify_intent(text: str) -> tuple[str, str]:
     }
     if compact in low_information_confirmations:
         return "低信息确认", "继续确认"
+    if material_only_decline:
+        if any(keyword in clean for keyword in ["美团", "抖音", "大众点评", "小红书", "高德", "已有渠道"]):
+            return "已有渠道", "直接回答渠道区别"
+        if any(keyword in clean for keyword in ["效果", "客流", "到店", "曝光", "转化", "有用吗", "靠谱吗", "保证", "承诺", "保底"]):
+            return "效果询问", "直接回答效果"
+        if any(keyword in clean for keyword in ["怎么做", "怎么合作", "流程", "合作", "具体说", "具体讲", "详细讲"]):
+            return "合作咨询", "直接回答流程"
+        return "需求探索", "只回答问题"
     if any(
         keyword in text
         for keyword in [
@@ -590,12 +749,9 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "什么公司",
         "什么事",
         "什么东西",
-        "什么意思",
         "你们",
         "来电原因",
     ]
-    if compact in {"喂", "喂喂", "你好"}:
-        return "身份确认", "身份说明"
     if any(keyword in clean for keyword in identity_keywords) or "who" in lower:
         return "身份确认", "身份说明"
     clarification_keywords = [
@@ -621,6 +777,7 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "卡",
         "没解决",
         "没回答",
+        "什么意思",
         "别换",
         "我问你",
         "不是",
@@ -634,17 +791,17 @@ def _classify_intent(text: str) -> tuple[str, str]:
 def _build_reply(text: str, intent: str, merchant_name: str) -> str:
     replies = {
         "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
-        "明确拒绝": "好的，打扰您了。我这边给您标记不再跟进，祝您生意顺利。",
+        "明确拒绝": "好的，不打扰了，再见。",
         "稍后联系": "可以，我不多打扰。今天下午还是明天上午再跟您确认方便？",
         "加微信/发资料": "可以，我稍后把视频号团购资料和同品类案例发您，您看完再沟通。",
-        "身份确认": "我是做本地生活团购服务的，主要帮门店做视频号团购和到店转化。",
+        "身份确认": "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
         "听不清/澄清": "我简单说：我们帮门店做视频号团购，到店获客。您方便听半分钟吗？",
-        "礼貌结束": "好的，那我不多打扰了，祝您生意顺利。",
+        "礼貌结束": "好的，不打扰了，再见。",
         "系统提示": "",
         "合作咨询": "我先说重点：帮门店设计团购套餐，再做视频号同城曝光和到店转化。",
         "效果询问": "效果主要看品类和套餐，我们会先小范围测试曝光、咨询和到店数据。",
         "找负责人": "明白，那方便帮我转给负责团购或门店运营的人吗？我简单说明一下。",
-        "已有渠道": "已经做团购更好，视频号可以作为微信生态补充，不影响您现有渠道。",
+        "已有渠道": "已经做团购更好；美团偏搜索成交，视频号补微信同城推荐和私域流量。",
         "来源/隐私": "您放心，不方便我就马上标记不再联系；这边只做门店业务回访确认。",
         "低信息确认": "我简单确认一下，您现在方便听我说半分钟吗？",
         "需求探索": "我先说重点：我们帮门店做视频号团购曝光，合适再细聊。",

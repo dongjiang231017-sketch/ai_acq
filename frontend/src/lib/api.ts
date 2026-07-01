@@ -100,8 +100,28 @@ export type RecallRule = {
   enabled: boolean;
 };
 
+export type VoiceGatewayProfile = {
+  key: string;
+  label: string;
+  vendor: string;
+  model: string;
+  category: string;
+  transport: string;
+  host: string;
+  sipPort: number;
+  trunkName: string;
+  maxChannels: number;
+  lineType: string;
+  adminUrl: string;
+  discoveryMode: string;
+  tested: boolean;
+  capabilities: string[];
+  notes: string[];
+};
+
 export type TelephonyConfig = {
   gatewayMode: string;
+  voiceGatewayProfile: VoiceGatewayProfile;
   queueEnabled: boolean;
   queueName: string;
   redisUrlConfigured: boolean;
@@ -117,6 +137,7 @@ export type TelephonyConfig = {
 export type TelephonyHealth = {
   checkedAt: string;
   gatewayMode: string;
+  voiceGatewayProfile: VoiceGatewayProfile;
   configured: boolean;
   liveCallEnabled: boolean;
   bulkCallEnabled: boolean;
@@ -141,6 +162,7 @@ export type TelephonyPreflightStep = {
 
 export type TelephonyPreflight = {
   checkedAt: string;
+  voiceGatewayProfile: VoiceGatewayProfile;
   readyForDeviceTest: boolean;
   readyForSingleNumberTest: boolean;
   readyForBulkTasks: boolean;
@@ -159,6 +181,10 @@ export type TelephonyTestCallResult = {
   verificationStage: string;
   cellularConfirmed: boolean;
   mediaLoopConfirmed: boolean;
+  humanSpeechConfirmed: boolean;
+  aiSpeechConfirmed: boolean;
+  callScreeningDetected: boolean;
+  conversationConfirmed: boolean;
   acceptanceReady: boolean;
   acceptanceNote: string;
 };
@@ -172,6 +198,17 @@ export type RealtimePipelineStep = {
   detail: string;
 };
 
+export type RealtimeRouteOption = {
+  key: "pipeline" | "omni";
+  label: string;
+  mode: string;
+  summary: string;
+  estimatedLatencyMs: number;
+  estimatedAiCostPerMinute: number;
+  readyForAsteriskMedia: boolean;
+  isActive: boolean;
+};
+
 export type RealtimePipeline = {
   mode: string;
   bridgeMode: string;
@@ -181,6 +218,7 @@ export type RealtimePipeline = {
   readyForMockCall: boolean;
   readyForAsteriskMedia: boolean;
   nextStep: string;
+  routeOptions: RealtimeRouteOption[];
   steps: RealtimePipelineStep[];
 };
 
@@ -248,10 +286,27 @@ export type RealtimeLiveEvent = {
   raw: Record<string, unknown>;
 };
 
+export type RealtimeLiveScoreMetric = {
+  name: string;
+  score: number;
+  status: "pass" | "warn" | "fail" | string;
+  weight: number;
+  detail: string;
+};
+
+export type RealtimeLiveScore = {
+  callId?: string | null;
+  score: number;
+  status: "pass" | "warn" | "fail" | string;
+  summary: string;
+  metrics: RealtimeLiveScoreMetric[];
+};
+
 export type RealtimeLiveEvents = {
   logPath: string;
   hasEvents: boolean;
   latestAt?: string | null;
+  score?: RealtimeLiveScore | null;
   events: RealtimeLiveEvent[];
 };
 
@@ -913,7 +968,12 @@ export const api = {
     if (callId?.trim()) params.set("call_id", callId.trim());
     return request<RealtimeLiveEvents>(`/outbound/realtime/live-events?${params.toString()}`);
   },
-  createRealtimeSession: (payload: { merchantName: string; phone?: string | null; voice: RealtimeVoiceSelection }) =>
+  createRealtimeSession: (payload: {
+    merchantName: string;
+    phone?: string | null;
+    voice: RealtimeVoiceSelection;
+    conversationRoute?: "pipeline" | "omni";
+  }) =>
     request<RealtimeSession>("/outbound/realtime/sessions", {
       method: "POST",
       body: JSON.stringify(payload),

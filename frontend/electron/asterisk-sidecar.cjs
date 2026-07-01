@@ -12,8 +12,10 @@ const DEFAULTS = {
   rtpStart: 10000,
   rtpEnd: 10100,
   trunkName: "uc100",
-  uc100Host: "192.168.10.100",
-  uc100SipPort: 5080,
+  voiceGatewayProfile: "uc100_sip_volte",
+  voiceGatewayLabel: "语音网关（UC100 测试档案）",
+  voiceGatewayHost: "192.168.10.100",
+  voiceGatewaySipPort: 5080,
   asteriskAdvertisedHost: "",
   asteriskLocalNet: "172.16.0.0/12",
   maxChannels: 1,
@@ -51,9 +53,14 @@ class AsteriskSidecar {
       amiPort: layout.state.amiPort,
       sipPort: layout.state.sipPort,
       trunkName: layout.state.trunkName,
+      voiceGatewayProfile: layout.state.voiceGatewayProfile,
+      voiceGatewayLabel: layout.state.voiceGatewayLabel,
+      voiceGatewayHost: layout.state.voiceGatewayHost,
+      voiceGatewaySipPort: layout.state.voiceGatewaySipPort,
+      voiceGatewayRegisterEnabled: Boolean(layout.state.voiceGatewaySipUsername && layout.state.voiceGatewaySipPassword),
       uc100Host: layout.state.uc100Host,
       uc100SipPort: layout.state.uc100SipPort,
-      uc100RegisterEnabled: Boolean(layout.state.uc100SipUsername && layout.state.uc100SipPassword),
+      uc100RegisterEnabled: Boolean(layout.state.voiceGatewaySipUsername && layout.state.voiceGatewaySipPassword),
       asteriskAdvertisedHost: layout.state.asteriskAdvertisedHost,
       asteriskLocalNet: layout.state.asteriskLocalNet,
       maxChannels: layout.state.maxChannels,
@@ -160,34 +167,57 @@ class AsteriskSidecar {
       sipPort: DEFAULTS.sipPort,
       rtpStart: DEFAULTS.rtpStart,
       rtpEnd: DEFAULTS.rtpEnd,
-      trunkName: DEFAULTS.trunkName,
-      uc100Host: process.env.AI_ACQ_UC100_HOST || DEFAULTS.uc100Host,
-      uc100SipPort: Number(process.env.AI_ACQ_UC100_SIP_PORT || DEFAULTS.uc100SipPort),
-      uc100SipUsername: process.env.AI_ACQ_UC100_SIP_USERNAME || "",
-      uc100SipPassword: process.env.AI_ACQ_UC100_SIP_PASSWORD || "",
+      trunkName: process.env.AI_ACQ_VOICE_GATEWAY_TRUNK_NAME || DEFAULTS.trunkName,
+      voiceGatewayProfile: process.env.AI_ACQ_VOICE_GATEWAY_PROFILE || DEFAULTS.voiceGatewayProfile,
+      voiceGatewayLabel: process.env.AI_ACQ_VOICE_GATEWAY_LABEL || DEFAULTS.voiceGatewayLabel,
+      voiceGatewayHost: process.env.AI_ACQ_VOICE_GATEWAY_HOST || process.env.AI_ACQ_UC100_HOST || DEFAULTS.voiceGatewayHost,
+      voiceGatewaySipPort: Number(process.env.AI_ACQ_VOICE_GATEWAY_SIP_PORT || process.env.AI_ACQ_UC100_SIP_PORT || DEFAULTS.voiceGatewaySipPort),
+      voiceGatewaySipUsername: process.env.AI_ACQ_VOICE_GATEWAY_SIP_USERNAME || process.env.AI_ACQ_UC100_SIP_USERNAME || "",
+      voiceGatewaySipPassword: process.env.AI_ACQ_VOICE_GATEWAY_SIP_PASSWORD || process.env.AI_ACQ_UC100_SIP_PASSWORD || "",
       asteriskAdvertisedHost: process.env.AI_ACQ_ASTERISK_ADVERTISED_HOST || DEFAULTS.asteriskAdvertisedHost,
       asteriskLocalNet: process.env.AI_ACQ_ASTERISK_LOCAL_NET || DEFAULTS.asteriskLocalNet,
-      maxChannels: Number(process.env.AI_ACQ_ASTERISK_MAX_CHANNELS || DEFAULTS.maxChannels),
+      maxChannels: Number(process.env.AI_ACQ_VOICE_GATEWAY_MAX_CHANNELS || process.env.AI_ACQ_ASTERISK_MAX_CHANNELS || DEFAULTS.maxChannels),
       audioSocketHost: process.env.AI_ACQ_AUDIOSOCKET_HOST || DEFAULTS.audioSocketHost,
       audioSocketPort: Number(process.env.AI_ACQ_AUDIOSOCKET_PORT || DEFAULTS.audioSocketPort),
       audioSocketUuid: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       ...(existing || {}),
     };
-    if (process.env.AI_ACQ_UC100_HOST) state.uc100Host = process.env.AI_ACQ_UC100_HOST;
-    if (process.env.AI_ACQ_UC100_SIP_PORT) state.uc100SipPort = Number(process.env.AI_ACQ_UC100_SIP_PORT);
-    if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_UC100_SIP_USERNAME")) {
-      state.uc100SipUsername = process.env.AI_ACQ_UC100_SIP_USERNAME || "";
+    if (!state.voiceGatewayHost && state.uc100Host) state.voiceGatewayHost = state.uc100Host;
+    if (!state.voiceGatewaySipPort && state.uc100SipPort) state.voiceGatewaySipPort = state.uc100SipPort;
+    if (!state.voiceGatewaySipUsername && state.uc100SipUsername) state.voiceGatewaySipUsername = state.uc100SipUsername;
+    if (!state.voiceGatewaySipPassword && state.uc100SipPassword) state.voiceGatewaySipPassword = state.uc100SipPassword;
+    if (process.env.AI_ACQ_VOICE_GATEWAY_PROFILE) state.voiceGatewayProfile = process.env.AI_ACQ_VOICE_GATEWAY_PROFILE;
+    if (process.env.AI_ACQ_VOICE_GATEWAY_LABEL) state.voiceGatewayLabel = process.env.AI_ACQ_VOICE_GATEWAY_LABEL;
+    if (process.env.AI_ACQ_VOICE_GATEWAY_TRUNK_NAME) state.trunkName = process.env.AI_ACQ_VOICE_GATEWAY_TRUNK_NAME;
+    if (process.env.AI_ACQ_VOICE_GATEWAY_HOST || process.env.AI_ACQ_UC100_HOST) {
+      state.voiceGatewayHost = process.env.AI_ACQ_VOICE_GATEWAY_HOST || process.env.AI_ACQ_UC100_HOST;
     }
-    if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_UC100_SIP_PASSWORD")) {
-      state.uc100SipPassword = process.env.AI_ACQ_UC100_SIP_PASSWORD || "";
+    if (process.env.AI_ACQ_VOICE_GATEWAY_SIP_PORT || process.env.AI_ACQ_UC100_SIP_PORT) {
+      state.voiceGatewaySipPort = Number(process.env.AI_ACQ_VOICE_GATEWAY_SIP_PORT || process.env.AI_ACQ_UC100_SIP_PORT);
     }
+    if (
+      Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_VOICE_GATEWAY_SIP_USERNAME") ||
+      Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_UC100_SIP_USERNAME")
+    ) {
+      state.voiceGatewaySipUsername = process.env.AI_ACQ_VOICE_GATEWAY_SIP_USERNAME || process.env.AI_ACQ_UC100_SIP_USERNAME || "";
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_VOICE_GATEWAY_SIP_PASSWORD") ||
+      Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_UC100_SIP_PASSWORD")
+    ) {
+      state.voiceGatewaySipPassword = process.env.AI_ACQ_VOICE_GATEWAY_SIP_PASSWORD || process.env.AI_ACQ_UC100_SIP_PASSWORD || "";
+    }
+    state.uc100Host = state.voiceGatewayHost;
+    state.uc100SipPort = state.voiceGatewaySipPort;
+    state.uc100SipUsername = state.voiceGatewaySipUsername;
+    state.uc100SipPassword = state.voiceGatewaySipPassword;
     if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_ASTERISK_ADVERTISED_HOST")) {
       state.asteriskAdvertisedHost = process.env.AI_ACQ_ASTERISK_ADVERTISED_HOST || "";
     }
     if (process.env.AI_ACQ_ASTERISK_LOCAL_NET) state.asteriskLocalNet = process.env.AI_ACQ_ASTERISK_LOCAL_NET;
-    if (process.env.AI_ACQ_ASTERISK_MAX_CHANNELS) {
-      state.maxChannels = Number(process.env.AI_ACQ_ASTERISK_MAX_CHANNELS);
+    if (process.env.AI_ACQ_VOICE_GATEWAY_MAX_CHANNELS || process.env.AI_ACQ_ASTERISK_MAX_CHANNELS) {
+      state.maxChannels = Number(process.env.AI_ACQ_VOICE_GATEWAY_MAX_CHANNELS || process.env.AI_ACQ_ASTERISK_MAX_CHANNELS);
     }
     if (process.env.AI_ACQ_AUDIOSOCKET_HOST) state.audioSocketHost = process.env.AI_ACQ_AUDIOSOCKET_HOST;
     if (process.env.AI_ACQ_AUDIOSOCKET_PORT) state.audioSocketPort = Number(process.env.AI_ACQ_AUDIOSOCKET_PORT);
@@ -197,39 +227,39 @@ class AsteriskSidecar {
 
   writeConfigs(paths) {
     const { state } = paths;
-    const uc100RegisterEnabled = Boolean(state.uc100SipUsername && state.uc100SipPassword);
+    const gatewayRegisterEnabled = Boolean(state.voiceGatewaySipUsername && state.voiceGatewaySipPassword);
     const advertisedTransport = state.asteriskAdvertisedHost
       ? `external_signaling_address = ${state.asteriskAdvertisedHost}
 external_media_address = ${state.asteriskAdvertisedHost}
 local_net = ${state.asteriskLocalNet}
 `
       : "";
-    const uc100Auth = uc100RegisterEnabled
+    const gatewayAuth = gatewayRegisterEnabled
       ? `
 [${state.trunkName}-auth]
 type = auth
 auth_type = userpass
-username = ${state.uc100SipUsername}
-password = ${state.uc100SipPassword}
+username = ${state.voiceGatewaySipUsername}
+password = ${state.voiceGatewaySipPassword}
 `
       : "";
-    const uc100EndpointAuth = uc100RegisterEnabled
+    const gatewayEndpointAuth = gatewayRegisterEnabled
       ? `outbound_auth = ${state.trunkName}-auth
-from_user = ${state.uc100SipUsername}
-from_domain = ${state.uc100Host}
-callerid = ${state.uc100SipUsername}
-contact_user = ${state.uc100SipUsername}
+from_user = ${state.voiceGatewaySipUsername}
+from_domain = ${state.voiceGatewayHost}
+callerid = ${state.voiceGatewaySipUsername}
+contact_user = ${state.voiceGatewaySipUsername}
 `
       : "";
-    const uc100Registration = uc100RegisterEnabled
+    const gatewayRegistration = gatewayRegisterEnabled
       ? `
 [${state.trunkName}-registration]
 type = registration
 transport = transport-udp
 outbound_auth = ${state.trunkName}-auth
-server_uri = sip:${state.uc100Host}:${state.uc100SipPort}
-client_uri = sip:${state.uc100SipUsername}@${state.uc100Host}:${state.uc100SipPort}
-contact_user = ${state.uc100SipUsername}
+server_uri = sip:${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
+client_uri = sip:${state.voiceGatewaySipUsername}@${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
+contact_user = ${state.voiceGatewaySipUsername}
 retry_interval = 30
 forbidden_retry_interval = 30
 expiration = 300
@@ -291,16 +321,16 @@ user_agent = AI_ACQ_Client_Asterisk
 type = transport
 protocol = udp
 bind = 0.0.0.0:${state.sipPort}
-${advertisedTransport}${uc100Auth}
+${advertisedTransport}${gatewayAuth}
 
 [${state.trunkName}]
 type = endpoint
 transport = transport-udp
-context = from-uc100
+context = from-voice-gateway
 disallow = all
 allow = alaw,ulaw
 aors = ${state.trunkName}-aor
-${uc100EndpointAuth}direct_media = no
+${gatewayEndpointAuth}direct_media = no
 rtp_symmetric = yes
 force_rport = yes
 rewrite_contact = yes
@@ -308,14 +338,14 @@ timers = no
 
 [${state.trunkName}-aor]
 type = aor
-contact = sip:${state.uc100Host}:${state.uc100SipPort}
+contact = sip:${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
 qualify_frequency = 30
-${uc100Registration}
+${gatewayRegistration}
 
 [${state.trunkName}-identify]
 type = identify
 endpoint = ${state.trunkName}
-match = ${state.uc100Host}
+match = ${state.voiceGatewayHost}
 `,
     );
     writeFileIfChanged(
@@ -327,8 +357,8 @@ exten => s,1,NoOp(AI ACQ realtime outbound call answered)
  same => n,AudioSocket(\${AI_ACQ_CALL_UUID},${state.audioSocketHost}:${state.audioSocketPort})
  same => n,Hangup()
 
-[from-uc100]
-exten => _X.,1,NoOp(Inbound call from UC100: \${CALLERID(all)})
+[from-voice-gateway]
+exten => _X.,1,NoOp(Inbound call from voice gateway: \${CALLERID(all)})
  same => n,Hangup()
 `,
     );
@@ -343,6 +373,12 @@ rtpend = ${state.rtpEnd}
       paths.backendEnvPath,
       `# Generated by the AI ACQ desktop client. Do not commit this file.
 TELEPHONY_GATEWAY_MODE=asterisk
+VOICE_GATEWAY_PROFILE=${state.voiceGatewayProfile}
+VOICE_GATEWAY_LABEL=${state.voiceGatewayLabel}
+VOICE_GATEWAY_HOST=${state.voiceGatewayHost}
+VOICE_GATEWAY_SIP_PORT=${state.voiceGatewaySipPort}
+VOICE_GATEWAY_TRUNK_NAME=${state.trunkName}
+VOICE_GATEWAY_MAX_CHANNELS=${state.maxChannels}
 ASTERISK_HOST=127.0.0.1
 ASTERISK_AMI_PORT=${state.amiPort}
 ASTERISK_AMI_USERNAME=${state.amiUsername}
@@ -412,10 +448,10 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
         detail: amiReachable ? `AMI 监听在 127.0.0.1:${layout.state.amiPort}` : running ? "Asterisk 已启动，等待 AMI 端口打开。" : "Asterisk sidecar 尚未启动。",
       },
       {
-        key: "uc100_target",
-        label: "UC100 目标",
+        key: "voice_gateway_target",
+        label: "语音网关目标",
         status: "warn",
-        detail: `${layout.state.uc100Host}:${layout.state.uc100SipPort}，单卡默认 ${layout.state.maxChannels} 路。`,
+        detail: `${layout.state.voiceGatewayLabel} · ${layout.state.voiceGatewayHost}:${layout.state.voiceGatewaySipPort}，当前配置 ${layout.state.maxChannels} 路。`,
       },
       {
         key: "audio_socket",
@@ -439,9 +475,9 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
       return "Asterisk 进程已启动，等待 AMI 端口打开；若持续失败，查看客户端日志目录。";
     }
     if (!audioSocketReachable) {
-      return "内置 Asterisk 已运行；启动实时 AudioSocket bridge 后，再做 UC100 trunk 预检和单号试拨。";
+      return "内置 Asterisk 已运行；启动实时 AudioSocket bridge 后，再做语音网关 trunk 预检和单号试拨。";
     }
-    return `内置 Asterisk 和实时媒体桥已运行。后端应读取 ${layout.backendEnvPath}，再做 UC100 trunk 预检。`;
+    return `内置 Asterisk 和实时媒体桥已运行。后端应读取 ${layout.backendEnvPath}，再做语音网关 trunk 预检。`;
   }
 }
 

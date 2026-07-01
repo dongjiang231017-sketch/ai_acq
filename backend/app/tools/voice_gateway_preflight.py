@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 from typing import Any
@@ -17,7 +19,9 @@ def _json_default(value: object) -> str:
 
 
 def print_text_report(report: dict[str, Any]) -> None:
-    print("UC100 / Asterisk preflight (legacy wrapper; use voice_gateway_preflight for generic delivery)")
+    profile = report.get("voiceGatewayProfile") or {}
+    print("Voice Gateway / Asterisk preflight")
+    print(f"gateway: {profile.get('label', '语音网关')} ({profile.get('host', '')}:{profile.get('sipPort', '')})")
     print(f"checkedAt: {report['checkedAt']}")
     print(f"readyForDeviceTest: {report['readyForDeviceTest']}")
     print(f"readyForSingleNumberTest: {report['readyForSingleNumberTest']}")
@@ -33,7 +37,7 @@ def print_text_report(report: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check UC100/Asterisk readiness without placing a real call. Legacy wrapper for the generic voice gateway preflight.")
+    parser = argparse.ArgumentParser(description="Check voice gateway/Asterisk readiness without placing a real call.")
     parser.add_argument("--phone", help="Optional test phone number for rendering the Asterisk Channel only.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args()
