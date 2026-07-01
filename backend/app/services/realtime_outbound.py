@@ -143,7 +143,14 @@ def build_realtime_pipeline() -> dict[str, object]:
             ),
         ),
         _pipeline_step("asr", "流式 ASR", "pass", settings.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
-        _pipeline_step("router", "快速意图路由", "pass", "context policy", 35, "拒绝、结束、稍后联系走规则；其余先用上下文电话策略，避免实时电话空等。"),
+        _pipeline_step(
+            "router",
+            "语义意图路由",
+            "pass",
+            "semantic context policy",
+            35,
+            "先抽取客户当前问题类型和最近对话主题；身份、费用、保证、流程、资料等直接回答，开放问题再交给 DeepSeek 增强。",
+        ),
         _pipeline_step(
             "llm",
             "LLM 生成",
@@ -151,7 +158,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             settings.deepseek_chat_model if llm_ready else "local rules fallback",
             320 if llm_ready else 0,
             (
-                "DeepSeek 可作为复杂场景增强；电话主链路优先使用上下文策略，慢或失败不会卡住通话。"
+                "DeepSeek 负责开放追问和复杂表达；电话主链路保留语义兜底，慢或失败不会卡住通话。"
                 if llm_ready
                 else "未配置 DeepSeek 运行时密钥；真实电话会先使用本地规则兜底。"
             ),
@@ -515,6 +522,11 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "了解一下",
         "可以听",
         "可以说",
+        "具体说",
+        "具体讲",
+        "详细讲",
+        "详细讲解",
+        "讲解一下",
     ]
     if any(keyword in clean for keyword in cooperation_keywords):
         return "合作咨询", "方案说明"

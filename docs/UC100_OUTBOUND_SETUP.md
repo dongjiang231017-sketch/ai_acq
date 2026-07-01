@@ -10,7 +10,7 @@
 4. 客户交付版使用桌面客户端内置 Asterisk sidecar；本机 Asterisk 只用于开发验证。
 5. 在 AI 外呼系统的「真实线路接入」面板做无拨号预检。
 6. 使用 `python -m app.tools.uc100_preflight` 做命令行无拨号预检。
-7. 参考 `docs/CLIENT_ASTERISK_SIDECAR.md` 和 `docs/UC100_ASTERISK_SNIPPETS.md` 准备 sidecar、PJSIP trunk 和 dialplan。
+7. 参考 `docs/CUSTOMER_OUTBOUND_USAGE.md`、`docs/CLIENT_ASTERISK_SIDECAR.md` 和 `docs/UC100_ASTERISK_SNIPPETS.md` 准备客户交付、sidecar、PJSIP trunk 和 dialplan。
 8. 在 AI 外呼系统的「实时语音管线」面板创建模拟通话，验证 ASR、意图路由、LLM、TTS 分块和打断状态机。
 9. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
 

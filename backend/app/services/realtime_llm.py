@@ -22,6 +22,14 @@ class RealtimeReplyResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class DialogueSignal:
+    topic: str
+    direct_question: bool = False
+    complaint: bool = False
+    from_context_repair: bool = False
+
+
 _DEEPSEEK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-acq-deepseek-realtime")
 _DEEPSEEK_BACKOFF_LOCK = threading.Lock()
 _DEEPSEEK_BACKOFF_UNTIL = 0.0
@@ -43,7 +51,6 @@ _CONTEXT_LOCAL_FIRST_INTENTS = {
     "已有渠道",
     "来源/隐私",
     "低信息确认",
-    "需求探索",
 }
 
 
@@ -66,11 +73,12 @@ def generate_realtime_reply(
             latency_ms=0,
             fallback_used=True,
         )
-    contextual_reply = _build_contextual_local_reply(text, intent, merchant_name, fallback_reply, history)
-    if intent in _CONTEXT_LOCAL_FIRST_INTENTS:
+    signal = _analyze_dialogue_signal(text, intent, history)
+    contextual_reply = _build_contextual_local_reply(text, intent, merchant_name, fallback_reply, history, signal)
+    if intent in _CONTEXT_LOCAL_FIRST_INTENTS or _should_answer_locally_first(signal):
         return RealtimeReplyResult(
             reply=contextual_reply,
-            strategy="local_context_fast_path",
+            strategy=f"local_semantic_{signal.topic}",
             latency_ms=0,
             fallback_used=True,
         )
@@ -147,12 +155,89 @@ def _build_contextual_local_reply(
     merchant_name: str,
     fallback_reply: str,
     conversation_history: list[dict[str, str]],
+    signal: DialogueSignal | None = None,
 ) -> str:
     clean = text.strip()
     compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
     last_assistant = _last_history_content(conversation_history, "assistant")
     last_user = _last_history_content(conversation_history, "user")
     merchant = merchant_name.strip() or "您的门店"
+    signal = signal or _analyze_dialogue_signal(clean, intent, conversation_history)
+
+    if signal.topic == "identity":
+        if compact in {"喂", "喂喂", "你好"}:
+            return _avoid_repeat("您好，我做视频号团购获客，方便说半分钟吗？", last_assistant)
+        if _has_any(clean, ["做什么", "做啥", "干嘛", "什么事", "什么意思"]):
+            return _avoid_repeat("我们做视频号团购，帮门店引附近客到店。", last_assistant)
+        return _avoid_repeat(
+            "我是本地生活服务顾问，做视频号团购到店获客。",
+            last_assistant,
+            ["不是平台官方，是做门店团购获客服务。"],
+        )
+
+    if signal.topic == "price":
+        return _avoid_repeat(
+            "是要付费，具体看套餐和投放，不合适不建议做。",
+            last_assistant,
+            ["您问费用对吧，是付费服务，但先看适不适合再报价。"],
+        )
+
+    if signal.topic == "guarantee":
+        return _avoid_repeat(
+            "不能空口保证，只能先测曝光、咨询和到店数据。",
+            last_assistant,
+            ["您问保障对吧，不能保底，只能先用数据测试效果。"],
+        )
+
+    if signal.topic == "effect_goal":
+        return _avoid_repeat("那就按到店目标，先做引流团购，小范围测到店数据。", last_assistant)
+
+    if signal.topic == "process":
+        return _avoid_repeat(
+            "流程是先看品类，再定团购套餐，小范围投放测试。",
+            last_assistant,
+            ["简单说，先设计团购套餐，再投同城曝光测试。"],
+        )
+
+    if signal.topic == "materials":
+        if _has_any(last_assistant, ["案例", "资料", "微信"]):
+            return "好的，我按微信发资料，电话里不多占您时间。"
+        return _avoid_repeat("可以，稍后微信发案例和流程给您。", last_assistant)
+
+    if signal.topic == "quality":
+        return _avoid_repeat(
+            "抱歉可能信号不稳，我短说：视频号团购帮门店引流到店。",
+            last_assistant,
+            ["我放慢点说：我们做视频号团购到店获客。"],
+        )
+
+    if signal.topic == "source":
+        return _avoid_repeat("不方便我就标记不再联系，只做门店业务沟通。", last_assistant)
+
+    if signal.topic == "owner":
+        return _avoid_repeat("方便转给负责团购的人吗？我简单说。", last_assistant)
+
+    if signal.topic == "existing_channel":
+        return _avoid_repeat("不冲突，视频号主要补微信同城流量。", last_assistant)
+
+    if signal.topic == "low_info":
+        if _has_any(last_assistant, ["发资料", "短信", "案例"]):
+            return _avoid_repeat("好的，我发案例资料，您看完再决定。", last_assistant)
+        if _has_any(last_assistant, ["方便", "半分钟", "可以吗"]):
+            return _avoid_repeat("那我说重点：先做团购套餐，再测到店。", last_assistant)
+        return _avoid_repeat("我接着说：先小范围测曝光和到店。", last_assistant)
+
+    if signal.topic == "context_repair":
+        history_topic = _infer_history_topic(clean, last_user, last_assistant)
+        if history_topic == "price":
+            return _avoid_repeat("您问费用对吧，是付费服务，但先看适不适合再报价。", last_assistant)
+        if history_topic == "guarantee":
+            return _avoid_repeat("您问保障对吧，不能保底，只能先用数据测试效果。", last_assistant)
+        if history_topic == "process":
+            return _avoid_repeat("您问怎么做对吧，先定团购套餐，再投同城曝光。", last_assistant)
+        if history_topic == "identity":
+            return _avoid_repeat("我是本地生活服务顾问，做视频号团购到店获客。", last_assistant)
+        return _avoid_repeat("您刚才的问题我重答：视频号团购是帮门店引流到店。", last_assistant)
 
     if intent == "身份确认":
         if compact in {"喂", "喂喂", "你好"}:
@@ -234,6 +319,124 @@ def _build_contextual_local_reply(
     return _avoid_repeat(fallback_reply, last_assistant)
 
 
+def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[dict[str, str]]) -> DialogueSignal:
+    clean = text.strip()
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
+    last_assistant = _last_history_content(conversation_history, "assistant")
+    last_user = _last_history_content(conversation_history, "user")
+
+    if compact in {"喂", "喂喂", "你好"} or intent == "身份确认":
+        return DialogueSignal("identity", direct_question=True)
+
+    if _has_any(
+        clean,
+        ["信号", "断断续续", "太慢", "反应慢", "卡", "听不清", "听不到", "听不见", "没听清", "没听到"],
+    ):
+        return DialogueSignal("quality", complaint=True)
+
+    if _has_any(clean, ["我问你", "没解决", "没回答", "别换", "不是问这个", "回答我"]):
+        history_topic = _infer_history_topic(clean, last_user, last_assistant)
+        if history_topic != "unknown":
+            return DialogueSignal(history_topic, direct_question=True, from_context_repair=True)
+        return DialogueSignal("context_repair", direct_question=True, from_context_repair=True)
+
+    if _is_price_question(clean):
+        return DialogueSignal("price", direct_question=True)
+
+    if _has_any(clean, ["保证", "承诺", "保底"]):
+        return DialogueSignal("guarantee", direct_question=True)
+
+    if _has_any(last_assistant, ["更关心到店客流", "还是怎么合作", "效果，还是费用"]) and _has_any(
+        clean,
+        ["到店", "客流", "引流", "获客"],
+    ):
+        return DialogueSignal("effect_goal")
+
+    if _has_any(clean, ["效果", "客流", "到店", "曝光", "转化", "能带来", "有用吗", "靠谱吗", "有没有用"]):
+        return DialogueSignal("guarantee", direct_question=True)
+
+    if _has_any(clean, ["你是谁", "什么公司", "哪里", "你们", "来电原因", "干嘛", "做什么", "做啥", "什么事", "什么意思"]):
+        return DialogueSignal("identity", direct_question=True)
+
+    if _has_any(clean, ["微信", "资料", "发我", "发给我", "给我发", "怎么发", "发哪里", "发到", "加一下", "短信"]):
+        return DialogueSignal("materials")
+
+    if _has_any(
+        clean,
+        [
+            "怎么做",
+            "怎么合作",
+            "怎么弄",
+            "流程",
+            "合作",
+            "介绍",
+            "说一下",
+            "了解一下",
+            "可以听",
+            "可以说",
+            "具体说",
+            "具体讲",
+            "详细讲",
+            "详细讲解",
+            "讲解一下",
+        ],
+    ):
+        return DialogueSignal("process", direct_question=True)
+
+    if _has_any(clean, ["老板不在", "负责人不在", "店长不在", "找老板", "找负责人", "找店长", "不是我负责", "我不负责", "转给"]):
+        return DialogueSignal("owner")
+
+    if _has_any(clean, ["已经做", "在做", "做过", "有做", "抖音团购", "美团", "大众点评", "小红书", "高德"]):
+        return DialogueSignal("existing_channel")
+
+    if _has_any(clean, ["哪来的", "哪里来的", "怎么知道", "谁给", "电话来源", "号码来源", "我的号码", "个人信息"]):
+        return DialogueSignal("source", direct_question=True)
+
+    if compact in {"在", "嗯", "嗯嗯", "啊", "哦", "噢", "好", "好的", "是", "是的", "对", "对的", "可以", "行", "估计是"}:
+        return DialogueSignal("low_info")
+
+    if _has_any(clean, ["不是", "不对", "听不懂", "什么意思", "说什么", "明白什么"]):
+        return DialogueSignal("context_repair", direct_question=True, from_context_repair=True)
+
+    return DialogueSignal("open_question" if intent == "需求探索" else "intent_" + intent)
+
+
+def _should_answer_locally_first(signal: DialogueSignal) -> bool:
+    return signal.topic in {
+        "identity",
+        "price",
+        "guarantee",
+        "effect_goal",
+        "process",
+        "materials",
+        "quality",
+        "source",
+        "owner",
+        "existing_channel",
+        "low_info",
+        "context_repair",
+    }
+
+
+def _is_price_question(text: str) -> bool:
+    return _has_any(text, ["多少钱", "费用", "价格", "收费", "贵", "付费", "要钱", "花钱", "付钱"])
+
+
+def _infer_history_topic(current_text: str, last_user: str, last_assistant: str) -> str:
+    combined = " ".join([current_text, last_user, last_assistant])
+    if _is_price_question(combined):
+        return "price"
+    if _has_any(combined, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "有用吗", "靠谱吗", "测曝光", "到店数据"]):
+        return "guarantee"
+    if _has_any(combined, ["怎么做", "怎么合作", "流程", "套餐", "投放", "具体说", "详细讲", "讲解"]):
+        return "process"
+    if _has_any(combined, ["你是谁", "什么公司", "本地生活服务顾问", "做视频号团购", "来电原因"]):
+        return "identity"
+    if _has_any(combined, ["微信", "资料", "案例", "短信"]):
+        return "materials"
+    return "unknown"
+
+
 def _last_history_content(history: list[dict[str, str]], role: str) -> str:
     for turn in reversed(history):
         if (turn.get("role") or "").strip().lower() == role:
@@ -245,9 +448,12 @@ def _has_any(text: str, keywords: list[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def _avoid_repeat(reply: str, last_assistant: str) -> str:
+def _avoid_repeat(reply: str, last_assistant: str, topic_alternatives: list[str] | None = None) -> str:
     if not last_assistant or reply.strip() != last_assistant.strip():
         return reply
+    for alternative in topic_alternatives or []:
+        if alternative != last_assistant.strip():
+            return alternative
     alternatives = [
         "我换个说法：用视频号团购帮门店拿到店客。",
         "简单讲，先做套餐，再看曝光和到店数据。",
