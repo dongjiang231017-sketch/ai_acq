@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -338,6 +339,15 @@ def _optional_text(value: object) -> str | None:
 def _classify_intent(text: str) -> tuple[str, str]:
     clean = text.strip()
     lower = clean.lower()
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
+    system_prompt_keywords = [
+        "通话已不再录音",
+        "此通话已不再录音",
+        "开始录音",
+        "停止录音",
+    ]
+    if any(keyword in clean for keyword in system_prompt_keywords):
+        return "系统提示", "忽略系统提示"
     call_screening_keywords = [
         "姓名",
         "来电原因",
@@ -379,13 +389,117 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "不用说",
         "不用讲",
         "到这",
+        "知道了",
+        "明白了",
+        "清楚了",
     ]
     if any(keyword in lower or keyword in clean for keyword in end_keywords):
         return "礼貌结束", "礼貌结束"
-    if any(keyword in text for keyword in ["忙", "晚点", "稍后", "改天"]):
+    if any(keyword in text for keyword in ["忙", "晚点", "稍后", "改天", "没空", "有事", "不方便", "开会", "等会", "一会"]):
         return "稍后联系", "预约复拨"
-    if any(keyword in text for keyword in ["微信", "资料", "发我", "加一下"]):
+    low_information_confirmations = {
+        "在",
+        "嗯",
+        "嗯嗯",
+        "啊",
+        "哦",
+        "噢",
+        "好",
+        "好的",
+        "是",
+        "是的",
+        "对",
+        "对的",
+        "可以",
+        "行",
+        "估计是",
+    }
+    if compact in low_information_confirmations:
+        return "低信息确认", "继续确认"
+    if any(
+        keyword in text
+        for keyword in [
+            "微信",
+            "资料",
+            "发我",
+            "发给我",
+            "给我发",
+            "怎么发",
+            "怎么给我",
+            "发哪里",
+            "发到",
+            "加一下",
+            "短信",
+            "发短信",
+        ]
+    ):
         return "加微信/发资料", "留资转化"
+    source_keywords = [
+        "哪来的",
+        "哪里来的",
+        "怎么知道",
+        "谁给",
+        "谁给你",
+        "电话来源",
+        "号码来源",
+        "我的号码",
+        "个人信息",
+    ]
+    if any(keyword in clean for keyword in source_keywords):
+        return "来源/隐私", "合规说明"
+    owner_keywords = [
+        "老板不在",
+        "负责人不在",
+        "店长不在",
+        "找老板",
+        "找负责人",
+        "找店长",
+        "不是我负责",
+        "我不负责",
+        "转给",
+    ]
+    if any(keyword in clean for keyword in owner_keywords):
+        return "找负责人", "转接负责人"
+    existing_channel_keywords = [
+        "已经做",
+        "在做",
+        "做过",
+        "有做",
+        "抖音团购",
+        "美团",
+        "大众点评",
+        "小红书",
+        "高德",
+    ]
+    if any(keyword in clean for keyword in existing_channel_keywords):
+        return "已有渠道", "渠道补充"
+    effect_keywords = [
+        "效果",
+        "客流",
+        "到店",
+        "曝光",
+        "转化",
+        "能带来",
+        "有用吗",
+        "靠谱吗",
+    ]
+    if any(keyword in clean for keyword in effect_keywords):
+        return "效果询问", "效果说明"
+    cooperation_keywords = [
+        "怎么做",
+        "怎么合作",
+        "怎么弄",
+        "怎么开",
+        "流程",
+        "合作",
+        "介绍",
+        "说一下",
+        "了解一下",
+        "可以听",
+        "可以说",
+    ]
+    if any(keyword in clean for keyword in cooperation_keywords):
+        return "合作咨询", "方案说明"
     clarification_keywords = [
         "听不清",
         "听不到",
@@ -398,6 +512,12 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "明白什么",
         "拧不到",
         "那什么",
+        "再说一遍",
+        "说一遍",
+        "重复一遍",
+        "重新说",
+        "不是",
+        "不对",
     ]
     if any(keyword in clean for keyword in clarification_keywords):
         return "听不清/澄清", "重新说明"
@@ -405,13 +525,16 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "你是谁",
         "哪里",
         "干嘛",
+        "做什么",
+        "做啥",
         "什么公司",
         "什么事",
+        "什么东西",
         "什么意思",
         "你们",
         "来电原因",
     ]
-    if clean in {"喂", "喂。", "喂？", "你好", "你好。"}:
+    if compact in {"喂", "喂喂", "你好"}:
         return "身份确认", "身份说明"
     if any(keyword in clean for keyword in identity_keywords) or "who" in lower:
         return "身份确认", "身份说明"
@@ -423,10 +546,18 @@ def _build_reply(text: str, intent: str, merchant_name: str) -> str:
         "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
         "明确拒绝": "好的，打扰您了。我这边给您标记不再跟进，祝您生意顺利。",
         "稍后联系": "可以，我不多打扰。今天下午还是明天上午再跟您确认方便？",
-        "加微信/发资料": "可以，我把视频号团购入驻资料和同品类案例发您，您看完再沟通。",
-        "身份确认": "我是本地生活服务顾问，主要帮商家做视频号团购曝光和到店转化。",
-        "听不清/澄清": "抱歉，我说简单点：我是本地生活服务顾问，想问您是否了解视频号团购获客。",
+        "加微信/发资料": "可以，我稍后把视频号团购资料和同品类案例发您，您看完再沟通。",
+        "身份确认": "我是做本地生活团购服务的，主要帮门店做视频号团购和到店转化。",
+        "听不清/澄清": "我简单说：我们帮门店做视频号团购，到店获客。您方便听半分钟吗？",
         "礼貌结束": "好的，那我不多打扰了，祝您生意顺利。",
+        "系统提示": "",
+        "合作咨询": "我先说重点：帮门店设计团购套餐，再做视频号同城曝光和到店转化。",
+        "效果询问": "效果主要看品类和套餐，我们会先小范围测试曝光、咨询和到店数据。",
+        "找负责人": "明白，那方便帮我转给负责团购或门店运营的人吗？我简单说明一下。",
+        "已有渠道": "已经做团购更好，视频号可以作为微信生态补充，不影响您现有渠道。",
+        "来源/隐私": "您放心，不方便我就马上标记不再联系；这边只做门店业务回访确认。",
+        "低信息确认": "我简单确认一下，您现在方便听我说半分钟吗？",
+        "需求探索": "我先说重点：我们帮门店做视频号团购曝光，合适再细聊。",
     }
     if intent in replies:
         return replies[intent]

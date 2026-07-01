@@ -22,6 +22,23 @@ class RealtimeReplyResult:
 
 
 _DEEPSEEK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-acq-deepseek-realtime")
+_FAST_LOCAL_INTENTS = {
+    "价格异议",
+    "明确拒绝",
+    "礼貌结束",
+    "稍后联系",
+    "加微信/发资料",
+    "身份确认",
+    "听不清/澄清",
+    "系统提示",
+    "合作咨询",
+    "效果询问",
+    "找负责人",
+    "已有渠道",
+    "来源/隐私",
+    "低信息确认",
+    "需求探索",
+}
 
 
 def deepseek_configured() -> bool:
@@ -29,6 +46,13 @@ def deepseek_configured() -> bool:
 
 
 def generate_realtime_reply(text: str, intent: str, merchant_name: str, fallback_reply: str) -> RealtimeReplyResult:
+    if intent in _FAST_LOCAL_INTENTS:
+        return RealtimeReplyResult(
+            reply=fallback_reply,
+            strategy="rules_fast_path",
+            latency_ms=0,
+            fallback_used=True,
+        )
     if not deepseek_configured():
         return RealtimeReplyResult(
             reply=fallback_reply,

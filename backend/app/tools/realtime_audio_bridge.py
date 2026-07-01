@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import queue
 import signal
@@ -11,7 +12,8 @@ import struct
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+import wave
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,28 @@ AUDIO_SOCKET_KIND_AUDIO = 0x10
 AUDIO_SOCKET_KIND_ERROR = 0xFF
 PCM_FRAME_BYTES = 320
 PCM_FRAME_SECONDS = 0.02
+BARGE_AUDIO_FORWARD_SECONDS = 2.8
+_DOWNSAMPLE_FACTOR = 3
+_DOWNSAMPLE_FIR_TAPS = 31
+_DOWNSAMPLE_CUTOFF = 3600 / 24000
+
+
+def _build_downsample_taps() -> tuple[float, ...]:
+    center = (_DOWNSAMPLE_FIR_TAPS - 1) / 2
+    taps: list[float] = []
+    for index in range(_DOWNSAMPLE_FIR_TAPS):
+        distance = index - center
+        if abs(distance) < 1e-9:
+            sinc = 2 * _DOWNSAMPLE_CUTOFF
+        else:
+            sinc = math.sin(2 * math.pi * _DOWNSAMPLE_CUTOFF * distance) / (math.pi * distance)
+        window = 0.54 - 0.46 * math.cos(2 * math.pi * index / (_DOWNSAMPLE_FIR_TAPS - 1))
+        taps.append(sinc * window)
+    total = sum(taps) or 1.0
+    return tuple(tap / total for tap in taps)
+
+
+_DOWNSAMPLE_TAPS = _build_downsample_taps()
 
 
 @dataclass(frozen=True)
@@ -53,6 +77,9 @@ class BridgeConfig:
     barge_rms_threshold: int = 2200
     barge_frames: int = 6
     tts_gain: float = 1.0
+    opening_grace_seconds: float = 1.2
+    debug_audio_capture_enabled: bool = False
+    debug_audio_capture_dir: Path = Path("/tmp/ai-acq-realtime-audio")
 
 
 class JsonlEventLogger:
@@ -74,6 +101,51 @@ class JsonlEventLogger:
         print(line, flush=True)
 
 
+class CallAudioCapture:
+    def __init__(self, call_id: str, directory: Path) -> None:
+        safe_call_id = "".join(char for char in call_id if char.isalnum() or char in {"-", "_"}) or "unknown"
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.inbound_path = self.directory / f"{safe_call_id}.inbound.wav"
+        self.outbound_path = self.directory / f"{safe_call_id}.outbound.wav"
+        self._lock = threading.Lock()
+        self._inbound = self._open_wave(self.inbound_path)
+        self._outbound = self._open_wave(self.outbound_path)
+        self.closed = False
+
+    @staticmethod
+    def _open_wave(path: Path) -> wave.Wave_write:
+        handle = wave.open(str(path), "wb")
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        return handle
+
+    def write_inbound(self, payload: bytes) -> None:
+        self._write(self._inbound, payload)
+
+    def write_outbound(self, payload: bytes) -> None:
+        self._write(self._outbound, payload)
+
+    def _write(self, handle: wave.Wave_write, payload: bytes) -> None:
+        if self.closed or not payload:
+            return
+        with self._lock:
+            if not self.closed:
+                handle.writeframesraw(payload)
+
+    def close(self) -> dict[str, str]:
+        with self._lock:
+            if not self.closed:
+                self._inbound.close()
+                self._outbound.close()
+                self.closed = True
+        return {
+            "inboundPath": str(self.inbound_path),
+            "outboundPath": str(self.outbound_path),
+        }
+
+
 class AudioSocketProtocolError(RuntimeError):
     pass
 
@@ -93,6 +165,7 @@ class CallRecognitionCallback(RecognitionCallback):
         text = str(sentence.get("text") or "").strip()
         is_final = RecognitionResult.is_sentence_end(sentence)
         if text and text != self.last_text:
+            self.call.customer_activity_event.set()
             self.call.logger.emit(
                 "asr_final" if is_final else "asr_partial",
                 callId=self.call.call_id,
@@ -106,7 +179,7 @@ class CallRecognitionCallback(RecognitionCallback):
             self.call.customer_texts.put((generation, text))
 
     def on_error(self, message: object) -> None:
-        self.call.logger.emit("asr_error", callId=self.call.call_id, error=str(message))
+        self.call.logger.emit("asr_error", callId=self.call.call_id, error=_safe_error_text(message))
 
     def on_complete(self) -> None:
         self.call.logger.emit("asr_complete", callId=self.call.call_id)
@@ -126,6 +199,7 @@ class AudioSocketCallSession:
         self.stop_event = threading.Event()
         self.interrupt_event = threading.Event()
         self.speaking_event = threading.Event()
+        self.customer_activity_event = threading.Event()
         self.send_lock = threading.Lock()
         self.playback_lock = threading.Lock()
         self.generation_lock = threading.Lock()
@@ -134,7 +208,10 @@ class AudioSocketCallSession:
         self.speech_jobs = 0
         self._loud_frames = 0
         self._last_barge_at = 0.0
+        self._barge_forward_until = 0.0
         self._recognition: Recognition | None = None
+        self._audio_capture: CallAudioCapture | None = None
+        self._intent_counts: dict[str, int] = {}
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
 
     def run(self) -> None:
@@ -146,7 +223,7 @@ class AudioSocketCallSession:
             self.logger.emit("call_connected", callId=self.call_id, peer=f"{self.peer[0]}:{self.peer[1]}", voice=self.config.tts_voice_name)
             self._start_asr()
             self._turn_thread.start()
-            threading.Thread(target=self._speak, args=(self.config.opening_text, "opening", 0), daemon=True).start()
+            threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("call_error", callId=self.call_id, error=str(exc))
@@ -154,6 +231,7 @@ class AudioSocketCallSession:
             self.stop_event.set()
             self.interrupt_event.set()
             self._stop_asr()
+            self._stop_audio_capture()
             try:
                 self.conn.close()
             except OSError:
@@ -170,6 +248,7 @@ class AudioSocketCallSession:
             if frame_type == AUDIO_SOCKET_KIND_UUID:
                 self.call_id = _decode_call_id(payload)
                 self.logger.emit("call_uuid", callId=self.call_id)
+                self._start_audio_capture()
                 return True
             if frame_type == AUDIO_SOCKET_KIND_HANGUP:
                 self.logger.emit("hangup_before_uuid")
@@ -189,6 +268,7 @@ class AudioSocketCallSession:
             format="pcm",
             sample_rate=8000,
             workspace=self.config.workspace,
+            disfluency_removal_enabled=True,
         )
         self._recognition.start()
 
@@ -213,6 +293,7 @@ class AudioSocketCallSession:
             if frame_type == AUDIO_SOCKET_KIND_UUID:
                 self.call_id = _decode_call_id(payload)
                 self.logger.emit("call_uuid", callId=self.call_id)
+                self._start_audio_capture()
                 continue
             if frame_type == AUDIO_SOCKET_KIND_DTMF:
                 self.logger.emit("dtmf", callId=self.call_id, digit=payload.decode("utf-8", errors="replace"))
@@ -226,13 +307,23 @@ class AudioSocketCallSession:
             self._handle_audio(payload)
 
     def _handle_audio(self, payload: bytes) -> None:
+        if self._audio_capture:
+            self._audio_capture.write_inbound(payload)
         rms = _pcm_rms(payload)
+        now = time.monotonic()
+        if rms >= self.config.barge_rms_threshold:
+            self.customer_activity_event.set()
         if self.speaking_event.is_set():
+            if now < self._barge_forward_until:
+                if self._recognition:
+                    self._recognition.send_audio_frame(payload)
+                return
             if rms >= self.config.barge_rms_threshold:
                 self._loud_frames += 1
             else:
                 self._loud_frames = 0
-            if self._loud_frames >= self.config.barge_frames and time.monotonic() - self._last_barge_at > 0.8:
+            if self._loud_frames >= self.config.barge_frames and now - self._last_barge_at > 0.8:
+                self._barge_forward_until = now + BARGE_AUDIO_FORWARD_SECONDS
                 self.cancel_pending_speech("客户插话，停止后续 TTS 音频帧并继续听客户说话。", source="rms", rms=rms)
                 if self._recognition:
                     self._recognition.send_audio_frame(payload)
@@ -240,6 +331,14 @@ class AudioSocketCallSession:
         self._loud_frames = 0
         if self._recognition:
             self._recognition.send_audio_frame(payload)
+
+    def _speak_opening_after_grace(self) -> None:
+        grace = max(0.0, self.config.opening_grace_seconds)
+        if grace and self.customer_activity_event.wait(grace):
+            self.logger.emit("opening_deferred", callId=self.call_id, reason="remote_audio_detected")
+            return
+        if not self.stop_event.is_set():
+            threading.Thread(target=self._speak, args=(self.config.opening_text, "opening", 0), daemon=True).start()
 
     def _turn_worker(self) -> None:
         while not self.stop_event.is_set():
@@ -253,12 +352,15 @@ class AudioSocketCallSession:
             if self.stop_event.is_set() or not text.strip():
                 continue
             intent, node = _classify_intent(text)
-            fallback_reply = _build_reply(text, intent, "您的门店")
+            if intent == "系统提示":
+                self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
+                continue
+            turn_count, fallback_reply = self._reply_for_turn(text, intent)
             reply_result = generate_realtime_reply(text, intent, "您的门店", fallback_reply)
             if self.stop_event.is_set():
                 continue
             reply = reply_result.reply
-            self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
+            self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node, turnCount=turn_count)
             self.logger.emit(
                 "llm_reply",
                 callId=self.call_id,
@@ -271,6 +373,34 @@ class AudioSocketCallSession:
             close_after = intent in {"明确拒绝", "礼貌结束"}
             reason = "closing_reply" if close_after else "reply"
             threading.Thread(target=self._speak, args=(reply, reason, generation, close_after), daemon=True).start()
+
+    def _reply_for_turn(self, text: str, intent: str) -> tuple[int, str]:
+        turn_count = self._intent_counts.get(intent, 0)
+        self._intent_counts[intent] = turn_count + 1
+        clean = text.strip()
+        compact = "".join(char for char in clean.lower() if char not in " \t\r\n。！？?!，,、.")
+        if intent == "身份确认":
+            if compact in {"喂", "喂喂", "你好"}:
+                if turn_count == 0:
+                    return turn_count, "您好，我是做视频号团购获客服务的，想占您半分钟，可以吗？"
+                return turn_count, "我在，简单说就是视频号团购获客。不方便的话我就不打扰。"
+            if turn_count == 0:
+                return turn_count, "我是做视频号本地生活团购服务的，主要帮门店做团购曝光和到店转化。"
+            return turn_count, "就是想跟您确认一下，视频号团购获客这块您现在方便了解吗？"
+        if intent == "加微信/发资料":
+            if "怎么" in clean or "哪里" in clean:
+                return turn_count, "短信或微信都可以，您看哪种方便？我只发一份案例资料。"
+            if turn_count > 0:
+                return turn_count, "可以，我按您方便的方式发资料，不在电话里多占时间。"
+        if intent == "听不清/澄清" and turn_count > 0:
+            return turn_count, "我再说短一点：做视频号团购，帮门店多拿到店客户。"
+        if intent == "合作咨询" and turn_count > 0:
+            return turn_count, "流程很简单：先看门店品类，再定团购套餐，小范围测试有效果再放大。"
+        if intent == "低信息确认" and turn_count > 0:
+            return turn_count, "可以的话我就说重点，不方便我就不打扰。"
+        if intent == "需求探索" and turn_count > 0:
+            return turn_count, "如果您方便，我可以先发一份案例资料，您看完再决定。"
+        return turn_count, _build_reply(text, intent, "您的门店")
 
     def _drain_latest_customer_text(self, generation: int, text: str) -> tuple[int, str]:
         latest_generation = generation
@@ -325,6 +455,8 @@ class AudioSocketCallSession:
         total_bytes = 0
         sent = 0
         pending = b""
+        next_frame_at: float | None = None
+        playback_lag_events = 0
         try:
             with self.playback_lock:
                 for audio_chunk in iter_tts_pcm_chunks(text, self.config):
@@ -356,13 +488,25 @@ class AudioSocketCallSession:
                             break
                         frame = pending[:PCM_FRAME_BYTES]
                         pending = pending[PCM_FRAME_BYTES:]
-                        self._send_frame(AUDIO_SOCKET_KIND_AUDIO, _scale_pcm16(frame, self.config.tts_gain))
+                        next_frame_at, playback_lag_events = self._send_audio_frame_at_cadence(
+                            frame,
+                            next_frame_at,
+                            playback_lag_events,
+                            reason,
+                            generation,
+                        )
                         sent += len(frame)
-                        time.sleep(PCM_FRAME_SECONDS)
                     if self.stop_event.is_set() or self._speech_is_obsolete(generation):
                         break
                 if pending and not self.stop_event.is_set() and not self._speech_is_obsolete(generation):
-                    self._send_frame(AUDIO_SOCKET_KIND_AUDIO, _scale_pcm16(pending, self.config.tts_gain))
+                    padded_pending = pending.ljust(PCM_FRAME_BYTES, b"\x00")
+                    next_frame_at, playback_lag_events = self._send_audio_frame_at_cadence(
+                        padded_pending,
+                        next_frame_at,
+                        playback_lag_events,
+                        reason,
+                        generation,
+                    )
                     sent += len(pending)
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("tts_error", callId=self.call_id, text=text, error=str(exc))
@@ -380,6 +524,8 @@ class AudioSocketCallSession:
                 generation=generation,
             )
             self._mark_speech_job_finished()
+            if close_after:
+                self._close_after_terminal_reply("customer_rejected_interrupted")
             return
         interrupted = self._speech_is_obsolete(generation)
         self._mark_speech_job_finished()
@@ -397,12 +543,37 @@ class AudioSocketCallSession:
             generation=generation,
         )
         if close_after and not interrupted:
-            self.logger.emit("call_closing", callId=self.call_id, reason="customer_rejected")
-            self.stop_event.set()
-            try:
-                self.conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+            self._close_after_terminal_reply("customer_rejected")
+
+    def _send_audio_frame_at_cadence(
+        self,
+        frame: bytes,
+        next_frame_at: float | None,
+        lag_events: int,
+        reason: str,
+        generation: int,
+    ) -> tuple[float, int]:
+        now = time.perf_counter()
+        if next_frame_at is None or next_frame_at < now - PCM_FRAME_SECONDS * 2:
+            if next_frame_at is not None and lag_events < 5:
+                lag_ms = int((now - next_frame_at) * 1000)
+                self.logger.emit(
+                    "tts_playback_lag",
+                    callId=self.call_id,
+                    reason=reason,
+                    lagMs=lag_ms,
+                    generation=generation,
+                )
+                lag_events += 1
+            next_frame_at = now
+        wait_seconds = next_frame_at - now
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        scaled_frame = _scale_pcm16(frame, self.config.tts_gain)
+        if self._audio_capture:
+            self._audio_capture.write_outbound(scaled_frame)
+        self._send_frame(AUDIO_SOCKET_KIND_AUDIO, scaled_frame)
+        return next_frame_at + PCM_FRAME_SECONDS, lag_events
 
     def _read_frame(self) -> tuple[int, bytes]:
         header = _read_exact(self.conn, 3)
@@ -432,6 +603,41 @@ class AudioSocketCallSession:
             if self.speech_jobs == 0:
                 self.speaking_event.clear()
 
+    def _close_after_terminal_reply(self, reason: str) -> None:
+        self.logger.emit("call_closing", callId=self.call_id, reason=reason)
+        self.stop_event.set()
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _start_audio_capture(self) -> None:
+        if not self.config.debug_audio_capture_enabled or not self.call_id or self._audio_capture:
+            return
+        try:
+            self._audio_capture = CallAudioCapture(self.call_id, self.config.debug_audio_capture_dir)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("audio_capture_error", callId=self.call_id, error=str(exc))
+            return
+        self.logger.emit(
+            "audio_capture_started",
+            callId=self.call_id,
+            inboundPath=str(self._audio_capture.inbound_path),
+            outboundPath=str(self._audio_capture.outbound_path),
+        )
+
+    def _stop_audio_capture(self) -> None:
+        if not self._audio_capture:
+            return
+        try:
+            paths = self._audio_capture.close()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("audio_capture_error", callId=self.call_id, error=str(exc))
+            self._audio_capture = None
+            return
+        self.logger.emit("audio_capture_saved", callId=self.call_id, **paths)
+        self._audio_capture = None
+
 
 def synthesize_tts_pcm(text: str, config: BridgeConfig) -> bytes:
     dashscope.api_key = settings.dashscope_api_key
@@ -457,6 +663,8 @@ def iter_tts_pcm_chunks(text: str, config: BridgeConfig):
 @dataclass
 class _PcmDownsampleState:
     leftover: bytes = b""
+    history: list[int] = field(default_factory=list)
+    phase: int = 0
 
 
 def stream_qwen_realtime_tts_pcm(text: str, config: BridgeConfig):
@@ -550,18 +758,28 @@ def _qwen_event_payload(response: object) -> dict[str, Any]:
 
 def _downsample_pcm_24k_to_8k(chunk: bytes, state: _PcmDownsampleState) -> bytes:
     data = state.leftover + chunk
-    usable = (len(data) // 6) * 6
+    usable = (len(data) // 2) * 2
     state.leftover = data[usable:]
     if usable <= 0:
         return b""
-    output = bytearray(usable // 3)
-    output.clear()
-    for offset in range(0, usable, 6):
-        first = int.from_bytes(data[offset : offset + 2], "little", signed=True)
-        second = int.from_bytes(data[offset + 2 : offset + 4], "little", signed=True)
-        third = int.from_bytes(data[offset + 4 : offset + 6], "little", signed=True)
-        sample = int((first + second + third) / 3)
-        output.extend(max(-32768, min(32767, sample)).to_bytes(2, "little", signed=True))
+    output = bytearray()
+    # Qwen realtime emits 24 kHz PCM, while Asterisk AudioSocket expects 8 kHz.
+    # A small FIR low-pass before decimation avoids trembly/metallic artifacts
+    # caused by dropping or averaging isolated 3-sample groups.
+    taps_len = len(_DOWNSAMPLE_TAPS)
+    for offset in range(0, usable, 2):
+        sample = int.from_bytes(data[offset : offset + 2], "little", signed=True)
+        state.history.append(sample)
+        if len(state.history) > taps_len:
+            del state.history[: len(state.history) - taps_len]
+        if state.phase == 0:
+            if len(state.history) < taps_len:
+                padded_history = [0] * (taps_len - len(state.history)) + state.history
+            else:
+                padded_history = state.history
+            filtered = sum(sample_value * tap for sample_value, tap in zip(reversed(padded_history), _DOWNSAMPLE_TAPS))
+            output.extend(max(-32768, min(32767, int(round(filtered)))).to_bytes(2, "little", signed=True))
+        state.phase = (state.phase + 1) % _DOWNSAMPLE_FACTOR
     return bytes(output)
 
 
@@ -582,6 +800,9 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         barge_rms_threshold=max(1, settings.realtime_barge_rms_threshold),
         barge_frames=max(1, settings.realtime_barge_frames),
         tts_gain=max(0.1, min(3.0, settings.realtime_tts_gain)),
+        opening_grace_seconds=max(0.0, min(5.0, settings.realtime_opening_grace_seconds)),
+        debug_audio_capture_enabled=settings.realtime_debug_audio_capture_enabled,
+        debug_audio_capture_dir=Path(settings.realtime_debug_audio_capture_dir).expanduser(),
     )
 
 
@@ -720,6 +941,9 @@ def config_summary(config: BridgeConfig) -> dict[str, object]:
         "bargeRmsThreshold": config.barge_rms_threshold,
         "bargeFrames": config.barge_frames,
         "ttsGain": config.tts_gain,
+        "openingGraceSeconds": config.opening_grace_seconds,
+        "debugAudioCaptureEnabled": config.debug_audio_capture_enabled,
+        "debugAudioCaptureDir": str(config.debug_audio_capture_dir),
     }
 
 
@@ -764,6 +988,13 @@ def _scale_pcm16(payload: bytes, gain: float) -> bytes:
     if usable < len(payload):
         output.extend(payload[usable:])
     return bytes(output)
+
+
+def _safe_error_text(message: object) -> str:
+    try:
+        return str(message)
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(message).__name__}: <unprintable error: {exc}>"
 
 
 def parse_args() -> argparse.Namespace:

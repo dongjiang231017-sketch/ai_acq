@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -134,7 +135,10 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    media_loop_confirmed = result.media_loop_confirmed or _realtime_media_confirmed_since(started_at)
+    media_loop_confirmed = result.media_loop_confirmed or _wait_realtime_media_confirmed_since(
+        started_at,
+        timeout_seconds=6.0 if result.cellular_confirmed else 0.0,
+    )
     acceptance_ready = result.acceptance_ready or (result.cellular_confirmed and media_loop_confirmed)
     acceptance_note = result.acceptance_note
     verification_stage = result.verification_stage
@@ -154,6 +158,16 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "acceptanceReady": acceptance_ready,
         "acceptanceNote": acceptance_note,
     }
+
+
+def _wait_realtime_media_confirmed_since(started_at: datetime, timeout_seconds: float = 0.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        if _realtime_media_confirmed_since(started_at):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
 
 
 def _realtime_media_confirmed_since(started_at: datetime) -> bool:
