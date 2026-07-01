@@ -1289,15 +1289,18 @@ button:disabled {
 
 .automation-step.is-done,
 .automation-step.is-draft-ready,
-.automation-step.is-sent {
+.automation-step.is-sent,
+.automation-step.is-sent-confirmed {
   border-color: #bfe3cf;
   background: #f2fff6;
   color: #277044;
 }
 
 .automation-step.is-warning,
+.automation-step.is-send-clicked-unconfirmed,
 .automation-step.is-failed,
 .automation-step.is-no-input,
+.automation-step.is-send-blocked,
 .automation-step.is-send-button-missing {
   border-color: #f1cf92;
   background: #fff8e9;

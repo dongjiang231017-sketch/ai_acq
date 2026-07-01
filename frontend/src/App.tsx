@@ -28,6 +28,7 @@ import {
   CallRecord,
   CallScript,
   ChannelReport,
+  BrowserDmAction,
   BrowserCapturedComment,
   CommentConvertResult,
   CommentInterceptOverview,
@@ -1419,6 +1420,7 @@ function App() {
   const [commentAutomationForm, setCommentAutomationForm] = useState({
     scrollRounds: 6,
     maxAuthors: 3,
+    sendIntervalSeconds: 45,
     dmMessage: "您好，看到您在评论区关注本地生活团购获客，想和您沟通一个本地商家增长方案，可以交流一下吗？",
     allowLiveSend: false,
   });
@@ -2361,18 +2363,32 @@ function App() {
     const { captureAccount, webContentsId } = prepared;
 
     let allowSend = false;
+    const requestedMaxAuthors = Number(commentAutomationForm.maxAuthors) || 0;
+    let effectiveMaxAuthors = requestedMaxAuthors;
+    const sendIntervalSeconds = Math.max(
+      Number(commentAutomationForm.sendIntervalSeconds) || 0,
+      Number(captureAccount.minSendIntervalSeconds) || 0,
+    );
     let sendGateMessage = "私信动作将停在草稿/确认前。";
     if (commentAutomationForm.allowLiveSend) {
       if (!isSupportedDmPlatform(source.platform)) {
         sendGateMessage = `${source.platform}当前未接入自动私信发送，只会填草稿。`;
+      } else if (captureAccount.status !== "可用" || !isDmLoginReadyStatus(captureAccount.sessionStatus)) {
+        sendGateMessage = `${captureAccount.accountName}还不是可用/已登录状态，只会填草稿。`;
+      } else if (["需验证", "风控暂停", "封禁", "异常"].includes(captureAccount.riskStatus ?? "")) {
+        sendGateMessage = `${captureAccount.accountName}风险状态为${captureAccount.riskStatus}，只会填草稿。`;
+      } else if (captureAccount.dailyLimit - captureAccount.sentToday <= 0) {
+        sendGateMessage = `${captureAccount.accountName}今日额度已用完，只会填草稿。`;
       } else {
         try {
           const dmConfig = await api.dmConfig();
           if (dmConfig.browserLiveSendEnabled) {
+            const remainingQuota = Math.max(0, captureAccount.dailyLimit - captureAccount.sentToday);
+            effectiveMaxAuthors = Math.min(Math.max(0, requestedMaxAuthors), remainingQuota);
             allowSend = window.confirm(
-              "确认要在真实平台自动点击发送私信？这会使用当前内置登录账号对评论作者发出消息。",
+              `确认要在真实平台自动点击发送私信？本次最多处理 ${effectiveMaxAuthors} 个作者，发送间隔 ${sendIntervalSeconds} 秒，会使用当前内置登录账号对评论作者发出消息。`,
             );
-            sendGateMessage = allowSend ? "已确认真实发送闸门。" : "已取消真实发送，改为只填草稿。";
+            sendGateMessage = allowSend ? `已确认真实发送闸门，最多发送 ${effectiveMaxAuthors} 条。` : "已取消真实发送，改为只填草稿。";
           } else {
             sendGateMessage = "后台未开启 browserLiveSendEnabled，只会填草稿。";
           }
@@ -2393,7 +2409,8 @@ function App() {
         sourceUrl: source.videoUrl || commentSourceForm.videoUrl,
         sourceType: source.sourceType || commentSourceForm.sourceType,
         scrollRounds: Number(commentAutomationForm.scrollRounds) || 6,
-        maxAuthors: Number(commentAutomationForm.maxAuthors) || 0,
+        maxAuthors: allowSend ? effectiveMaxAuthors : requestedMaxAuthors,
+        sendIntervalSeconds,
         dmMessage: commentAutomationForm.dmMessage,
         allowSend,
       });
@@ -2409,11 +2426,49 @@ function App() {
       });
       const commentsData = await refreshCommentInterceptData();
       selectHighIntentCommentRows(commentsData);
+      let recordMessage = "";
+      if (automation.dmActions.length > 0) {
+        const recordResult = await api.recordCommentInterceptDmActions(source.id, {
+          platform: source.platform,
+          accountId: captureAccount.id,
+          messageContent: commentAutomationForm.dmMessage,
+          actions: automation.dmActions.map(
+            (action): BrowserDmAction => ({
+              authorName: action.authorName,
+              profileUrl: action.profileUrl,
+              status: action.status,
+              sent: action.sent,
+              sendClicked: Boolean(action.sendClicked),
+              sentConfirmed: Boolean(action.sentConfirmed),
+              outgoingContent: action.outgoingContent || commentAutomationForm.dmMessage,
+              message: action.message,
+              url: action.url,
+            }),
+          ),
+        });
+        recordMessage = recordResult.message;
+        const [dmOverviewData, conversationData, messageData, leadData, accountData, taskData] = await Promise.all([
+          api.dmOverview(),
+          api.dmConversations(),
+          api.dmMessages(),
+          api.leads(),
+          api.dmAccounts(),
+          api.tasks(),
+        ]);
+        setDmOverview(dmOverviewData);
+        setDmConversations(conversationData);
+        setDmMessages(messageData);
+        setLeads(leadData);
+        setDmAccounts(accountData);
+        setTasks(taskData);
+      }
       const draftCount = automation.dmActions.filter((action) => action.status === "draft-ready").length;
       const sentCount = automation.dmActions.filter((action) => action.sent).length;
-      const failedCount = automation.dmActions.filter((action) => ["failed", "no-input", "send-button-missing"].includes(action.status)).length;
+      const failedCount = automation.dmActions.filter((action) =>
+        ["failed", "no-input", "send-button-missing", "send-blocked"].includes(action.status),
+      ).length;
       setCommentInterceptMessage(
-        `${result.message} 自动化完成：${automation.steps.length} 步，处理作者 ${automation.dmActions.length} 个，草稿 ${draftCount} 条，已发送 ${sentCount} 条，异常 ${failedCount} 个。`,
+        `${result.message} 自动化完成：${automation.steps.length} 步，处理作者 ${automation.dmActions.length} 个，草稿 ${draftCount} 条，已发送 ${sentCount} 条，异常 ${failedCount} 个。${recordMessage ? ` ${recordMessage}` : ""}`,
       );
     } catch (error) {
       await refreshCommentInterceptData().catch(() => undefined);
@@ -5320,6 +5375,18 @@ function App() {
                         type="number"
                         value={commentAutomationForm.maxAuthors}
                         onChange={(event) => setCommentAutomationForm({ ...commentAutomationForm, maxAuthors: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      发送间隔秒
+                      <input
+                        min={0}
+                        max={600}
+                        type="number"
+                        value={commentAutomationForm.sendIntervalSeconds}
+                        onChange={(event) =>
+                          setCommentAutomationForm({ ...commentAutomationForm, sendIntervalSeconds: Number(event.target.value) })
+                        }
                       />
                     </label>
                     <label className="wide">

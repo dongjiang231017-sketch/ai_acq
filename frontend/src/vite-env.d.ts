@@ -40,6 +40,9 @@ type AiAcqDesktopDmAction = {
   profileUrl: string;
   status: string;
   sent: boolean;
+  sendClicked?: boolean;
+  sentConfirmed?: boolean;
+  outgoingContent?: string;
   message: string;
   url?: string;
 };
@@ -99,6 +102,7 @@ interface Window {
       sourceType?: string;
       scrollRounds?: number;
       maxAuthors?: number;
+      sendIntervalSeconds?: number;
       dmMessage?: string;
       allowSend?: boolean;
     }) => Promise<AiAcqDesktopCommentAutomationResult>;

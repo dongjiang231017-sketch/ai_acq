@@ -414,6 +414,31 @@ export type CommentSyncResult = {
   message: string;
 };
 
+export type BrowserDmAction = {
+  authorName: string;
+  profileUrl?: string;
+  status: string;
+  sent: boolean;
+  sendClicked?: boolean;
+  sentConfirmed?: boolean;
+  outgoingContent?: string;
+  message?: string;
+  url?: string;
+  rawPayload?: Record<string, unknown> | null;
+};
+
+export type BrowserDmActionRecordResult = {
+  sourceId: string;
+  taskId?: string | null;
+  recorded: number;
+  sent: number;
+  drafts: number;
+  failed: number;
+  leadIds: string[];
+  conversationIds: string[];
+  message: string;
+};
+
 export type BrowserCapturedComment = {
   externalCommentId?: string;
   authorName: string;
@@ -991,6 +1016,19 @@ export const api = {
     },
   ) =>
     request<CommentSyncResult>(`/direct-messages/intercepts/sources/${sourceId}/browser-capture`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  recordCommentInterceptDmActions: (
+    sourceId: string,
+    payload: {
+      platform: string;
+      accountId?: string | null;
+      messageContent: string;
+      actions: BrowserDmAction[];
+    },
+  ) =>
+    request<BrowserDmActionRecordResult>(`/direct-messages/intercepts/sources/${sourceId}/browser-dm-actions`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),

@@ -469,10 +469,13 @@ function scrollCommentsScript(rounds) {
   })()`;
 }
 
-function fillDirectMessageScript(message, allowSend) {
+function fillDirectMessageScript(message, options = {}) {
+  const allowSend = Boolean(options.allowSend);
+  const confirmTimeoutMs = clampInteger(options.confirmTimeoutMs, 3500, 500, 15000);
   return `(async () => {
     const message = ${JSON.stringify(message)};
     const allowSend = ${allowSend ? "true" : "false"};
+    const confirmTimeoutMs = ${confirmTimeoutMs};
     const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const isVisible = (element) => {
       const rect = element.getBoundingClientRect();
@@ -491,10 +494,16 @@ function fillDirectMessageScript(message, allowSend) {
       cleanText(element.textContent || "").slice(0, 40),
     ].join(" ");
     const notDisabled = (element) => !element.disabled && element.getAttribute("aria-disabled") !== "true";
-    const clickByPattern = (pattern) => {
-      const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], div, span"))
+    const visibleClickables = () => Array.from(document.querySelectorAll("button, a, [role='button'], div, span"))
         .filter((element) => isVisible(element) && notDisabled(element))
-        .map((element) => ({ element, text: cleanText(descriptor(element)) }))
+        .map((element) => ({
+          element,
+          label: cleanText(element.innerText || element.textContent || element.getAttribute("aria-label") || element.getAttribute("title") || ""),
+          info: cleanText(descriptor(element)),
+        }));
+    const clickByPattern = (pattern) => {
+      const candidates = visibleClickables()
+        .map((item) => ({ ...item, text: cleanText([item.label, item.info].join(" ")) }))
         .filter((item) => pattern.test(item.text))
         .sort((left, right) => left.text.length - right.text.length);
       const selected = candidates[0]?.element;
@@ -502,6 +511,21 @@ function fillDirectMessageScript(message, allowSend) {
       selected.scrollIntoView({ block: "center", inline: "center" });
       selected.click();
       return true;
+    };
+    const findSendButton = () => {
+      const sendTextPattern = /^(发送|send)$/i;
+      const sendInfoPattern = /(send|submit|发送)/i;
+      return visibleClickables()
+        .map((item) => {
+          const label = cleanText(item.label);
+          const score = (sendTextPattern.test(label) ? 6 : 0)
+            + (/发送/.test(label) && label.length <= 8 ? 4 : 0)
+            + (sendInfoPattern.test(item.info) ? 2 : 0)
+            - (/(发消息|发送消息|私信|联系|评论|回复)/.test(label) && !sendTextPattern.test(label) ? 4 : 0);
+          return { ...item, score };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score || left.label.length - right.label.length)[0]?.element || null;
     };
     const setNativeValue = (element, value) => {
       element.focus();
@@ -516,6 +540,12 @@ function fillDirectMessageScript(message, allowSend) {
       else element.value = value;
       element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
       element.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const inputValue = (element) => element.isContentEditable ? cleanText(element.textContent) : cleanText(element.value);
+    const pageRiskText = () => {
+      const text = cleanText(document.body?.innerText || "").slice(0, 20000);
+      const match = text.match(/(验证码|安全验证|滑动验证|登录后|请登录|操作频繁|发送失败|发送过快|风险|限制|异常|稍后再试|verify|captcha|too frequent|failed)/i);
+      return match?.[0] || "";
     };
     const openedMessageEntry = clickByPattern(/(私信|发消息|发送消息|联系|聊天|message|chat|dm)/i);
     if (openedMessageEntry) await wait(1200);
@@ -549,19 +579,51 @@ function fillDirectMessageScript(message, allowSend) {
         openedMessageEntry,
         filled: true,
         sent: false,
+        sendClicked: false,
+        sentConfirmed: false,
+        outgoingContent: message,
         message: "已填写私信草稿，按安全策略停在发送前。",
         url: window.location.href,
         title: document.title,
       };
     }
-    const sent = clickByPattern(/^(button.*)?(发送|send)$/i);
+    const sendButton = findSendButton();
+    if (!sendButton) {
+      return {
+        ok: false,
+        status: "send-button-missing",
+        openedMessageEntry,
+        filled: true,
+        sent: false,
+        sendClicked: false,
+        sentConfirmed: false,
+        outgoingContent: message,
+        message: "已填写草稿，但未找到可点击的发送按钮。",
+        url: window.location.href,
+        title: document.title,
+      };
+    }
+    sendButton.scrollIntoView({ block: "center", inline: "center" });
+    sendButton.click();
+    await wait(confirmTimeoutMs);
+    const risk = pageRiskText();
+    const remainingValue = inputValue(input);
+    const sentConfirmed = !risk && remainingValue !== message;
+    const status = risk ? "send-blocked" : sentConfirmed ? "sent-confirmed" : "send-clicked-unconfirmed";
     return {
-      ok: sent,
-      status: sent ? "sent" : "send-button-missing",
+      ok: !risk,
+      status,
       openedMessageEntry,
       filled: true,
-      sent,
-      message: sent ? "已点击发送按钮。" : "已填写草稿，但未找到发送按钮。",
+      sent: !risk,
+      sendClicked: true,
+      sentConfirmed,
+      outgoingContent: message,
+      message: risk
+        ? \`平台疑似拦截发送：\${risk}\`
+        : sentConfirmed
+          ? "已点击发送按钮，并观察到输入框清空/状态变化。"
+          : "已点击发送按钮，但未能确认平台是否完成发送。",
       url: window.location.href,
       title: document.title,
     };
@@ -577,6 +639,7 @@ async function runCommentAutomation(payload) {
   const dmMessage = String(payload?.dmMessage || "").trim();
   const scrollRounds = clampInteger(payload?.scrollRounds, 6, 1, 20);
   const maxAuthors = clampInteger(payload?.maxAuthors, 3, 0, 12);
+  const sendIntervalSeconds = clampInteger(payload?.sendIntervalSeconds, 45, 0, 600);
   const allowSend = Boolean(payload?.allowSend);
   const steps = [];
   const dmActions = [];
@@ -658,17 +721,26 @@ async function runCommentAutomation(payload) {
     } else if (profileTargets.length === 0) {
       addStep("prepare_dm", "warning", "当前评论 DOM 未识别到作者主页链接，无法自动进入主页私信。");
     } else {
-      for (const target of profileTargets) {
+      for (const [index, target] of profileTargets.entries()) {
         try {
+          if (allowSend && index > 0 && sendIntervalSeconds > 0) {
+            await delay(sendIntervalSeconds * 1000);
+          }
           await targetContents.loadURL(target.profileUrl);
           await waitForWebContentsIdle(targetContents, 10000);
           await delay(900);
-          const dmResult = await targetContents.executeJavaScript(fillDirectMessageScript(dmMessage, allowSend), true);
+          const dmResult = await targetContents.executeJavaScript(
+            fillDirectMessageScript(dmMessage, { allowSend, confirmTimeoutMs: 4000 }),
+            true,
+          );
           dmActions.push({
             authorName: target.authorName,
             profileUrl: target.profileUrl,
             status: dmResult?.status || "unknown",
             sent: Boolean(dmResult?.sent),
+            sendClicked: Boolean(dmResult?.sendClicked),
+            sentConfirmed: Boolean(dmResult?.sentConfirmed),
+            outgoingContent: dmResult?.outgoingContent || dmMessage,
             message: dmResult?.message || "",
             url: dmResult?.url || targetContents.getURL(),
           });
@@ -678,6 +750,9 @@ async function runCommentAutomation(payload) {
             profileUrl: target.profileUrl,
             status: "failed",
             sent: false,
+            sendClicked: false,
+            sentConfirmed: false,
+            outgoingContent: dmMessage,
             message: error instanceof Error ? error.message : "进入作者主页或填写私信失败",
             url: targetContents.getURL(),
           });
@@ -689,7 +764,7 @@ async function runCommentAutomation(payload) {
         "prepare_dm",
         dmActions.some((action) => action.status === "failed") ? "warning" : "done",
         allowSend
-          ? `已处理 ${dmActions.length} 个作者主页，点击发送 ${sentCount} 条。`
+          ? `已处理 ${dmActions.length} 个作者主页，点击发送 ${sentCount} 条，发送间隔 ${sendIntervalSeconds} 秒。`
           : `已处理 ${dmActions.length} 个作者主页，填好 ${draftCount} 条草稿并停在发送前。`,
       );
     }

@@ -8,8 +8,19 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.lead import MerchantLead
-from app.models.task import CommentInterceptSource, CommentLeadConversion, SocialComment
+from app.models.task import (
+    CommentInterceptSource,
+    CommentLeadConversion,
+    DirectMessage,
+    DirectMessageAccount,
+    DirectMessageConversation,
+    OutreachTask,
+    SocialComment,
+)
 from app.schemas.comment_intercept import (
+    BrowserDmAction,
+    BrowserDmActionRecordRequest,
+    BrowserDmActionRecordResult,
     BrowserCommentCaptureRequest,
     CommentConvertRequest,
     CommentConvertResult,
@@ -19,6 +30,7 @@ from app.schemas.comment_intercept import (
     CommentSyncResult,
     SocialCommentRead,
 )
+from app.services.dm_policy import SUPPORTED_DM_PLATFORMS, mark_account_sent
 from app.services.comment_intercept_adapter import CommentInterceptAdapterUnavailable, PlatformComment, sync_platform_comments
 
 router = APIRouter()
@@ -135,6 +147,109 @@ def _import_platform_comments(
 
 def _source_comment_count(source_id: str, db: Session) -> int:
     return int(db.scalar(select(func.count()).select_from(SocialComment).where(SocialComment.source_id == source_id)) or 0)
+
+
+def _browser_dm_conversation_status(action: BrowserDmAction) -> str:
+    if action.sent or action.send_clicked:
+        return "已发送" if action.sent_confirmed else "已点击发送"
+    if action.status == "draft-ready":
+        return "草稿待确认"
+    if action.status in {"send-blocked", "send-button-missing", "no-input"}:
+        return "发送受限"
+    return "失败"
+
+
+def _browser_dm_is_failed(action: BrowserDmAction) -> bool:
+    return _browser_dm_conversation_status(action) in {"发送受限", "失败"}
+
+
+def _browser_dm_external_id(source: CommentInterceptSource, action: BrowserDmAction) -> str | None:
+    if not (action.sent or action.send_clicked):
+        return None
+    seed = f"{source.id}|{action.profile_url}|{action.author_name}|{action.outgoing_content}|{action.status}"
+    return f"browser-dm-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _find_social_comment_for_action(source: CommentInterceptSource, action: BrowserDmAction, db: Session) -> SocialComment | None:
+    stmt = select(SocialComment).where(SocialComment.source_id == source.id)
+    if action.profile_url:
+        matched = db.scalar(
+            stmt.where(SocialComment.author_profile_url == action.profile_url).order_by(SocialComment.created_at.desc())
+        )
+        if matched:
+            return matched
+    return db.scalar(
+        stmt.where(SocialComment.author_name == action.author_name).order_by(SocialComment.intent_score.desc(), SocialComment.created_at.desc())
+    )
+
+
+def _upsert_lead_from_browser_action(
+    source: CommentInterceptSource,
+    action: BrowserDmAction,
+    comment: SocialComment | None,
+    db: Session,
+) -> MerchantLead:
+    lead = None
+    if action.profile_url:
+        lead = db.scalar(
+            select(MerchantLead).where(
+                MerchantLead.platform == source.platform,
+                MerchantLead.platform_url == action.profile_url,
+                MerchantLead.source == "评论截流",
+            )
+        )
+    if not lead:
+        lead = db.scalar(
+            select(MerchantLead)
+            .where(
+                MerchantLead.platform == source.platform,
+                MerchantLead.name == action.author_name,
+                MerchantLead.source == "评论截流",
+            )
+            .order_by(MerchantLead.created_at.desc())
+        )
+    if lead:
+        lead.status = "已私信" if action.sent or action.send_clicked else lead.status
+        lead.intent_score = max(lead.intent_score, comment.intent_score if comment else lead.intent_score)
+        if action.profile_url and not lead.platform_url:
+            lead.platform_url = action.profile_url
+        return lead
+
+    lead = MerchantLead(
+        name=action.author_name,
+        platform=source.platform,
+        city=comment.city if comment and comment.city != "待识别" else "待识别",
+        category=comment.category if comment and comment.category != "待识别" else "待识别",
+        phone=None,
+        contact_name=action.author_name,
+        platform_url=action.profile_url or None,
+        source="评论截流",
+        intent_score=comment.intent_score if comment else 60,
+        status="已私信" if action.sent or action.send_clicked else "待私信",
+    )
+    db.add(lead)
+    db.flush()
+    return lead
+
+
+def _link_comment_conversion(comment: SocialComment | None, lead: MerchantLead, action: BrowserDmAction, db: Session) -> None:
+    if not comment:
+        return
+    existing_conversion = db.scalar(select(CommentLeadConversion).where(CommentLeadConversion.comment_id == comment.id))
+    if not existing_conversion:
+        db.add(
+            CommentLeadConversion(
+                comment_id=comment.id,
+                lead_id=lead.id,
+                action="浏览器自动私信",
+                status="已完成" if action.sent or action.send_clicked else "草稿待确认",
+                note=action.message or action.status,
+            )
+        )
+    if action.sent or action.send_clicked:
+        comment.status = "已私信"
+    elif action.status == "draft-ready":
+        comment.status = "草稿待确认"
 
 
 @router.get("/overview", response_model=CommentInterceptOverview)
@@ -259,6 +374,133 @@ def import_browser_captured_comments(
             f"浏览器登录采集完成：当前内置页识别 {detected} 条评论，"
             f"新增 {imported} 条，跳过 {skipped} 条重复评论。"
         ),
+    }
+
+
+@router.post("/sources/{source_id}/browser-dm-actions", response_model=BrowserDmActionRecordResult)
+def record_browser_dm_actions(
+    source_id: str,
+    payload: BrowserDmActionRecordRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    source = db.get(CommentInterceptSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="评论截流来源不存在")
+    if payload.platform != source.platform:
+        raise HTTPException(status_code=400, detail=f"当前来源是{source.platform}，不能记录{payload.platform}私信动作")
+
+    actions = [action for action in payload.actions if action.author_name.strip()]
+    if not actions:
+        return {
+            "sourceId": source.id,
+            "taskId": None,
+            "recorded": 0,
+            "sent": 0,
+            "drafts": 0,
+            "failed": 0,
+            "leadIds": [],
+            "conversationIds": [],
+            "message": "没有可记录的浏览器私信动作。",
+        }
+
+    has_send_clicks = any(action.sent or action.send_clicked for action in actions)
+    if has_send_clicks and source.platform not in SUPPORTED_DM_PLATFORMS:
+        raise HTTPException(status_code=400, detail=f"{source.platform}当前未接入自动私信发送记录")
+
+    account = db.get(DirectMessageAccount, payload.account_id) if payload.account_id else None
+    if has_send_clicks:
+        if not account:
+            raise HTTPException(status_code=400, detail="记录真实发送动作需要关联当前内置登录账号")
+        if account.platform != source.platform:
+            raise HTTPException(status_code=400, detail=f"当前账号是{account.platform}，不能记录{source.platform}发送动作")
+
+    now = datetime.utcnow()
+    sent_count = sum(1 for action in actions if action.sent or action.send_clicked)
+    draft_count = sum(1 for action in actions if action.status == "draft-ready")
+    failed_count = sum(1 for action in actions if _browser_dm_is_failed(action))
+    task = OutreachTask(
+        name=f"{source.name} 浏览器自动私信 {now.strftime('%m%d%H%M')}",
+        channel="dm",
+        status="已完成",
+        target_count=len(actions),
+        completed_count=len(actions),
+        connected_count=sent_count,
+        intent_count=0,
+        failed_count=failed_count,
+        concurrency=1,
+        dm_account_id=account.id if account else None,
+        started_at=now,
+        finished_at=now,
+    )
+    db.add(task)
+    db.flush()
+
+    lead_ids: list[str] = []
+    conversation_ids: list[str] = []
+    for action in actions:
+        comment = _find_social_comment_for_action(source, action, db)
+        lead = _upsert_lead_from_browser_action(source, action, comment, db)
+        _link_comment_conversion(comment, lead, action, db)
+        outgoing_content = action.outgoing_content.strip() or payload.message_content.strip() or action.message
+        status = _browser_dm_conversation_status(action)
+        conversation = DirectMessageConversation(
+            task_id=task.id,
+            lead_id=lead.id,
+            account_id=account.id if account else None,
+            platform=source.platform,
+            merchant_name=lead.name,
+            status=status,
+            intent_level=comment.intent_level if comment else "C",
+            last_message=outgoing_content or action.message or status,
+            last_message_at=now,
+            need_handoff=status in {"草稿待确认", "发送受限", "失败", "已点击发送"},
+        )
+        db.add(conversation)
+        db.flush()
+        db.add(
+            DirectMessage(
+                conversation_id=conversation.id,
+                direction="outbound",
+                content=outgoing_content or action.message,
+                status=status,
+                external_message_id=_browser_dm_external_id(source, action),
+                raw_payload=_raw_payload_json(
+                    {
+                        "provider": "desktop-webview",
+                        "sourceId": source.id,
+                        "authorName": action.author_name,
+                        "profileUrl": action.profile_url,
+                        "url": action.url,
+                        "status": action.status,
+                        "sent": action.sent,
+                        "sendClicked": action.send_clicked,
+                        "sentConfirmed": action.sent_confirmed,
+                        "message": action.message,
+                        "rawPayload": action.raw_payload or {},
+                    }
+                ),
+            )
+        )
+        if action.sent or action.send_clicked:
+            lead.status = "已私信"
+            if account:
+                mark_account_sent(account, now)
+        if lead.id not in lead_ids:
+            lead_ids.append(lead.id)
+        conversation_ids.append(conversation.id)
+
+    task.target_lead_ids = ",".join(lead_ids)
+    db.commit()
+    return {
+        "sourceId": source.id,
+        "taskId": task.id,
+        "recorded": len(actions),
+        "sent": sent_count,
+        "drafts": draft_count,
+        "failed": failed_count,
+        "leadIds": lead_ids,
+        "conversationIds": conversation_ids,
+        "message": f"已记录浏览器私信动作 {len(actions)} 条：发送/点击 {sent_count} 条，草稿 {draft_count} 条，异常 {failed_count} 条。",
     }
 
 

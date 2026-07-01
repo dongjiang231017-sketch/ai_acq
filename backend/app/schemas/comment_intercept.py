@@ -88,6 +88,44 @@ class BrowserCommentCaptureRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class BrowserDmAction(BaseModel):
+    author_name: Annotated[str, Field(alias="authorName", min_length=1, max_length=120)]
+    profile_url: Annotated[str, Field(alias="profileUrl")] = ""
+    status: str = Field(min_length=1, max_length=60)
+    sent: bool = False
+    send_clicked: Annotated[bool, Field(alias="sendClicked")] = False
+    sent_confirmed: Annotated[bool, Field(alias="sentConfirmed")] = False
+    outgoing_content: Annotated[str, Field(alias="outgoingContent")] = ""
+    message: str = Field(default="", max_length=500)
+    url: str = ""
+    raw_payload: Annotated[dict[str, Any] | None, Field(alias="rawPayload")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BrowserDmActionRecordRequest(BaseModel):
+    platform: str = Field(min_length=1, max_length=40)
+    account_id: Annotated[str | None, Field(alias="accountId")] = None
+    message_content: Annotated[str, Field(alias="messageContent")] = ""
+    actions: list[BrowserDmAction] = Field(default_factory=list, max_length=120)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BrowserDmActionRecordResult(BaseModel):
+    source_id: Annotated[str, Field(alias="sourceId")]
+    task_id: Annotated[str | None, Field(alias="taskId")]
+    recorded: int
+    sent: int
+    drafts: int
+    failed: int
+    lead_ids: Annotated[list[str], Field(alias="leadIds")]
+    conversation_ids: Annotated[list[str], Field(alias="conversationIds")]
+    message: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CommentConvertRequest(BaseModel):
     comment_ids: Annotated[list[str], Field(alias="commentIds", min_length=1)]
     city: str = "待识别"
