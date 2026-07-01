@@ -127,6 +127,56 @@ _SESSIONS: dict[str, RealtimeSession] = {}
 def build_realtime_pipeline() -> dict[str, object]:
     audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
+    conversation_mode = (settings.realtime_conversation_mode or "pipeline").strip().lower()
+    if conversation_mode == "omni":
+        dashscope_ready = bool(settings.dashscope_api_key.strip())
+        steps = [
+            _pipeline_step(
+                "media_bridge",
+                "UC100/Asterisk 媒体桥",
+                "warn" if not bridge_ready else "pass",
+                "mock_media" if not bridge_ready else "asterisk_audiosocket",
+                120,
+                (
+                    f"AudioSocket 桥接服务监听 {settings.asterisk_audio_socket_host}:{settings.asterisk_audio_socket_port}，"
+                    "Asterisk 接通后把电话 8k PCM 音频送入 Qwen Omni。"
+                    if bridge_ready
+                    else "真实媒体桥未完全就绪；需要 Asterisk/UC100、单号试拨开关和 AudioSocket bridge 同时在线。"
+                ),
+            ),
+            _pipeline_step(
+                "omni_realtime",
+                "端到端实时语音模型",
+                "pass" if dashscope_ready else "warn",
+                settings.dashscope_omni_realtime_model,
+                520,
+                "Qwen Omni 直接听语音、理解上下文并流式输出语音，素材话术作为实时销售指令注入。",
+            ),
+            _pipeline_step(
+                "barge_in",
+                "打断处理",
+                "pass" if dashscope_ready else "warn",
+                "semantic VAD + local RMS cancel",
+                80,
+                "客户插话时本地先停止播报，同时让 Omni 取消当前回复并继续听客户说话。",
+            ),
+        ]
+        estimated_latency = sum(int(step["latencyMs"]) for step in steps)
+        return {
+            "mode": "omni_realtime_interruptible",
+            "bridgeMode": "mock_media" if not bridge_ready else "asterisk_audiosocket",
+            "targetLatencyMs": 1000,
+            "estimatedLatencyMs": estimated_latency,
+            "estimatedAiCostPerMinute": 0.09,
+            "readyForMockCall": True,
+            "readyForAsteriskMedia": bridge_ready and dashscope_ready,
+            "nextStep": (
+                "Omni 真实电话媒体桥已就绪，可以从前端做单号试拨。"
+                if bridge_ready and dashscope_ready
+                else "先启动 AudioSocket bridge 的 omni 模式，并确认 DashScope key 与 Asterisk 单号试拨开关。"
+            ),
+            "steps": steps,
+        }
     llm_ready = deepseek_configured()
     steps = [
         _pipeline_step(

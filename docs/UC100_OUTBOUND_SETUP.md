@@ -90,12 +90,17 @@ REALTIME_ASR_MODEL=paraformer-realtime-v2
 REALTIME_TTS_VOICE_ID=
 REALTIME_TTS_VOICE_NAME=
 REALTIME_TTS_VOICE_TYPE=system
+REALTIME_CONVERSATION_MODE=pipeline
 REALTIME_LLM_TIMEOUT_SECONDS=0.9
 REALTIME_CALL_OPENING_TEXT=您好，我是本地生活服务顾问，想跟您聊下视频号团购获客，方便吗？
 REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
 REALTIME_REPLY_MAX_CHARS=48
 DASHSCOPE_REALTIME_TTS_MODEL=qwen3-tts-flash-realtime
 DASHSCOPE_REALTIME_TTS_VOICE=Ethan
+DASHSCOPE_OMNI_REALTIME_MODEL=qwen3.5-omni-flash-realtime-2026-03-15
+DASHSCOPE_OMNI_REALTIME_URL=wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+DASHSCOPE_OMNI_REALTIME_VOICE=Serena
+DASHSCOPE_OMNI_INPUT_TRANSCRIPTION_MODEL=qwen3-asr-flash-realtime
 
 # DeepSeek 实时电话短回复。不要提交真实 API Key。
 DEEPSEEK_API_KEY=
@@ -242,6 +247,29 @@ python -m app.tools.realtime_audio_bridge
 ```
 
 `--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。前端「实时语音管线」会读取同一份事件，显示 ASR、DeepSeek 回复、TTS 播放和打断结果。
+
+测试 Qwen Omni 端到端实时方案：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.tools.qwen_omni_realtime_smoke \
+  --model qwen3.5-omni-flash-realtime-2026-03-15 \
+  --voice Serena
+```
+
+`ok=true` 且输出 `inputTranscript`、`assistantTranscript`、`firstAudioMs`、`outputAudioBytes` 才算通过。当前实测裸 `qwen3.5-omni-flash-realtime` alias 在 `session.update` 后会断连，客户交付默认固定到 `qwen3.5-omni-flash-realtime-2026-03-15` snapshot。
+
+启动 Omni 真实电话桥：
+
+```bash
+cd backend
+source .venv/bin/activate
+REALTIME_CONVERSATION_MODE=omni python -m app.tools.realtime_audio_bridge --check
+REALTIME_CONVERSATION_MODE=omni python -m app.tools.realtime_audio_bridge
+```
+
+Omni 模式下，Asterisk AudioSocket 仍接收 8k 电话音频；桥会自动上采样到 16k 送入 Qwen Omni，再把模型输出的 24k PCM 降到 8k 播回电话。事件日志仍写入 `REALTIME_CALL_EVENT_LOG_PATH`，前端会显示 `omni_realtime_interruptible` 链路。
 
 现场电话链路调音参数：
 

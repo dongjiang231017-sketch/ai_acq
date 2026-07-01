@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     dashscope_system_tts_model: str = "qwen3-tts-flash"
     dashscope_realtime_tts_model: str = "qwen3-tts-flash-realtime"
     dashscope_realtime_tts_voice: str = "Serena"
+    dashscope_omni_realtime_model: str = "qwen3.5-omni-flash-realtime-2026-03-15"
+    dashscope_omni_realtime_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    dashscope_omni_realtime_voice: str = "Serena"
+    dashscope_omni_input_transcription_model: str = "qwen3-asr-flash-realtime"
     dashscope_system_tts_language_type: str = "Chinese"
     dashscope_voice_prefix: str = "aiacq"
     dashscope_voice_language_hints: str = "zh"
@@ -68,6 +72,7 @@ class Settings(BaseSettings):
     realtime_tts_voice_id: str = ""
     realtime_tts_voice_name: str = ""
     realtime_tts_voice_type: str = "system"
+    realtime_conversation_mode: str = "pipeline"
     realtime_llm_timeout_seconds: float = 1.2
     realtime_call_opening_text: str = "您好，我做视频号团购获客，方便说半分钟吗？"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"

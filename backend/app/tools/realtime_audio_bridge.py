@@ -22,6 +22,7 @@ import dashscope
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 from dashscope.audio.tts_v2 import SpeechSynthesizer
 from dashscope.audio.tts_v2.speech_synthesizer import AudioFormat as CosyAudioFormat
+from dashscope.audio.qwen_omni import MultiModality, OmniRealtimeCallback, OmniRealtimeConversation
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -29,6 +30,7 @@ from app.db.session import SessionLocal
 from app.models.growth import VoiceCloneRecord
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
+from app.services.realtime_sales_playbook import build_video_group_buying_sales_instructions
 
 
 AUDIO_SOCKET_KIND_HANGUP = 0x00
@@ -71,6 +73,11 @@ class BridgeConfig:
     tts_voice_id: str
     tts_voice_name: str
     tts_voice_type: str
+    conversation_mode: str
+    omni_model: str
+    omni_url: str
+    omni_voice: str
+    omni_input_transcription_model: str
     opening_text: str
     log_path: Path
     workspace: str | None
@@ -186,6 +193,64 @@ class CallRecognitionCallback(RecognitionCallback):
 
     def on_close(self) -> None:
         self.call.logger.emit("asr_close", callId=self.call.call_id)
+
+
+class CallOmniCallback(OmniRealtimeCallback):
+    def __init__(self, call: "OmniAudioSocketCallSession") -> None:
+        self.call = call
+
+    def on_open(self) -> None:
+        self.call.logger.emit("omni_open", callId=self.call.call_id, model=self.call.config.omni_model)
+
+    def on_close(self, close_status_code: object, close_msg: object) -> None:
+        self.call.logger.emit(
+            "omni_close",
+            callId=self.call.call_id,
+            code=str(close_status_code),
+            message=str(close_msg),
+        )
+
+    def on_event(self, response: dict[str, Any]) -> None:
+        event_type = str(response.get("type") or "")
+        if event_type == "session.updated":
+            session = response.get("session") if isinstance(response.get("session"), dict) else {}
+            self.call.logger.emit(
+                "omni_session_updated",
+                callId=self.call.call_id,
+                model=session.get("model") or self.call.config.omni_model,
+                voice=session.get("voice") or self.call.config.omni_voice,
+            )
+            return
+        if event_type == "input_audio_buffer.speech_started":
+            self.call.customer_activity_event.set()
+            self.call.cancel_pending_speech("Omni 检测到客户插话，停止当前语音回复。", source="omni_vad")
+            return
+        if event_type == "conversation.item.input_audio_transcription.completed":
+            text = str(response.get("transcript") or "").strip()
+            if text:
+                self.call.customer_activity_event.set()
+                self.call.logger.emit("asr_final", callId=self.call.call_id, text=text, provider="qwen_omni")
+            return
+        if event_type == "response.created":
+            response_id = ""
+            if isinstance(response.get("response"), dict):
+                response_id = str(response["response"].get("id") or "")
+            self.call.start_omni_response(response_id)
+            return
+        if event_type == "response.audio_transcript.delta":
+            self.call.append_omni_transcript_delta(str(response.get("delta") or ""))
+            return
+        if event_type == "response.audio_transcript.done":
+            self.call.finish_omni_transcript(str(response.get("transcript") or ""))
+            return
+        if event_type == "response.audio.delta":
+            self.call.play_omni_audio_delta(str(response.get("delta") or ""))
+            return
+        if event_type == "response.done":
+            self.call.finish_omni_response()
+            return
+        if event_type == "error" or response.get("error"):
+            self.call.logger.emit("omni_error", callId=self.call.call_id, error=json.dumps(response, ensure_ascii=False)[:600])
 
 
 class AudioSocketCallSession:
@@ -649,6 +714,269 @@ class AudioSocketCallSession:
         self._audio_capture = None
 
 
+class OmniAudioSocketCallSession(AudioSocketCallSession):
+    def __init__(self, conn: socket.socket, peer: tuple[str, int], config: BridgeConfig, logger: JsonlEventLogger) -> None:
+        super().__init__(conn, peer, config, logger)
+        self._omni: OmniRealtimeConversation | None = None
+        self._omni_downsample_state = _PcmDownsampleState()
+        self._omni_lock = threading.Lock()
+        self._omni_generation = 0
+        self._omni_response_id = ""
+        self._omni_reply_parts: list[str] = []
+        self._omni_pending_audio = b""
+        self._omni_next_frame_at: float | None = None
+        self._omni_playback_lag_events = 0
+        self._omni_first_audio_ms = 0
+        self._omni_audio_sent = 0
+        self._omni_audio_total = 0
+        self._omni_response_started_at = 0.0
+        self._omni_tts_started = False
+
+    def run(self) -> None:
+        self.conn.settimeout(1.0)
+        self.logger.emit(
+            "socket_connected",
+            peer=f"{self.peer[0]}:{self.peer[1]}",
+            voice=self.config.omni_voice,
+            mode="omni",
+        )
+        try:
+            if not self._await_call_uuid():
+                return
+            self.logger.emit(
+                "call_connected",
+                callId=self.call_id,
+                peer=f"{self.peer[0]}:{self.peer[1]}",
+                voice=self.config.omni_voice,
+                mode="omni",
+            )
+            self._start_omni()
+            threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
+            self._read_loop()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("call_error", callId=self.call_id, error=str(exc), mode="omni")
+        finally:
+            self.stop_event.set()
+            self.interrupt_event.set()
+            self._stop_omni()
+            self._stop_audio_capture()
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+            self.logger.emit("call_disconnected", callId=self.call_id, mode="omni")
+
+    def _start_omni(self) -> None:
+        if not settings.dashscope_api_key:
+            raise AudioSocketProtocolError("缺少 DASHSCOPE_API_KEY，不能启动 Qwen Omni Realtime。")
+        dashscope.api_key = settings.dashscope_api_key
+        callback = CallOmniCallback(self)
+        self._omni = OmniRealtimeConversation(
+            model=self.config.omni_model,
+            callback=callback,
+            url=self.config.omni_url,
+            workspace=self.config.workspace,
+        )
+        self._omni.connect()
+        self._omni.update_session(
+            output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+            voice=self.config.omni_voice,
+            enable_input_audio_transcription=True,
+            input_audio_transcription_model=self.config.omni_input_transcription_model,
+            enable_turn_detection=True,
+            turn_detection_type="semantic_vad",
+            turn_detection_threshold=0.5,
+            turn_detection_silence_duration_ms=650,
+            turn_detection_param={"interrupt_response": True, "create_response": True},
+            instructions=build_video_group_buying_sales_instructions(),
+        )
+
+    def _stop_omni(self) -> None:
+        if not self._omni:
+            return
+        try:
+            self._omni.close()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("omni_close_error", callId=self.call_id, error=str(exc))
+        self._omni = None
+
+    def _speak_opening_after_grace(self) -> None:
+        grace = max(0.0, self.config.opening_grace_seconds)
+        if grace and self.customer_activity_event.wait(grace):
+            self.logger.emit("opening_deferred", callId=self.call_id, reason="remote_audio_detected", mode="omni")
+            return
+        if not self.stop_event.is_set():
+            self._request_omni_response(f"电话刚接通，请直接说这句开场白：{self.config.opening_text}")
+
+    def _request_omni_response(self, instruction: str) -> None:
+        if not self._omni or self.stop_event.is_set():
+            return
+        try:
+            self._omni.create_response(
+                instructions=f"{build_video_group_buying_sales_instructions()}\n{instruction}",
+                output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("omni_response_request_error", callId=self.call_id, error=str(exc))
+
+    def _handle_audio(self, payload: bytes) -> None:
+        if self._audio_capture:
+            self._audio_capture.write_inbound(payload)
+        rms = _pcm_rms(payload)
+        now = time.monotonic()
+        if rms >= self.config.barge_rms_threshold:
+            self.customer_activity_event.set()
+        if self.speaking_event.is_set():
+            if rms >= self.config.barge_rms_threshold:
+                self._loud_frames += 1
+            else:
+                self._loud_frames = 0
+            if self._loud_frames >= self.config.barge_frames and now - self._last_barge_at > 0.8:
+                self.cancel_pending_speech("客户插话，停止 Omni 语音回复。", source="omni_rms", rms=rms)
+                if self._omni:
+                    try:
+                        self._omni.cancel_response()
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.emit("omni_cancel_error", callId=self.call_id, error=str(exc))
+        else:
+            self._loud_frames = 0
+        if self._omni and payload:
+            try:
+                self._omni.append_audio(base64.b64encode(_upsample_pcm_8k_to_16k(payload)).decode("ascii"))
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("omni_audio_append_error", callId=self.call_id, error=str(exc))
+
+    def start_omni_response(self, response_id: str) -> None:
+        with self.generation_lock:
+            self.speech_generation += 1
+            generation = self.speech_generation
+        with self._omni_lock:
+            self._omni_generation = generation
+            self._omni_response_id = response_id
+            self._omni_reply_parts = []
+            self._omni_pending_audio = b""
+            self._omni_next_frame_at = None
+            self._omni_playback_lag_events = 0
+            self._omni_first_audio_ms = 0
+            self._omni_audio_sent = 0
+            self._omni_audio_total = 0
+            self._omni_response_started_at = time.perf_counter()
+            self._omni_tts_started = False
+        self.interrupt_event.clear()
+        self._mark_speech_job_started()
+        self.logger.emit("omni_response_start", callId=self.call_id, responseId=response_id, generation=generation)
+
+    def append_omni_transcript_delta(self, delta: str) -> None:
+        if not delta:
+            return
+        with self._omni_lock:
+            self._omni_reply_parts.append(delta)
+
+    def finish_omni_transcript(self, transcript: str) -> None:
+        with self._omni_lock:
+            reply = transcript.strip() or "".join(self._omni_reply_parts).strip()
+        if reply:
+            self.logger.emit(
+                "llm_reply",
+                callId=self.call_id,
+                reply=reply,
+                strategy="qwen_omni_realtime",
+                latencyMs=0,
+                fallbackUsed=False,
+                historyTurns=0,
+                error=None,
+            )
+
+    def play_omni_audio_delta(self, delta: str) -> None:
+        if not delta:
+            return
+        try:
+            audio = base64.b64decode(delta)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("omni_audio_decode_error", callId=self.call_id, error=str(exc))
+            return
+        with self.playback_lock:
+            with self._omni_lock:
+                generation = self._omni_generation
+                self._omni_audio_total += len(audio)
+                pcm_8k = _downsample_pcm_24k_to_8k(audio, self._omni_downsample_state)
+                if not pcm_8k or self._speech_is_obsolete(generation):
+                    return
+                if not self._omni_tts_started:
+                    self._omni_first_audio_ms = int((time.perf_counter() - self._omni_response_started_at) * 1000)
+                    self._omni_tts_started = True
+                    self.logger.emit(
+                        "tts_start",
+                        callId=self.call_id,
+                        reason="omni_response",
+                        text="",
+                        bytes=len(pcm_8k),
+                        synthMs=self._omni_first_audio_ms,
+                        firstAudioMs=self._omni_first_audio_ms,
+                        voice=self.config.omni_voice,
+                        voiceType="omni",
+                        model=self.config.omni_model,
+                        streaming=True,
+                        generation=generation,
+                    )
+                self._omni_pending_audio += pcm_8k
+                pending = self._omni_pending_audio
+                next_frame_at = self._omni_next_frame_at
+                lag_events = self._omni_playback_lag_events
+            while len(pending) >= PCM_FRAME_BYTES:
+                if self.stop_event.is_set() or self._speech_is_obsolete(generation):
+                    break
+                frame = pending[:PCM_FRAME_BYTES]
+                pending = pending[PCM_FRAME_BYTES:]
+                next_frame_at, lag_events = self._send_audio_frame_at_cadence(
+                    frame,
+                    next_frame_at,
+                    lag_events,
+                    "omni_response",
+                    generation,
+                )
+                with self._omni_lock:
+                    self._omni_audio_sent += len(frame)
+            with self._omni_lock:
+                self._omni_pending_audio = pending
+                self._omni_next_frame_at = next_frame_at
+                self._omni_playback_lag_events = lag_events
+
+    def finish_omni_response(self) -> None:
+        with self.playback_lock:
+            with self._omni_lock:
+                generation = self._omni_generation
+                pending = self._omni_pending_audio
+                next_frame_at = self._omni_next_frame_at
+                lag_events = self._omni_playback_lag_events
+            if pending and not self.stop_event.is_set() and not self._speech_is_obsolete(generation):
+                padded = pending.ljust(PCM_FRAME_BYTES, b"\x00")
+                next_frame_at, lag_events = self._send_audio_frame_at_cadence(
+                    padded,
+                    next_frame_at,
+                    lag_events,
+                    "omni_response",
+                    generation,
+                )
+                with self._omni_lock:
+                    self._omni_audio_sent += len(pending)
+                    self._omni_pending_audio = b""
+                    self._omni_next_frame_at = next_frame_at
+                    self._omni_playback_lag_events = lag_events
+        interrupted = self._speech_is_obsolete(self._omni_generation)
+        self._mark_speech_job_finished()
+        self.logger.emit(
+            "tts_interrupted" if interrupted else "tts_done",
+            callId=self.call_id,
+            reason="omni_response",
+            phase="playback",
+            sentBytes=self._omni_audio_sent,
+            totalBytes=self._omni_audio_total,
+            firstAudioMs=self._omni_first_audio_ms,
+            generation=self._omni_generation,
+        )
+
+
 def synthesize_tts_pcm(text: str, config: BridgeConfig) -> bytes:
     dashscope.api_key = settings.dashscope_api_key
     synthesizer = SpeechSynthesizer(
@@ -793,6 +1121,19 @@ def _downsample_pcm_24k_to_8k(chunk: bytes, state: _PcmDownsampleState) -> bytes
     return bytes(output)
 
 
+def _upsample_pcm_8k_to_16k(chunk: bytes) -> bytes:
+    usable = (len(chunk) // 2) * 2
+    if usable <= 0:
+        return b""
+    output = bytearray(usable * 2)
+    output.clear()
+    for (sample,) in struct.iter_unpack("<h", chunk[:usable]):
+        encoded = sample.to_bytes(2, "little", signed=True)
+        output.extend(encoded)
+        output.extend(encoded)
+    return bytes(output)
+
+
 def build_config(args: argparse.Namespace) -> BridgeConfig:
     voice = resolve_tts_voice(args.voice_id, args.voice_name)
     workspace = settings.dashscope_workspace.strip() or None
@@ -804,6 +1145,13 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         tts_voice_id=voice.voice_id,
         tts_voice_name=voice.voice_name,
         tts_voice_type=voice.voice_type,
+        conversation_mode=(args.conversation_mode or settings.realtime_conversation_mode or "pipeline").strip().lower(),
+        omni_model=(args.omni_model or settings.dashscope_omni_realtime_model).strip(),
+        omni_url=(args.omni_url or settings.dashscope_omni_realtime_url).strip(),
+        omni_voice=(args.omni_voice or settings.dashscope_omni_realtime_voice or voice.voice_id or "Serena").strip(),
+        omni_input_transcription_model=(
+            args.omni_input_transcription_model or settings.dashscope_omni_input_transcription_model
+        ).strip(),
         opening_text=args.opening_text or settings.realtime_call_opening_text,
         log_path=Path(args.log_path or settings.realtime_call_event_log_path).expanduser(),
         workspace=workspace,
@@ -914,9 +1262,12 @@ def serve(config: BridgeConfig, stop_event: threading.Event) -> None:
     logger.emit(
         "bridge_start",
         bind=f"{config.bind_host}:{config.port}",
+        conversationMode=config.conversation_mode,
         asrModel=config.asr_model,
         ttsModel=config.tts_model,
+        omniModel=config.omni_model,
         voice=config.tts_voice_name,
+        omniVoice=config.omni_voice,
         voiceType=config.tts_voice_type,
     )
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -929,8 +1280,9 @@ def serve(config: BridgeConfig, stop_event: threading.Event) -> None:
                 conn, peer = server.accept()
             except TimeoutError:
                 continue
+            session_cls = OmniAudioSocketCallSession if config.conversation_mode == "omni" else AudioSocketCallSession
             threading.Thread(
-                target=AudioSocketCallSession(conn, peer, config, logger).run,
+                target=session_cls(conn, peer, config, logger).run,
                 name=f"ai-acq-audiosocket-{peer[0]}:{peer[1]}",
                 daemon=True,
             ).start()
@@ -940,8 +1292,13 @@ def serve(config: BridgeConfig, stop_event: threading.Event) -> None:
 def config_summary(config: BridgeConfig) -> dict[str, object]:
     return {
         "bind": f"{config.bind_host}:{config.port}",
+        "conversationMode": config.conversation_mode,
         "asrModel": config.asr_model,
         "ttsModel": config.tts_model,
+        "omniModel": config.omni_model,
+        "omniUrl": config.omni_url,
+        "omniVoice": config.omni_voice,
+        "omniInputTranscriptionModel": config.omni_input_transcription_model,
         "voice": config.tts_voice_name,
         "voiceType": config.tts_voice_type,
         "voiceConfigured": bool(config.tts_voice_id),
@@ -1015,6 +1372,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voice-name", help="Human label for the realtime TTS voice.")
     parser.add_argument("--asr-model", help="DashScope realtime ASR model.")
     parser.add_argument("--tts-model", help="DashScope realtime TTS model.")
+    parser.add_argument("--conversation-mode", choices=["pipeline", "omni"], help="Realtime engine: pipeline or omni.")
+    parser.add_argument("--omni-model", help="DashScope Qwen Omni realtime model.")
+    parser.add_argument("--omni-url", help="DashScope Qwen Omni realtime WebSocket base URL.")
+    parser.add_argument("--omni-voice", help="Qwen Omni realtime voice.")
+    parser.add_argument("--omni-input-transcription-model", help="Qwen Omni realtime input transcription model.")
     parser.add_argument("--opening-text", help="Opening sentence spoken after the call is answered.")
     parser.add_argument("--log-path", help="JSONL event log path.")
     parser.add_argument("--check", action="store_true", help="Print non-secret bridge configuration and exit.")
