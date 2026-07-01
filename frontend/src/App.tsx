@@ -54,6 +54,7 @@ import {
   RecallRule,
   ReportExport,
   ReportOverview,
+  RealtimeLiveEvents,
   RealtimePipeline,
   RealtimeSession,
   RealtimeVoiceSelection,
@@ -300,6 +301,13 @@ const fallbackRealtimePipeline: RealtimePipeline = {
       detail: "客户插话时停止当前播放。",
     },
   ],
+};
+
+const fallbackRealtimeLiveEvents: RealtimeLiveEvents = {
+  logPath: "/tmp/ai-acq-realtime-call-events.jsonl",
+  hasEvents: false,
+  latestAt: null,
+  events: [],
 };
 
 const fallbackRecords: CallRecord[] = [
@@ -1237,6 +1245,7 @@ function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
 }
 
 function telephonyVerificationStageText(result: TelephonyTestCallResult) {
+  if (result.verificationStage === "realtime_media_confirmed") return "线路与实时媒体已验收";
   if (result.verificationStage === "gateway_signaling_only") return "网关侧响应，未证明手机响铃";
   if (result.verificationStage === "cellular_answered_no_media_proof") return "线路接通，待媒体链路验收";
   if (result.verificationStage === "originate_submitted") return "已提交拨号，待线路证据";
@@ -1261,6 +1270,18 @@ function realtimeSessionStatusText(status: string) {
   return status;
 }
 
+function realtimeLiveEventTitle(type: string) {
+  if (type === "call_connected") return "电话接通";
+  if (type === "asr_final") return "客户语音";
+  if (type === "llm_reply") return "AI 回复";
+  if (type === "tts_start") return "开始播放";
+  if (type === "tts_interrupted") return "播放打断";
+  if (type === "tts_done") return "播放完成";
+  if (type === "barge_in") return "客户插话";
+  if (type === "call_disconnected") return "电话结束";
+  return type;
+}
+
 function formatDuration(seconds: number) {
   const minute = Math.floor(seconds / 60)
     .toString()
@@ -1280,6 +1301,7 @@ function App() {
   const [telephonyHealth, setTelephonyHealth] = useState<TelephonyHealth>(fallbackTelephonyHealth);
   const [telephonyPreflight, setTelephonyPreflight] = useState<TelephonyPreflight>(fallbackTelephonyPreflight);
   const [realtimePipeline, setRealtimePipeline] = useState<RealtimePipeline>(fallbackRealtimePipeline);
+  const [realtimeLiveEvents, setRealtimeLiveEvents] = useState<RealtimeLiveEvents>(fallbackRealtimeLiveEvents);
   const [realtimeSession, setRealtimeSession] = useState<RealtimeSession | null>(null);
   const [callRecords, setCallRecords] = useState<CallRecord[]>(fallbackRecords);
   const [liveCalls, setLiveCalls] = useState<CallRecord[]>(fallbackRecords);
@@ -1393,6 +1415,7 @@ function App() {
   const [realtimeLastReply, setRealtimeLastReply] = useState("");
   const [isStartingRealtimeSession, setIsStartingRealtimeSession] = useState(false);
   const [isSendingRealtimeUtterance, setIsSendingRealtimeUtterance] = useState(false);
+  const [isRefreshingRealtimeEvents, setIsRefreshingRealtimeEvents] = useState(false);
   const [dmForm, setDmForm] = useState({
     name: "美团高意向商家首轮私信",
     platform: "美团",
@@ -1740,6 +1763,19 @@ function App() {
   }, [isDesktopClient]);
 
   useEffect(() => {
+    if (activeModule !== "outbound" || activeOutboundTab !== "实时监听") return;
+    void refreshRealtimeLiveEvents();
+  }, [activeModule, activeOutboundTab]);
+
+  useEffect(() => {
+    if (activeModule !== "outbound" || activeOutboundTab !== "实时监听" || !isTestingTelephony) return;
+    const timer = window.setInterval(() => {
+      void refreshRealtimeLiveEvents(false);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeModule, activeOutboundTab, isTestingTelephony]);
+
+  useEffect(() => {
     if (activeModule !== "dm" || activeDmTab !== "评论截流") return;
     if (!activeCommentCaptureAccount || activeLoginAccount?.id === activeCommentCaptureAccount.id) return;
     if (activeLoginAccount && isCommentCapturePlatform(activeLoginAccount.platform)) return;
@@ -2072,6 +2108,18 @@ function App() {
     }
   }
 
+  async function refreshRealtimeLiveEvents(showLoading = true) {
+    if (showLoading) setIsRefreshingRealtimeEvents(true);
+    try {
+      const events = await api.realtimeLiveEvents(80);
+      setRealtimeLiveEvents(events);
+    } catch {
+      // 真实事件日志可能尚未创建；不要覆盖线路试拨状态。
+    } finally {
+      if (showLoading) setIsRefreshingRealtimeEvents(false);
+    }
+  }
+
   async function refreshTelephonyStatus() {
     setIsCheckingTelephony(true);
     setTelephonyMessage("正在预检 UC100/Asterisk 线路...");
@@ -2095,6 +2143,7 @@ function App() {
     setIsTestingTelephony(true);
     setTelephonyTestResult(null);
     setTelephonyMessage("正在提交单号试拨请求...");
+    await refreshRealtimeLiveEvents(false);
     try {
       const result = await api.createTelephonyTestCall({
         phone: telephonyTestForm.phone.trim(),
@@ -2102,6 +2151,7 @@ function App() {
       });
       setTelephonyTestResult(result);
       setTelephonyMessage(result.message || (result.accepted ? "试拨请求已被 Asterisk 接收。" : "测试拨号失败"));
+      await refreshRealtimeLiveEvents(false);
       try {
         const preflight = await api.telephonyPreflight(telephonyTestForm.phone);
         setTelephonyHealth(preflight.health);
@@ -2113,6 +2163,7 @@ function App() {
       setTelephonyMessage(error instanceof Error ? error.message : "测试拨号失败");
     } finally {
       setIsTestingTelephony(false);
+      void refreshRealtimeLiveEvents(false);
     }
   }
 
@@ -3147,10 +3198,16 @@ function App() {
             <p>Realtime Voice</p>
             <h2>实时语音管线</h2>
           </div>
-          <button className="secondary-button" disabled={isStartingRealtimeSession} onClick={() => void startRealtimeMockSession()} type="button">
-            <Bot size={16} />
-            {isStartingRealtimeSession ? "创建中" : "模拟通话"}
-          </button>
+          <div className="button-row">
+            <button className="secondary-button" disabled={isRefreshingRealtimeEvents} onClick={() => void refreshRealtimeLiveEvents()} type="button">
+              <RefreshCw size={16} className={isRefreshingRealtimeEvents ? "spin" : ""} />
+              真实事件
+            </button>
+            <button className="secondary-button" disabled={isStartingRealtimeSession} onClick={() => void startRealtimeMockSession()} type="button">
+              <Bot size={16} />
+              {isStartingRealtimeSession ? "创建中" : "模拟通话"}
+            </button>
+          </div>
         </div>
         <div className="realtime-pipeline-summary">
           <div>
@@ -3260,6 +3317,23 @@ function App() {
             ))}
           </div>
         )}
+        <div className="realtime-event-list">
+          {realtimeLiveEvents.events.length === 0 && <div className="empty-state compact">暂无真实通话事件。</div>}
+          {realtimeLiveEvents.events.slice(-10).map((event) => (
+            <div className="timeline-item" key={event.id}>
+              <span>{event.callId ? event.callId.slice(0, 8) : "bridge"}</span>
+              <strong>
+                {realtimeLiveEventTitle(event.type)}
+                {event.strategy ? ` · ${event.strategy}` : ""}
+              </strong>
+              <p>{event.reply || event.text || event.detail || event.type}</p>
+              <small>
+                {event.at ? new Date(event.at).toLocaleString("zh-CN", { hour12: false }) : "无时间"}
+                {event.latencyMs ? ` · ${event.latencyMs} ms` : ""}
+              </small>
+            </div>
+          ))}
+        </div>
       </article>
     );
   }

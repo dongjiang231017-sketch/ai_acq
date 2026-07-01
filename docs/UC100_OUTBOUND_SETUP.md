@@ -89,8 +89,17 @@ ASTERISK_AUDIO_SOCKET_PORT=9019
 REALTIME_ASR_MODEL=paraformer-realtime-v2
 REALTIME_TTS_VOICE_ID=
 REALTIME_TTS_VOICE_NAME=
-REALTIME_CALL_OPENING_TEXT=您好，我是本地生活获客助手，想跟您确认一下现在方便了解视频号团购获客吗？
+REALTIME_CALL_OPENING_TEXT=您好，我是本地生活助手，请问现在方便沟通吗？
 REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
+REALTIME_REPLY_MAX_CHARS=72
+
+# DeepSeek 实时电话短回复。不要提交真实 API Key。
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_CHAT_MODEL=deepseek-v4-flash
+DEEPSEEK_TIMEOUT_SECONDS=5
+DEEPSEEK_MAX_TOKENS=80
+DEEPSEEK_STREAM_FIRST_SENTENCE=true
 ```
 
 不要提交 `.env`，不要把 AMI 密码写进 Git。
@@ -171,6 +180,12 @@ curl http://localhost:8000/api/outbound/telephony/health
 curl http://localhost:8000/api/outbound/realtime/pipeline
 ```
 
+读取真实 AudioSocket 通话事件：
+
+```bash
+curl "http://localhost:8000/api/outbound/realtime/live-events?limit=80"
+```
+
 创建模拟实时通话：
 
 ```bash
@@ -209,7 +224,7 @@ curl -X POST http://localhost:8000/api/outbound/realtime/sessions/会话ID/inter
 curl -X POST http://localhost:8000/api/outbound/realtime/sessions/会话ID/playback-complete
 ```
 
-这组接口不会真实拨号，也不会调用真实 ASR/LLM/TTS 供应商；它用于设备对接前先把外呼会话状态、音色选择、打断处理和前端操作闭环跑顺。音色来自「声音档案」：客户可选系统音色或已授权可用的复刻音色。
+这组接口不会真实拨号；配置 `DEEPSEEK_API_KEY` 后，模拟会话和真实 AudioSocket 桥都会使用同一套 DeepSeek 短回复逻辑，失败时回退本地规则。音色来自「声音档案」：客户可选系统音色或已授权可用的复刻音色。
 
 启动真实 AudioSocket 实时桥：
 
@@ -220,7 +235,7 @@ python -m app.tools.realtime_audio_bridge --check
 python -m app.tools.realtime_audio_bridge
 ```
 
-`--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。
+`--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。前端「实时语音管线」会读取同一份事件，显示 ASR、DeepSeek 回复、TTS 播放和打断结果。
 
 单号试拨：
 

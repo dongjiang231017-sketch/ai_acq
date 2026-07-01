@@ -235,6 +235,26 @@ export type RealtimeTurn = {
   }>;
 };
 
+export type RealtimeLiveEvent = {
+  id: string;
+  at: string;
+  type: string;
+  callId?: string | null;
+  text?: string | null;
+  reply?: string | null;
+  strategy?: string | null;
+  latencyMs: number;
+  detail?: string | null;
+  raw: Record<string, unknown>;
+};
+
+export type RealtimeLiveEvents = {
+  logPath: string;
+  hasEvents: boolean;
+  latestAt?: string | null;
+  events: RealtimeLiveEvent[];
+};
+
 export type DmOverview = {
   accounts: number;
   activeAccounts: number;
@@ -888,6 +908,11 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   realtimePipeline: () => request<RealtimePipeline>("/outbound/realtime/pipeline"),
+  realtimeLiveEvents: (limit = 80, callId?: string | null) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (callId?.trim()) params.set("call_id", callId.trim());
+    return request<RealtimeLiveEvents>(`/outbound/realtime/live-events?${params.toString()}`);
+  },
   createRealtimeSession: (payload: { merchantName: string; phone?: string | null; voice: RealtimeVoiceSelection }) =>
     request<RealtimeSession>("/outbound/realtime/sessions", {
       method: "POST",

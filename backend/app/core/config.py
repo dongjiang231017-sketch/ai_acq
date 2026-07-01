@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     dashscope_voice_language_hints: str = "zh"
     dashscope_preview_text: str = "您好，我是本地生活服务顾问，想和您确认一下是否方便了解视频号团购获客。"
     dashscope_system_tts_preview_text: str = "您好，我是本地生活服务顾问，想和您确认一下是否方便了解视频号团购获客。"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_chat_model: str = "deepseek-v4-flash"
+    deepseek_timeout_seconds: float = 5.0
+    deepseek_max_tokens: int = 80
+    deepseek_stream_first_sentence: bool = True
     telephony_gateway_mode: str = "simulator"
     asterisk_host: str = "127.0.0.1"
     asterisk_ami_port: int = 5038
@@ -59,8 +65,9 @@ class Settings(BaseSettings):
     realtime_asr_model: str = "paraformer-realtime-v2"
     realtime_tts_voice_id: str = ""
     realtime_tts_voice_name: str = ""
-    realtime_call_opening_text: str = "您好，我是本地生活获客助手，想跟您确认一下现在方便了解视频号团购获客吗？"
+    realtime_call_opening_text: str = "您好，我是本地生活助手，请问现在方便沟通吗？"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
+    realtime_reply_max_chars: int = 72
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"

@@ -1,9 +1,14 @@
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 import socket
+from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
 
 
 class RealtimeSessionNotFound(RuntimeError):
@@ -120,6 +125,7 @@ _SESSIONS: dict[str, RealtimeSession] = {}
 def build_realtime_pipeline() -> dict[str, object]:
     audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
+    llm_ready = deepseek_configured()
     steps = [
         _pipeline_step(
             "media_bridge",
@@ -135,8 +141,19 @@ def build_realtime_pipeline() -> dict[str, object]:
             ),
         ),
         _pipeline_step("asr", "流式 ASR", "pass", settings.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
-        _pipeline_step("router", "快速意图路由", "pass", "local intent rules", 50, "价格、拒绝、稍后联系、加微信、身份确认等高频意图先走规则。"),
-        _pipeline_step("llm", "LLM 生成", "pass", "DeepSeek-V4-Flash adapter", 320, "当前使用短句模拟回复；真实接入时只给复杂问题调用 LLM。"),
+        _pipeline_step("router", "快速意图路由", "pass", "local intent rules", 40, "价格、拒绝、稍后联系、加微信、身份确认等高频意图先走规则。"),
+        _pipeline_step(
+            "llm",
+            "LLM 生成",
+            "pass" if llm_ready else "warn",
+            settings.deepseek_chat_model if llm_ready else "local rules fallback",
+            450 if llm_ready else 0,
+            (
+                "DeepSeek 以非思考模式生成电话短句，失败时自动回退本地规则。"
+                if llm_ready
+                else "未配置 DeepSeek 运行时密钥；真实电话会先使用本地规则兜底。"
+            ),
+        ),
         _pipeline_step("tts", "流式 TTS", "pass", settings.dashscope_tts_model, 430, "优先使用声音档案可用复刻 voice_id 输出 8k PCM；客户可在声音档案选择音色。"),
         _pipeline_step("barge_in", "打断处理", "pass", "VAD + playback queue cancel", 80, "AI 说话时收到客户插话会停止当前 TTS 并重新进入 listening。"),
     ]
@@ -204,8 +221,17 @@ def handle_customer_utterance(session_id: str, text: str, barge_in: bool = True)
     session.current_node = node
     session.add_event("intent", "router", "matched", intent, f"路由到话术节点：{node}。", latency_ms=50)
 
-    reply = _build_reply(clean_text, intent, session.merchant_name)
-    session.add_event("llm_reply", "assistant", "ready", reply, "规则优先，复杂问题由 DeepSeek-V4-Flash adapter 生成短句。", latency_ms=320)
+    fallback_reply = _build_reply(clean_text, intent, session.merchant_name)
+    reply_result = generate_realtime_reply(clean_text, intent, session.merchant_name, fallback_reply)
+    reply = reply_result.reply
+    session.add_event(
+        "llm_reply",
+        "assistant",
+        "ready",
+        reply,
+        _llm_event_detail(reply_result.strategy, reply_result.error),
+        latency_ms=reply_result.latency_ms,
+    )
 
     chunks = _build_tts_chunks(reply, session.voice.provider)
     tts_event = session.add_event(
@@ -241,6 +267,38 @@ def complete_realtime_playback(session_id: str) -> dict[str, object]:
         session.current_tts_event_id = None
         session.add_event("playback_done", "media", "done", "AI 播放完成。", "播放队列已清空，继续监听客户。")
     return session.as_dict()
+
+
+def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> dict[str, object]:
+    max_limit = max(1, min(limit, 300))
+    path = Path(settings.realtime_call_event_log_path).expanduser()
+    events: list[dict[str, object]] = []
+    if not path.exists():
+        return {
+            "logPath": str(path),
+            "hasEvents": False,
+            "latestAt": None,
+            "events": [],
+        }
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        lines = handle.readlines()[-max(max_limit * 4, 200) :]
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if call_id and str(payload.get("callId") or "") != call_id:
+            continue
+        event = _normalize_live_event(payload)
+        if event:
+            events.append(event)
+    events = events[-max_limit:]
+    return {
+        "logPath": str(path),
+        "hasEvents": bool(events),
+        "latestAt": events[-1]["at"] if events else None,
+        "events": events,
+    }
 
 
 def _require_session(session_id: str) -> RealtimeSession:
@@ -321,6 +379,35 @@ def _interrupt_session(session: RealtimeSession, detail: str) -> bool:
     session.current_tts_event_id = None
     session.add_event("tts_interrupted", "system", "stopped", "已停止 AI 播放。", detail, latency_ms=80)
     return True
+
+
+def _llm_event_detail(strategy: str, error: str | None) -> str:
+    if strategy.startswith("deepseek"):
+        return "DeepSeek 已生成电话短句。"
+    if error:
+        return f"DeepSeek 未接管，本地规则兜底：{error}"
+    return "本地规则生成电话短句。"
+
+
+def _normalize_live_event(payload: dict[str, Any]) -> dict[str, object] | None:
+    event_type = str(payload.get("type") or "")
+    if not event_type:
+        return None
+    at = str(payload.get("at") or "")
+    call_id = str(payload.get("callId") or "") or None
+    digest_source = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return {
+        "id": hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:16],
+        "at": at,
+        "type": event_type,
+        "callId": call_id,
+        "text": _optional_text(payload.get("text")),
+        "reply": _optional_text(payload.get("reply")),
+        "strategy": _optional_text(payload.get("strategy")),
+        "latencyMs": int(payload.get("latencyMs") or payload.get("synthMs") or 0),
+        "detail": _optional_text(payload.get("detail") or payload.get("error")),
+        "raw": payload,
+    }
 
 
 def _is_tcp_open(host: str, port: int) -> bool:

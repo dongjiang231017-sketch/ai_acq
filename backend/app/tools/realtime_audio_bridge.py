@@ -9,6 +9,7 @@ import socket
 import struct
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.growth import VoiceCloneRecord
+from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
 
 
@@ -97,7 +99,8 @@ class CallRecognitionCallback(RecognitionCallback):
             )
             self.last_text = text
         if is_final and text:
-            self.call.customer_texts.put(text)
+            generation = self.call.cancel_pending_speech("客户说话完成，取消旧 TTS 队列。", source="asr_final")
+            self.call.customer_texts.put((generation, text))
 
     def on_error(self, message: object) -> None:
         self.call.logger.emit("asr_error", callId=self.call.call_id, error=str(message))
@@ -116,11 +119,16 @@ class AudioSocketCallSession:
         self.config = config
         self.logger = logger
         self.call_id = ""
-        self.customer_texts: queue.Queue[str] = queue.Queue()
+        self.customer_texts: queue.Queue[tuple[int, str]] = queue.Queue()
         self.stop_event = threading.Event()
         self.interrupt_event = threading.Event()
         self.speaking_event = threading.Event()
         self.send_lock = threading.Lock()
+        self.playback_lock = threading.Lock()
+        self.generation_lock = threading.Lock()
+        self.speech_state_lock = threading.Lock()
+        self.speech_generation = 0
+        self.speech_jobs = 0
         self._loud_frames = 0
         self._last_barge_at = 0.0
         self._recognition: Recognition | None = None
@@ -135,7 +143,7 @@ class AudioSocketCallSession:
             self.logger.emit("call_connected", callId=self.call_id, peer=f"{self.peer[0]}:{self.peer[1]}", voice=self.config.tts_voice_name)
             self._start_asr()
             self._turn_thread.start()
-            threading.Thread(target=self._speak, args=(self.config.opening_text, "opening"), daemon=True).start()
+            threading.Thread(target=self._speak, args=(self.config.opening_text, "opening", 0), daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("call_error", callId=self.call_id, error=str(exc))
@@ -157,7 +165,7 @@ class AudioSocketCallSession:
             except TimeoutError:
                 continue
             if frame_type == AUDIO_SOCKET_KIND_UUID:
-                self.call_id = payload.decode("utf-8", errors="replace")
+                self.call_id = _decode_call_id(payload)
                 self.logger.emit("call_uuid", callId=self.call_id)
                 return True
             if frame_type == AUDIO_SOCKET_KIND_HANGUP:
@@ -200,7 +208,7 @@ class AudioSocketCallSession:
                 self.logger.emit("hangup_frame", callId=self.call_id)
                 break
             if frame_type == AUDIO_SOCKET_KIND_UUID:
-                self.call_id = payload.decode("utf-8", errors="replace")
+                self.call_id = _decode_call_id(payload)
                 self.logger.emit("call_uuid", callId=self.call_id)
                 continue
             if frame_type == AUDIO_SOCKET_KIND_DTMF:
@@ -222,40 +230,103 @@ class AudioSocketCallSession:
         else:
             self._loud_frames = 0
         if self._loud_frames >= self.config.barge_frames and time.monotonic() - self._last_barge_at > 0.8:
-            self._last_barge_at = time.monotonic()
-            self.interrupt_event.set()
-            self.logger.emit(
-                "barge_in",
-                callId=self.call_id,
-                rms=_pcm_rms(payload),
-                detail="客户插话，停止后续 TTS 音频帧并继续听客户说话。",
-            )
+            self.cancel_pending_speech("客户插话，停止后续 TTS 音频帧并继续听客户说话。", source="rms", rms=_pcm_rms(payload))
 
     def _turn_worker(self) -> None:
         while not self.stop_event.is_set():
             try:
-                text = self.customer_texts.get(timeout=0.2)
+                generation, text = self.customer_texts.get(timeout=0.2)
             except queue.Empty:
                 continue
+            generation, text = self._drain_latest_customer_text(generation, text)
             if not text.strip():
                 continue
             intent, node = _classify_intent(text)
-            reply = _build_reply(text, intent, "您的门店")
+            fallback_reply = _build_reply(text, intent, "您的门店")
+            reply_result = generate_realtime_reply(text, intent, "您的门店", fallback_reply)
+            reply = reply_result.reply
             self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
-            self.logger.emit("llm_reply", callId=self.call_id, reply=reply, strategy="rules_first")
-            self._speak(reply, "reply")
+            self.logger.emit(
+                "llm_reply",
+                callId=self.call_id,
+                reply=reply,
+                strategy=reply_result.strategy,
+                latencyMs=reply_result.latency_ms,
+                fallbackUsed=reply_result.fallback_used,
+                error=reply_result.error,
+            )
+            threading.Thread(target=self._speak, args=(reply, "reply", generation), daemon=True).start()
 
-    def _speak(self, text: str, reason: str) -> None:
+    def _drain_latest_customer_text(self, generation: int, text: str) -> tuple[int, str]:
+        latest_generation = generation
+        latest_text = text
+        while True:
+            try:
+                latest_generation, latest_text = self.customer_texts.get_nowait()
+            except queue.Empty:
+                return latest_generation, latest_text
+
+    def cancel_pending_speech(self, detail: str, source: str, rms: int | None = None) -> int:
+        now = time.monotonic()
+        with self.generation_lock:
+            self.speech_generation += 1
+            generation = self.speech_generation
+        self.interrupt_event.set()
+        if now - self._last_barge_at > 0.8:
+            self._last_barge_at = now
+            fields: dict[str, Any] = {
+                "callId": self.call_id,
+                "detail": detail,
+                "source": source,
+                "generation": generation,
+            }
+            if rms is not None:
+                fields["rms"] = rms
+            self.logger.emit("barge_in", **fields)
+        return generation
+
+    def _speak(self, text: str, reason: str, generation: int) -> None:
         if self.stop_event.is_set():
             return
-        self.interrupt_event.clear()
+        self._mark_speech_job_started()
+        with self.generation_lock:
+            if self.speech_generation == generation:
+                self.interrupt_event.clear()
+        if self._speech_is_obsolete(generation):
+            self.logger.emit(
+                "tts_interrupted",
+                callId=self.call_id,
+                reason=reason,
+                phase="queued",
+                sentBytes=0,
+                totalBytes=0,
+                generation=generation,
+            )
+            self._mark_speech_job_finished()
+            return
         start = time.perf_counter()
+        audio = b""
+        playback_started = False
         try:
             audio = synthesize_tts_pcm(text, self.config)
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("tts_error", callId=self.call_id, text=text, error=str(exc))
+            self._mark_speech_job_finished()
             return
         synth_ms = int((time.perf_counter() - start) * 1000)
+        if self._speech_is_obsolete(generation):
+            self.logger.emit(
+                "tts_interrupted",
+                callId=self.call_id,
+                reason=reason,
+                phase="synthesis",
+                sentBytes=0,
+                totalBytes=len(audio),
+                synthMs=synth_ms,
+                generation=generation,
+            )
+            self._mark_speech_job_finished()
+            return
         self.logger.emit(
             "tts_start",
             callId=self.call_id,
@@ -264,27 +335,35 @@ class AudioSocketCallSession:
             bytes=len(audio),
             synthMs=synth_ms,
             voice=self.config.tts_voice_name,
+            generation=generation,
         )
-        self.speaking_event.set()
         sent = 0
         try:
-            for offset in range(0, len(audio), PCM_FRAME_BYTES):
-                if self.stop_event.is_set() or self.interrupt_event.is_set():
-                    break
-                chunk = audio[offset : offset + PCM_FRAME_BYTES]
-                self._send_frame(AUDIO_SOCKET_KIND_AUDIO, chunk)
-                sent += len(chunk)
-                time.sleep(PCM_FRAME_SECONDS)
+            with self.playback_lock:
+                if self._speech_is_obsolete(generation):
+                    return
+                playback_started = True
+                for offset in range(0, len(audio), PCM_FRAME_BYTES):
+                    if self.stop_event.is_set() or self._speech_is_obsolete(generation):
+                        break
+                    chunk = audio[offset : offset + PCM_FRAME_BYTES]
+                    self._send_frame(AUDIO_SOCKET_KIND_AUDIO, chunk)
+                    sent += len(chunk)
+                    time.sleep(PCM_FRAME_SECONDS)
         finally:
-            interrupted = self.interrupt_event.is_set()
-            self.speaking_event.clear()
-            self.interrupt_event.clear()
+            interrupted = self._speech_is_obsolete(generation)
+            self._mark_speech_job_finished()
+            with self.generation_lock:
+                if self.speech_generation == generation:
+                    self.interrupt_event.clear()
             self.logger.emit(
                 "tts_interrupted" if interrupted else "tts_done",
                 callId=self.call_id,
                 reason=reason,
+                phase="playback" if playback_started else "queued",
                 sentBytes=sent,
                 totalBytes=len(audio),
+                generation=generation,
             )
 
     def _read_frame(self) -> tuple[int, bytes]:
@@ -299,6 +378,21 @@ class AudioSocketCallSession:
         packet = struct.pack("!BH", frame_type, len(payload)) + payload
         with self.send_lock:
             self.conn.sendall(packet)
+
+    def _speech_is_obsolete(self, generation: int) -> bool:
+        with self.generation_lock:
+            return self.stop_event.is_set() or self.interrupt_event.is_set() or self.speech_generation != generation
+
+    def _mark_speech_job_started(self) -> None:
+        with self.speech_state_lock:
+            self.speech_jobs += 1
+            self.speaking_event.set()
+
+    def _mark_speech_job_finished(self) -> None:
+        with self.speech_state_lock:
+            self.speech_jobs = max(0, self.speech_jobs - 1)
+            if self.speech_jobs == 0:
+                self.speaking_event.clear()
 
 
 def synthesize_tts_pcm(text: str, config: BridgeConfig) -> bytes:
@@ -406,6 +500,12 @@ def _read_exact(conn: socket.socket, size: int) -> bytes:
             raise AudioSocketProtocolError("AudioSocket connection closed.")
         chunks.extend(chunk)
     return bytes(chunks)
+
+
+def _decode_call_id(payload: bytes) -> str:
+    if len(payload) == 16:
+        return str(uuid.UUID(bytes=payload))
+    return payload.decode("utf-8", errors="replace")
 
 
 def _pcm_rms(payload: bytes) -> int:

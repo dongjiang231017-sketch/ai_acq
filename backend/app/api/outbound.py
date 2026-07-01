@@ -15,6 +15,7 @@ from app.schemas.task import (
     OutboundOverview,
     OutboundTaskCreate,
     RecallRuleRead,
+    RealtimeLiveEventsRead,
     RealtimePipelineRead,
     RealtimeSessionCreate,
     RealtimeSessionRead,
@@ -44,6 +45,7 @@ from app.services.realtime_outbound import (
     get_realtime_session,
     handle_customer_utterance,
     interrupt_realtime_session,
+    read_realtime_live_events,
 )
 from app.services.telephony_preflight import build_telephony_preflight
 
@@ -125,12 +127,20 @@ def telephony_preflight(phone: str | None = None) -> dict[str, object]:
 
 @router.post("/telephony/test-call", response_model=TelephonyTestCallRead)
 def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, object]:
+    started_at = datetime.utcnow()
     try:
         result = originate_test_call(payload.phone, caller_id=payload.caller_id)
     except AsteriskAmiValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    media_loop_confirmed = result.media_loop_confirmed or _realtime_media_confirmed_since(started_at)
+    acceptance_ready = result.acceptance_ready or (result.cellular_confirmed and media_loop_confirmed)
+    acceptance_note = result.acceptance_note
+    verification_stage = result.verification_stage
+    if result.cellular_confirmed and media_loop_confirmed:
+        verification_stage = "realtime_media_confirmed"
+        acceptance_note = "Asterisk 收到接通事件，AudioSocket 已出现实时 ASR/LLM/TTS 媒体事件；实时通话验收通过。"
     return {
         "accepted": result.accepted,
         "actionId": result.action_id,
@@ -138,17 +148,38 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "gatewayStatus": result.status,
         "message": result.message,
         "rawPayload": result.raw_payload,
-        "verificationStage": result.verification_stage,
+        "verificationStage": verification_stage,
         "cellularConfirmed": result.cellular_confirmed,
-        "mediaLoopConfirmed": result.media_loop_confirmed,
-        "acceptanceReady": result.acceptance_ready,
-        "acceptanceNote": result.acceptance_note,
+        "mediaLoopConfirmed": media_loop_confirmed,
+        "acceptanceReady": acceptance_ready,
+        "acceptanceNote": acceptance_note,
     }
+
+
+def _realtime_media_confirmed_since(started_at: datetime) -> bool:
+    media_event_types = {"call_connected", "asr_final", "llm_reply", "tts_start", "tts_done", "tts_interrupted"}
+    events_payload = read_realtime_live_events(limit=120)
+    for event in events_payload.get("events", []):
+        if str(event.get("type") or "") not in media_event_types:
+            continue
+        at_text = str(event.get("at") or "")
+        try:
+            event_at = datetime.fromisoformat(at_text.replace("Z", ""))
+        except ValueError:
+            continue
+        if event_at >= started_at:
+            return True
+    return False
 
 
 @router.get("/realtime/pipeline", response_model=RealtimePipelineRead)
 def realtime_pipeline() -> dict[str, object]:
     return build_realtime_pipeline()
+
+
+@router.get("/realtime/live-events", response_model=RealtimeLiveEventsRead)
+def realtime_live_events(limit: int = 80, call_id: str | None = None) -> dict[str, object]:
+    return read_realtime_live_events(limit=limit, call_id=call_id)
 
 
 @router.post("/realtime/sessions", response_model=RealtimeSessionRead)

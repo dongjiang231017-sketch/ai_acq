@@ -263,3 +263,23 @@ class RealtimeTurnRead(BaseModel):
     reply: str
     interrupted: bool
     tts_chunks: Annotated[list[RealtimeTtsChunkRead], Field(alias="ttsChunks")]
+
+
+class RealtimeLiveEventRead(BaseModel):
+    id: str
+    at: str
+    type: str
+    call_id: Annotated[str | None, Field(alias="callId")] = None
+    text: str | None = None
+    reply: str | None = None
+    strategy: str | None = None
+    latency_ms: Annotated[int, Field(alias="latencyMs")] = 0
+    detail: str | None = None
+    raw: dict[str, object]
+
+
+class RealtimeLiveEventsRead(BaseModel):
+    log_path: Annotated[str, Field(alias="logPath")]
+    has_events: Annotated[bool, Field(alias="hasEvents")]
+    latest_at: Annotated[str | None, Field(alias="latestAt")]
+    events: list[RealtimeLiveEventRead]

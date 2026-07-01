@@ -107,6 +107,7 @@ python -m app.tools.realtime_audio_bridge
 实时桥启动需要：
 
 - `DASHSCOPE_API_KEY` 已配置。
+- `DEEPSEEK_API_KEY` 已配置时，实时桥会使用 DeepSeek 生成电话短句；未配置时走本地规则兜底。
 - 至少一个可用的实时 TTS voice：优先 `REALTIME_TTS_VOICE_ID`，否则使用声音档案中最新的可用复刻 `external_voice_id`。
 - `ASTERISK_AUDIO_SOCKET_HOST` 和 `ASTERISK_AUDIO_SOCKET_PORT` 与 sidecar 生成的 `backend-asterisk.env` 一致。
 
