@@ -29,7 +29,7 @@ ASTERISK_AMI_PASSWORD=AMI_PASSWORD
 ASTERISK_AMI_PORT=5038
 ```
 
-## 2. pjsip.conf：Asterisk 主动呼叫 UC100 IP
+## 2. pjsip.conf：Asterisk 主动呼叫 UC100 IP 并注册到 UC100 分机
 
 如果 UC100 在局域网有固定 IP，且客户端内置 Asterisk 直接把呼叫送到 UC100：
 
@@ -38,22 +38,11 @@ ASTERISK_AMI_PORT=5038
 type = transport
 protocol = udp
 bind = 0.0.0.0:5060
-
-[uc100]
-type = endpoint
-transport = transport-udp
-context = from-uc100
-disallow = all
-allow = alaw,ulaw
-aors = uc100
-outbound_auth = uc100-auth
-from_user = UC100_SIP_USER
-
-[uc100]
-type = aor
-; 当前 UC100 实机 WAN SIP 常见监听是 5080；如果接 UC100 LAN 侧再改为 5060。
-contact = sip:UC100_IP:5080
-qualify_frequency = 30
+; Asterisk 运行在 Docker/虚拟网卡时必须宣告客户电脑局域网 IP。
+; 原生本机 Asterisk 可省略 external_* 和 local_net。
+external_signaling_address = CLIENT_LAN_IP
+external_media_address = CLIENT_LAN_IP
+local_net = 172.16.0.0/12
 
 [uc100-auth]
 type = auth
@@ -62,10 +51,47 @@ username = UC100_SIP_USER
 password = UC100_SIP_PASSWORD
 
 [uc100]
+type = endpoint
+transport = transport-udp
+context = from-uc100
+disallow = all
+allow = alaw,ulaw
+aors = uc100-aor
+outbound_auth = uc100-auth
+from_user = UC100_SIP_USER
+from_domain = UC100_IP
+callerid = UC100_SIP_USER
+contact_user = UC100_SIP_USER
+direct_media = no
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+timers = no
+
+[uc100-aor]
+type = aor
+; 当前 UC100 实机 WAN SIP 常见监听是 5080；如果接 UC100 LAN 侧再改为 5060。
+contact = sip:UC100_IP:5080
+qualify_frequency = 30
+
+[uc100-registration]
+type = registration
+transport = transport-udp
+outbound_auth = uc100-auth
+server_uri = sip:UC100_IP:5080
+client_uri = sip:UC100_SIP_USER@UC100_IP:5080
+contact_user = UC100_SIP_USER
+retry_interval = 30
+forbidden_retry_interval = 30
+expiration = 300
+
+[uc100-identify]
 type = identify
 endpoint = uc100
 match = UC100_IP
 ```
+
+如果客户电脑接的是 UC100 `WAN` 地址 `UC100_IP:5080`，UC100 后台 `分机 / SIP` 里的 AI 分机必须选择 `2-< wan_default >`；如果接 `LAN` 地址 `192.168.11.1:5060`，才选择 `1-< lan_default >`。profile 选错时会表现为 REGISTER 先收到 `401 Unauthorized`，带认证后继续被 `403 Forbidden`。
 
 对应系统默认拨号通道：
 

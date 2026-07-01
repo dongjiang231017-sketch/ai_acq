@@ -63,6 +63,19 @@ AI_ACQ_UC100_HOST=客户现场UC100地址
 AI_ACQ_UC100_SIP_PORT=5080
 ```
 
+如果客户电脑接的是 UC100 `WAN` 地址 `192.168.10.100:5080`，UC100 后台的 `分机 / SIP` 必须把 AI 分机的 `SIP配置` 选成 `2-< wan_default >`。如果接 UC100 `LAN` 地址 `192.168.11.1:5060`，才选 `1-< lan_default >`。选错会出现 Asterisk 能收到 401 challenge、但认证后被 UC100 返回 `403 Forbidden`。
+
+需要 Asterisk 主动注册到 UC100 分机时，在启动桌面客户端前提供：
+
+```bash
+AI_ACQ_UC100_SIP_USERNAME=UC100分机号
+AI_ACQ_UC100_SIP_PASSWORD=UC100分机密码
+AI_ACQ_ASTERISK_ADVERTISED_HOST=客户电脑局域网IP
+AI_ACQ_ASTERISK_LOCAL_NET=172.16.0.0/12
+```
+
+`AI_ACQ_ASTERISK_ADVERTISED_HOST` 只在 Asterisk 运行在容器或网关看不到真实回连地址时需要；原生本机 Asterisk 通常可以留空。
+
 ## 安全开关
 
 内置 Asterisk 启动不等于允许真实外呼。真实拨号仍受后端开关保护：

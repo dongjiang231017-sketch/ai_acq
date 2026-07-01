@@ -52,6 +52,20 @@ OUTBOUND_QUEUE_ENABLED=true
 
 Asterisk/UC100 模式预留配置。客户交付版优先由桌面客户端生成 `backend-asterisk.env`，开发调试才手工写入：
 
+桌面客户端 sidecar 生成 Asterisk 配置前，可用这些变量覆盖 UC100 现场参数：
+
+```env
+AI_ACQ_UC100_HOST=192.168.10.100
+AI_ACQ_UC100_SIP_PORT=5080
+AI_ACQ_UC100_SIP_USERNAME=1000
+AI_ACQ_UC100_SIP_PASSWORD=现场分机密码
+# Asterisk 运行在 Docker/虚拟网卡时填写客户电脑局域网 IP；原生本机 Asterisk 可留空。
+AI_ACQ_ASTERISK_ADVERTISED_HOST=192.168.10.50
+AI_ACQ_ASTERISK_LOCAL_NET=172.16.0.0/12
+```
+
+UC100 后台也要匹配接入方向：客户电脑接 UC100 `WAN` 地址 `192.168.10.100:5080` 时，`分机 / SIP` 的 AI 分机选择 `2-< wan_default >`；接 UC100 `LAN` 地址 `192.168.11.1:5060` 时才选择 `1-< lan_default >`。
+
 ```env
 TELEPHONY_GATEWAY_MODE=asterisk
 ASTERISK_HOST=127.0.0.1

@@ -14,6 +14,8 @@ const DEFAULTS = {
   trunkName: "uc100",
   uc100Host: "192.168.10.100",
   uc100SipPort: 5080,
+  asteriskAdvertisedHost: "",
+  asteriskLocalNet: "172.16.0.0/12",
   maxChannels: 1,
   audioSocketHost: "127.0.0.1",
   audioSocketPort: 9019,
@@ -51,6 +53,9 @@ class AsteriskSidecar {
       trunkName: layout.state.trunkName,
       uc100Host: layout.state.uc100Host,
       uc100SipPort: layout.state.uc100SipPort,
+      uc100RegisterEnabled: Boolean(layout.state.uc100SipUsername && layout.state.uc100SipPassword),
+      asteriskAdvertisedHost: layout.state.asteriskAdvertisedHost,
+      asteriskLocalNet: layout.state.asteriskLocalNet,
       maxChannels: layout.state.maxChannels,
       audioSocketHost: layout.state.audioSocketHost,
       audioSocketPort: layout.state.audioSocketPort,
@@ -158,6 +163,10 @@ class AsteriskSidecar {
       trunkName: DEFAULTS.trunkName,
       uc100Host: process.env.AI_ACQ_UC100_HOST || DEFAULTS.uc100Host,
       uc100SipPort: Number(process.env.AI_ACQ_UC100_SIP_PORT || DEFAULTS.uc100SipPort),
+      uc100SipUsername: process.env.AI_ACQ_UC100_SIP_USERNAME || "",
+      uc100SipPassword: process.env.AI_ACQ_UC100_SIP_PASSWORD || "",
+      asteriskAdvertisedHost: process.env.AI_ACQ_ASTERISK_ADVERTISED_HOST || DEFAULTS.asteriskAdvertisedHost,
+      asteriskLocalNet: process.env.AI_ACQ_ASTERISK_LOCAL_NET || DEFAULTS.asteriskLocalNet,
       maxChannels: Number(process.env.AI_ACQ_ASTERISK_MAX_CHANNELS || DEFAULTS.maxChannels),
       audioSocketHost: process.env.AI_ACQ_AUDIOSOCKET_HOST || DEFAULTS.audioSocketHost,
       audioSocketPort: Number(process.env.AI_ACQ_AUDIOSOCKET_PORT || DEFAULTS.audioSocketPort),
@@ -165,12 +174,67 @@ class AsteriskSidecar {
       createdAt: new Date().toISOString(),
       ...(existing || {}),
     };
+    if (process.env.AI_ACQ_UC100_HOST) state.uc100Host = process.env.AI_ACQ_UC100_HOST;
+    if (process.env.AI_ACQ_UC100_SIP_PORT) state.uc100SipPort = Number(process.env.AI_ACQ_UC100_SIP_PORT);
+    if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_UC100_SIP_USERNAME")) {
+      state.uc100SipUsername = process.env.AI_ACQ_UC100_SIP_USERNAME || "";
+    }
+    if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_UC100_SIP_PASSWORD")) {
+      state.uc100SipPassword = process.env.AI_ACQ_UC100_SIP_PASSWORD || "";
+    }
+    if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_ASTERISK_ADVERTISED_HOST")) {
+      state.asteriskAdvertisedHost = process.env.AI_ACQ_ASTERISK_ADVERTISED_HOST || "";
+    }
+    if (process.env.AI_ACQ_ASTERISK_LOCAL_NET) state.asteriskLocalNet = process.env.AI_ACQ_ASTERISK_LOCAL_NET;
+    if (process.env.AI_ACQ_ASTERISK_MAX_CHANNELS) {
+      state.maxChannels = Number(process.env.AI_ACQ_ASTERISK_MAX_CHANNELS);
+    }
+    if (process.env.AI_ACQ_AUDIOSOCKET_HOST) state.audioSocketHost = process.env.AI_ACQ_AUDIOSOCKET_HOST;
+    if (process.env.AI_ACQ_AUDIOSOCKET_PORT) state.audioSocketPort = Number(process.env.AI_ACQ_AUDIOSOCKET_PORT);
     fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
     return state;
   }
 
   writeConfigs(paths) {
     const { state } = paths;
+    const uc100RegisterEnabled = Boolean(state.uc100SipUsername && state.uc100SipPassword);
+    const advertisedTransport = state.asteriskAdvertisedHost
+      ? `external_signaling_address = ${state.asteriskAdvertisedHost}
+external_media_address = ${state.asteriskAdvertisedHost}
+local_net = ${state.asteriskLocalNet}
+`
+      : "";
+    const uc100Auth = uc100RegisterEnabled
+      ? `
+[${state.trunkName}-auth]
+type = auth
+auth_type = userpass
+username = ${state.uc100SipUsername}
+password = ${state.uc100SipPassword}
+`
+      : "";
+    const uc100EndpointAuth = uc100RegisterEnabled
+      ? `outbound_auth = ${state.trunkName}-auth
+from_user = ${state.uc100SipUsername}
+from_domain = ${state.uc100Host}
+callerid = ${state.uc100SipUsername}
+contact_user = ${state.uc100SipUsername}
+`
+      : "";
+    const uc100Registration = uc100RegisterEnabled
+      ? `
+[${state.trunkName}-registration]
+type = registration
+transport = transport-udp
+outbound_auth = ${state.trunkName}-auth
+server_uri = sip:${state.uc100Host}:${state.uc100SipPort}
+client_uri = sip:${state.uc100SipUsername}@${state.uc100Host}:${state.uc100SipPort}
+contact_user = ${state.uc100SipUsername}
+retry_interval = 30
+forbidden_retry_interval = 30
+expiration = 300
+`
+      : "";
     writeFileIfChanged(
       paths.asteriskConfPath,
       `[directories]
@@ -227,6 +291,7 @@ user_agent = AI_ACQ_Client_Asterisk
 type = transport
 protocol = udp
 bind = 0.0.0.0:${state.sipPort}
+${advertisedTransport}${uc100Auth}
 
 [${state.trunkName}]
 type = endpoint
@@ -235,15 +300,17 @@ context = from-uc100
 disallow = all
 allow = alaw,ulaw
 aors = ${state.trunkName}-aor
-direct_media = no
+${uc100EndpointAuth}direct_media = no
 rtp_symmetric = yes
 force_rport = yes
 rewrite_contact = yes
+timers = no
 
 [${state.trunkName}-aor]
 type = aor
 contact = sip:${state.uc100Host}:${state.uc100SipPort}
 qualify_frequency = 30
+${uc100Registration}
 
 [${state.trunkName}-identify]
 type = identify
