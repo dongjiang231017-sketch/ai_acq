@@ -5,6 +5,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,9 @@ class RealtimeReplyResult:
     latency_ms: int
     fallback_used: bool = False
     error: str | None = None
+
+
+_DEEPSEEK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-acq-deepseek-realtime")
 
 
 def deepseek_configured() -> bool:
@@ -35,8 +39,17 @@ def generate_realtime_reply(text: str, intent: str, merchant_name: str, fallback
         )
 
     started = time.perf_counter()
+    future = _DEEPSEEK_EXECUTOR.submit(_request_deepseek_reply, text, intent, merchant_name)
     try:
-        reply = _request_deepseek_reply(text, intent, merchant_name)
+        reply = future.result(timeout=max(0.5, settings.realtime_llm_timeout_seconds))
+    except TimeoutError:
+        return RealtimeReplyResult(
+            reply=fallback_reply,
+            strategy="rules_fallback_deepseek_timeout",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            fallback_used=True,
+            error=f"DeepSeek 超过 {settings.realtime_llm_timeout_seconds:.1f}s 电话预算",
+        )
     except Exception as exc:  # noqa: BLE001
         return RealtimeReplyResult(
             reply=fallback_reply,
@@ -70,12 +83,12 @@ def _request_deepseek_reply(text: str, intent: str, merchant_name: str) -> str:
                 "role": "system",
                 "content": (
                     "你是电话外呼AI坐席，只输出下一句要说的话。"
-                    "使用自然中文口语，短句，最多两句话，不要Markdown。"
-                    "任务是礼貌确认对方是否有本地生活/视频号团购获客需求。"
+                    "使用自然中文口语，只说一句短句，不要Markdown。"
+                    "任务是销售视频号团购到店获客服务，并礼貌确认对方是否有兴趣。"
                     "不能自称平台官方、微信官方、视频号官方或官方合作方；只能称本地生活服务顾问。"
                     "不能承诺已合作、补贴、保底效果或未授权身份。"
                     "如果对方拒绝就礼貌结束；如果对方要求身份或来电原因，先说明身份和目的；"
-                    "如果对方说忙或找别人，询问是否方便稍后联系或转给负责人。"
+                    "如果对方说忙或找别人，询问是否方便稍后联系或转给负责人。每句尽量不超过36个中文字符。"
                 ),
             },
             {
@@ -101,7 +114,8 @@ def _request_deepseek_reply(text: str, intent: str, merchant_name: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=settings.deepseek_timeout_seconds) as response:  # noqa: S310
+    timeout_seconds = max(0.5, min(settings.deepseek_timeout_seconds, settings.realtime_llm_timeout_seconds))
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
         if settings.deepseek_stream_first_sentence:
             return _read_streaming_content(response)
         data = json.loads(response.read().decode("utf-8"))

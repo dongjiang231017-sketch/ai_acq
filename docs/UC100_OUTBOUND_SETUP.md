@@ -89,9 +89,13 @@ ASTERISK_AUDIO_SOCKET_PORT=9019
 REALTIME_ASR_MODEL=paraformer-realtime-v2
 REALTIME_TTS_VOICE_ID=
 REALTIME_TTS_VOICE_NAME=
-REALTIME_CALL_OPENING_TEXT=您好，我是本地生活助手，请问现在方便沟通吗？
+REALTIME_TTS_VOICE_TYPE=system
+REALTIME_LLM_TIMEOUT_SECONDS=0.9
+REALTIME_CALL_OPENING_TEXT=您好，我是本地生活服务顾问，想跟您聊下视频号团购获客，方便吗？
 REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
-REALTIME_REPLY_MAX_CHARS=72
+REALTIME_REPLY_MAX_CHARS=48
+DASHSCOPE_REALTIME_TTS_MODEL=qwen3-tts-flash-realtime
+DASHSCOPE_REALTIME_TTS_VOICE=Ethan
 
 # DeepSeek 实时电话短回复。不要提交真实 API Key。
 DEEPSEEK_API_KEY=
@@ -185,6 +189,8 @@ curl http://localhost:8000/api/outbound/realtime/pipeline
 ```bash
 curl "http://localhost:8000/api/outbound/realtime/live-events?limit=80"
 ```
+
+低延迟外呼默认使用 Qwen-TTS 实时系统音色增量播放。只有客户在声音档案明确选择复刻音色，或现场设置 `REALTIME_TTS_VOICE_TYPE=clone` / `REALTIME_TTS_VOICE_ID=cosyvoice...` 时，才切到 CosyVoice 克隆音色。克隆音色更像本人，但首包延迟通常明显高于系统实时音色。
 
 创建模拟实时通话：
 

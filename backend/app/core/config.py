@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     dashscope_voice_clone_model: str = "cosyvoice-v2"
     dashscope_tts_model: str = "cosyvoice-v2"
     dashscope_system_tts_model: str = "qwen3-tts-flash"
+    dashscope_realtime_tts_model: str = "qwen3-tts-flash-realtime"
+    dashscope_realtime_tts_voice: str = "Ethan"
     dashscope_system_tts_language_type: str = "Chinese"
     dashscope_voice_prefix: str = "aiacq"
     dashscope_voice_language_hints: str = "zh"
@@ -65,9 +67,11 @@ class Settings(BaseSettings):
     realtime_asr_model: str = "paraformer-realtime-v2"
     realtime_tts_voice_id: str = ""
     realtime_tts_voice_name: str = ""
-    realtime_call_opening_text: str = "您好，我是本地生活助手，请问现在方便沟通吗？"
+    realtime_tts_voice_type: str = "system"
+    realtime_llm_timeout_seconds: float = 0.9
+    realtime_call_opening_text: str = "您好，我是本地生活服务顾问，想跟您聊下视频号团购获客，方便吗？"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
-    realtime_reply_max_chars: int = 72
+    realtime_reply_max_chars: int = 48
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"

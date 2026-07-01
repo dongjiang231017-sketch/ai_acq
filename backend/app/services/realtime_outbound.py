@@ -70,7 +70,7 @@ class RealtimeSession:
     current_node: str = "开场白"
     interruptions: int = 0
     cost_estimate_per_minute: float = 0.04
-    latency_estimate_ms: int = 1380
+    latency_estimate_ms: int = 980
     current_tts_event_id: str | None = None
     started_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
@@ -147,14 +147,21 @@ def build_realtime_pipeline() -> dict[str, object]:
             "LLM 生成",
             "pass" if llm_ready else "warn",
             settings.deepseek_chat_model if llm_ready else "local rules fallback",
-            450 if llm_ready else 0,
+            320 if llm_ready else 0,
             (
                 "DeepSeek 以非思考模式生成电话短句，失败时自动回退本地规则。"
                 if llm_ready
                 else "未配置 DeepSeek 运行时密钥；真实电话会先使用本地规则兜底。"
             ),
         ),
-        _pipeline_step("tts", "流式 TTS", "pass", settings.dashscope_tts_model, 430, "优先使用声音档案可用复刻 voice_id 输出 8k PCM；客户可在声音档案选择音色。"),
+        _pipeline_step(
+            "tts",
+            "流式 TTS",
+            "pass",
+            settings.dashscope_realtime_tts_model,
+            120,
+            "默认使用 Qwen-TTS 实时系统音色增量播放；客户在声音档案明确选择复刻音色时才切换到克隆音色。",
+        ),
         _pipeline_step("barge_in", "打断处理", "pass", "VAD + playback queue cancel", 80, "AI 说话时收到客户插话会停止当前 TTS 并重新进入 listening。"),
     ]
     estimated_latency = sum(int(step["latencyMs"]) for step in steps)
@@ -332,30 +339,42 @@ def _classify_intent(text: str) -> tuple[str, str]:
     lower = text.lower()
     if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "贵"]):
         return "价格异议", "价格说明"
-    if any(keyword in text for keyword in ["不需要", "不用", "没兴趣", "别打"]):
+    rejection_keywords = [
+        "不需要",
+        "不用",
+        "不要",
+        "别打",
+        "别联系",
+        "不要打",
+        "请不要",
+        "没兴趣",
+        "拉黑",
+        "取消",
+    ]
+    if any(keyword in text for keyword in rejection_keywords):
         return "明确拒绝", "礼貌结束"
     if any(keyword in text for keyword in ["忙", "晚点", "稍后", "改天"]):
         return "稍后联系", "预约复拨"
     if any(keyword in text for keyword in ["微信", "资料", "发我", "加一下"]):
         return "加微信/发资料", "留资转化"
-    if any(keyword in text for keyword in ["你是谁", "哪里", "干嘛", "什么公司"]) or "who" in lower:
+    if any(keyword in text for keyword in ["你是谁", "哪里", "干嘛", "什么公司", "什么", "你们", "来电原因"]) or "who" in lower:
         return "身份确认", "身份说明"
     return "需求探索", "资格确认"
 
 
 def _build_reply(text: str, intent: str, merchant_name: str) -> str:
     replies = {
-        "价格异议": "费用不用现在决定，我们可以先按您的品类给一版基础方案，您看适不适合再说。",
+        "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
         "明确拒绝": "好的，打扰您了。我这边给您标记不再跟进，祝您生意顺利。",
-        "稍后联系": "可以的，我不多打扰。您看今天下午还是明天上午，我再简单跟您确认一下？",
-        "加微信/发资料": "可以，我安排顾问把入驻资料和同品类案例发您，您看完觉得合适再沟通。",
-        "身份确认": "我是本地生活获客服务顾问，主要帮商家做视频号团购曝光和到店转化，今天先跟您确认是否有需求。",
+        "稍后联系": "可以，我不多打扰。今天下午还是明天上午再跟您确认方便？",
+        "加微信/发资料": "可以，我把视频号团购入驻资料和同品类案例发您，您看完再沟通。",
+        "身份确认": "我是本地生活服务顾问，主要帮商家做视频号团购曝光和到店转化。",
     }
     if intent in replies:
         return replies[intent]
     if len(text) <= 8:
-        return f"明白，{merchant_name}这边目前更关注到店客流，还是线上团购曝光呢？"
-    return "了解，我先确认一下：您现在主要是想增加到店客户，还是想先了解视频号团购怎么做？"
+        return "您好，我是本地生活服务顾问，想问下您了解视频号团购获客吗？"
+    return "了解，我先确认下：您现在有兴趣了解视频号团购到店获客吗？"
 
 
 def _build_tts_chunks(reply: str, provider: str) -> list[dict[str, object]]:
