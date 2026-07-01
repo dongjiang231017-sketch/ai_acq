@@ -167,6 +167,11 @@ class TelephonyTestCallRead(BaseModel):
     gateway_status: Annotated[str, Field(alias="gatewayStatus")]
     message: str
     raw_payload: Annotated[str, Field(alias="rawPayload")]
+    verification_stage: Annotated[str, Field(alias="verificationStage")]
+    cellular_confirmed: Annotated[bool, Field(alias="cellularConfirmed")]
+    media_loop_confirmed: Annotated[bool, Field(alias="mediaLoopConfirmed")]
+    acceptance_ready: Annotated[bool, Field(alias="acceptanceReady")]
+    acceptance_note: Annotated[str, Field(alias="acceptanceNote")]
 
 
 class RealtimePipelineStepRead(BaseModel):

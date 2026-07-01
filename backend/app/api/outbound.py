@@ -138,6 +138,11 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "gatewayStatus": result.status,
         "message": result.message,
         "rawPayload": result.raw_payload,
+        "verificationStage": result.verification_stage,
+        "cellularConfirmed": result.cellular_confirmed,
+        "mediaLoopConfirmed": result.media_loop_confirmed,
+        "acceptanceReady": result.acceptance_ready,
+        "acceptanceNote": result.acceptance_note,
     }
 
 

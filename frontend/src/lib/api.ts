@@ -156,6 +156,11 @@ export type TelephonyTestCallResult = {
   gatewayStatus: string;
   message: string;
   rawPayload: string;
+  verificationStage: string;
+  cellularConfirmed: boolean;
+  mediaLoopConfirmed: boolean;
+  acceptanceReady: boolean;
+  acceptanceNote: string;
 };
 
 export type RealtimePipelineStep = {

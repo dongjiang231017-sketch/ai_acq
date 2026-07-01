@@ -163,6 +163,16 @@ asterisk -rx "channel originate PJSIP/你的测试手机号@uc100 extension s@fr
 
 如果这条命令不能让手机响铃，先修客户端 sidecar、UC100、SIM 卡链路，不要改 AI 外呼系统。
 
+如果 SIP 日志里先出现 `SIP/2.0 180 Ringing`，紧接着出现 `SIP/2.0 404 Not Found` 和
+`Reason: Q.850;cause=3;text="NO_ROUTE_DESTINATION"`，不能把前面的 `180 Ringing` 当成手机已响铃。
+这表示 UC100 的 SIP 侧收到了呼叫，但没有找到可用的 VoLTE 外呼路由。优先检查：
+
+- UC100 后台 `呼叫控制 / 路由` 是否存在 SIP 到 VoLTE 的外呼路由。
+- 路由来源是否包含 Asterisk 注册的分机或 `SIP` 来源。
+- 目的地是否选择在线的 VoLTE/SIM 线路。
+- 号码匹配规则是否允许 `1xxxxxxxxxx` 这种手机号格式，必要时增加前缀/去前缀规则。
+- UC100 的当前呼叫或话单是否出现蜂窝外呼记录；没有记录就不算真实打到手机侧。
+
 ## 6. 系统预检
 
 ```bash

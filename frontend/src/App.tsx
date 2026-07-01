@@ -1236,6 +1236,18 @@ function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
   }
 }
 
+function telephonyVerificationStageText(result: TelephonyTestCallResult) {
+  if (result.verificationStage === "gateway_signaling_only") return "网关侧响应，未证明手机响铃";
+  if (result.verificationStage === "cellular_answered_no_media_proof") return "线路接通，待媒体链路验收";
+  if (result.verificationStage === "originate_submitted") return "已提交拨号，待线路证据";
+  return "未达到真实通话验收";
+}
+
+function telephonyVerificationSummary(result: TelephonyTestCallResult) {
+  if (result.acceptanceReady) return "已达到实时通话验收";
+  return result.acceptanceNote || "还需要 UC100 蜂窝侧、手机接听和实时媒体日志共同确认。";
+}
+
 function realtimePipelineStatusText(status: string) {
   if (status === "pass") return "PASS";
   if (status === "fail") return "FAIL";
@@ -4968,6 +4980,14 @@ function App() {
                       {telephonyTestResult.gatewayStatus} · {telephonyTestResult.actionId} · {telephonyTestResult.channel}
                     </small>
                   )}
+                  {telephonyTestResult && (
+                    <small>
+                      验收层级：{telephonyVerificationStageText(telephonyTestResult)} · 蜂窝侧
+                      {telephonyTestResult.cellularConfirmed ? "已确认" : "未确认"} · 媒体链路
+                      {telephonyTestResult.mediaLoopConfirmed ? "已确认" : "未确认"}
+                    </small>
+                  )}
+                  {telephonyTestResult && <small>{telephonyVerificationSummary(telephonyTestResult)}</small>}
                   {telephonyTestResult && telephonyTestPayloadSummary(telephonyTestResult) && (
                     <small>{telephonyTestPayloadSummary(telephonyTestResult)}</small>
                   )}

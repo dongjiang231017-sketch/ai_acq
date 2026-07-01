@@ -80,6 +80,11 @@ class AsteriskOriginateResult:
     status: str
     message: str
     raw_payload: str
+    verification_stage: str
+    cellular_confirmed: bool
+    media_loop_confirmed: bool
+    acceptance_ready: bool
+    acceptance_note: str
 
 
 def _append_field(fields: dict[str, str | list[str]], key: str, value: str) -> None:
@@ -117,6 +122,40 @@ def safe_ami_event_log(events: list[dict[str, str | list[str]]]) -> list[dict[st
     for event in events[-12:]:
         result.append({key: str(value) for key, value in event.items() if key in allowed})
     return result
+
+
+def originate_verification(status: str) -> dict[str, str | bool]:
+    if status == "ringing":
+        return {
+            "verification_stage": "gateway_signaling_only",
+            "cellular_confirmed": False,
+            "media_loop_confirmed": False,
+            "acceptance_ready": False,
+            "acceptance_note": "只确认 Asterisk/UC100 SIP 侧有响应；未确认运营商蜂窝侧真实振铃，也未进入实时媒体链路。",
+        }
+    if status == "answered":
+        return {
+            "verification_stage": "cellular_answered_no_media_proof",
+            "cellular_confirmed": True,
+            "media_loop_confirmed": False,
+            "acceptance_ready": False,
+            "acceptance_note": "Asterisk 收到接通事件；仍需 AudioSocket、ASR、TTS 和打断事件完成实时通话验收。",
+        }
+    if status == "dialing":
+        return {
+            "verification_stage": "originate_submitted",
+            "cellular_confirmed": False,
+            "media_loop_confirmed": False,
+            "acceptance_ready": False,
+            "acceptance_note": "只确认 AMI 已提交拨号请求；还没有 UC100 蜂窝侧或通话媒体证据。",
+        }
+    return {
+        "verification_stage": "not_connected",
+        "cellular_confirmed": False,
+        "media_loop_confirmed": False,
+        "acceptance_ready": False,
+        "acceptance_note": "外呼未达到真实接通验收；请根据线路状态继续排查 UC100、SIM/运营商和呼叫路由。",
+    }
 
 
 class AsteriskAmiClient:
@@ -215,6 +254,7 @@ class AsteriskAmiClient:
         response = self.send_action(payload)
         event_result = self._wait_for_originate_result(action_id, wait_for_result_seconds) if response.ok and self.events else None
         if event_result:
+            verification = originate_verification(str(event_result["status"]))
             return AsteriskOriginateResult(
                 accepted=bool(event_result["accepted"]),
                 action_id=action_id,
@@ -232,13 +272,20 @@ class AsteriskAmiClient:
                     },
                     ensure_ascii=False,
                 ),
+                verification_stage=str(verification["verification_stage"]),
+                cellular_confirmed=bool(verification["cellular_confirmed"]),
+                media_loop_confirmed=bool(verification["media_loop_confirmed"]),
+                acceptance_ready=bool(verification["acceptance_ready"]),
+                acceptance_note=str(verification["acceptance_note"]),
             )
         accepted = response.ok
+        status = "dialing" if accepted else "failed"
+        verification = originate_verification(status)
         return AsteriskOriginateResult(
             accepted=accepted,
             action_id=action_id,
             channel=channel,
-            status="dialing" if accepted else "failed",
+            status=status,
             message=response.message or ("已提交拨号请求" if accepted else "拨号请求失败"),
             raw_payload=json.dumps(
                 {
@@ -250,6 +297,11 @@ class AsteriskAmiClient:
                 },
                 ensure_ascii=False,
             ),
+            verification_stage=str(verification["verification_stage"]),
+            cellular_confirmed=bool(verification["cellular_confirmed"]),
+            media_loop_confirmed=bool(verification["media_loop_confirmed"]),
+            acceptance_ready=bool(verification["acceptance_ready"]),
+            acceptance_note=str(verification["acceptance_note"]),
         )
 
     def send_action(self, fields: dict[str, str | list[str]]) -> AmiResponse:
@@ -326,6 +378,7 @@ class AsteriskAmiClient:
         deadline = time.monotonic() + timeout_seconds
         started_at = time.monotonic()
         saw_ringing = False
+        ringing_event: dict[str, str | list[str]] | None = None
         events: list[dict[str, str | list[str]]] = []
         previous_timeout = self._socket.gettimeout()
         self._socket.settimeout(min(max(timeout_seconds, 0.5), 1.0))
@@ -349,6 +402,7 @@ class AsteriskAmiClient:
                     status = "failed"
                 if status == "ringing":
                     saw_ringing = True
+                    ringing_event = event
                 if is_immediate_originate_failure(event, status, saw_ringing, time.monotonic() - started_at):
                     status = "failed"
                 message = ami_call_status_message(event, status)
@@ -370,14 +424,16 @@ class AsteriskAmiClient:
                         "events": safe_ami_event_log(events),
                     }
                 if status == "ringing":
-                    return {
-                        "accepted": True,
-                        "status": "ringing",
-                        "message": message,
-                        "events": safe_ami_event_log(events),
-                    }
+                    continue
         finally:
             self._socket.settimeout(previous_timeout)
+        if saw_ringing:
+            return {
+                "accepted": True,
+                "status": "ringing",
+                "message": ami_call_status_message(ringing_event or {}, "ringing"),
+                "events": safe_ami_event_log(events),
+            }
         return None
 
 
@@ -515,7 +571,7 @@ def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
             "CHANUNAVAIL": "failed",
         }.get(dial_status.upper(), "ended")
     elif event_name in {"Hangup", "HangupRequest"}:
-        status = {"16": "hangup", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "hangup")
+        status = {"1": "failed", "3": "failed", "16": "hangup", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "hangup")
     elif event_name == "OriginateResponse":
         if response.lower() == "success":
             status = "dialing"
@@ -543,10 +599,12 @@ def ami_call_status_message(event: dict[str, str | list[str]], status: str) -> s
 
     if "403" in diagnostic or "forbidden" in lower_diagnostic:
         return "UC100 拒绝外呼：403 Forbidden。请在 UC100 后台配置允许 Asterisk/SIP 分机通过 VoLTE 线路外呼后重试。"
+    if "404" in diagnostic or "not found" in lower_diagnostic or "no_route_destination" in lower_diagnostic or (status == "failed" and cause == "3"):
+        return "UC100 找不到可用外呼路由：404 Not Found / NO_ROUTE_DESTINATION。请检查 UC100 的 SIP 到 VoLTE 呼叫路由、号码匹配规则和线路选择。"
     if status == "answered":
         return "电话已接通，实时音频桥已进入通话。"
     if status == "ringing":
-        return "线路已发起，手机侧正在振铃。"
+        return "UC100/SIP 侧已响应振铃，但尚未确认手机真实响铃；请以 UC100 话单/当前呼叫和手机来电为准。"
     if status == "busy":
         return "号码忙线或被占用，请稍后重试。"
     if status == "no_answer":
@@ -583,4 +641,11 @@ def is_line_rejection_event(event: dict[str, str | list[str]]) -> bool:
     cause_text = str(event.get("Cause-txt", ""))
     tech_cause = str(event.get("TechCause", ""))
     diagnostic = " ".join(part for part in [tech_cause, cause_text] if part).lower()
-    return cause == "21" or "403" in diagnostic or "forbidden" in diagnostic
+    return (
+        cause in {"3", "21"}
+        or "403" in diagnostic
+        or "404" in diagnostic
+        or "forbidden" in diagnostic
+        or "not found" in diagnostic
+        or "no_route_destination" in diagnostic
+    )

@@ -241,7 +241,9 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
 7. 运行 `python -m app.tools.uc100_preflight --phone 你的测试手机号`，先让 AMI/trunk/Channel 检查通过。
 8. 再把 `TELEPHONY_GATEWAY_MODE` 从 `simulator` 切到 `asterisk`。
 9. 打开 `ASTERISK_LIVE_CALL_ENABLED=true`，在 AI 外呼系统里做单号试拨。
-10. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
+10. 在 UC100 后台同时确认 `当前呼叫` 或 `话单` 有 VoLTE 蜂窝外呼记录；只有 SIP `ringing` 不算手机真实响铃。
+11. 如果前端显示 `404 Not Found / NO_ROUTE_DESTINATION`，先修 UC100 的 SIP 到 VoLTE 外呼路由、号码匹配规则和线路选择。
+12. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
 
 ## 现在还没做完的硬件相关实现
 
