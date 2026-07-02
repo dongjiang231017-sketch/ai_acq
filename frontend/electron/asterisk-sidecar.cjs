@@ -100,7 +100,7 @@ class AsteriskSidecar {
     this.managedProcess = spawn(runtime.path, ["-f", "-C", layout.asteriskConfPath], {
       cwd: layout.baseDir,
       detached: false,
-      env: { ...process.env, ASTERISK_CONSOLE: "no" },
+      env: { ...process.env, ...(runtime.env || {}), ASTERISK_CONSOLE: "no" },
       stdio: "ignore",
     });
     this.managedProcess.once("exit", (code, signal) => {
@@ -138,6 +138,7 @@ class AsteriskSidecar {
     const state = this.loadOrCreateState(statePath);
     const asteriskConfPath = path.join(configDir, "asterisk.conf");
     const backendEnvPath = path.join(stateDir, "backend-asterisk.env");
+    const runtime = this.resolveRuntime();
     this.writeConfigs({
       asteriskConfPath,
       backendEnvPath,
@@ -150,6 +151,7 @@ class AsteriskSidecar {
       spoolDir,
       stateDir,
       state,
+      runtime,
     });
 
     return {
@@ -315,7 +317,7 @@ class AsteriskSidecar {
     state.voiceGatewayPreviousHost = previousHost || "";
     state.voiceGatewayPreviousSipPort = previousSipPort;
     fs.writeFileSync(layout.statePath, JSON.stringify(state, null, 2));
-    this.writeConfigs(layout);
+    this.writeConfigs({ ...layout, runtime });
 
     const reload = this.reloadAsterisk(runtime, layout);
     return {
@@ -355,6 +357,10 @@ class AsteriskSidecar {
 
   writeConfigs(paths) {
     const { state } = paths;
+    const moduleDir = paths.runtime?.modulesDir
+      ? `astmoddir => ${paths.runtime.modulesDir}
+`
+      : "";
     const gatewayRegisterEnabled = Boolean(state.voiceGatewaySipUsername && state.voiceGatewaySipPassword);
     const advertisedTransport = state.asteriskAdvertisedHost
       ? `external_signaling_address = ${state.asteriskAdvertisedHost}
@@ -405,6 +411,7 @@ astagidir => ${path.join(paths.dataDir, "agi-bin")}
 astspooldir => ${paths.spoolDir}
 astrundir => ${paths.runDir}
 astlogdir => ${paths.logDir}
+${moduleDir}
 `,
     );
     writeFileIfChanged(
@@ -529,20 +536,21 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
   resolveRuntime() {
     const explicit = process.env.AI_ACQ_ASTERISK_BIN;
     if (explicit && fileExists(explicit)) {
-      return { mode: "explicit", found: true, path: explicit, safePath: explicit };
+      return runtimeFromPath("explicit", explicit);
     }
 
     const bundled = [
+      path.join(process.resourcesPath || "", "asterisk", os.platform(), "bin", "asterisk"),
       path.join(process.resourcesPath || "", "asterisk", "bin", "asterisk"),
       path.join(__dirname, "asterisk", os.platform(), "bin", "asterisk"),
       path.join(__dirname, "asterisk", "bin", "asterisk"),
     ].find(fileExists);
-    if (bundled) return { mode: "bundled", found: true, path: bundled, safePath: bundled };
+    if (bundled) return runtimeFromPath("bundled", bundled);
 
     const system = commandPath("asterisk");
-    if (system) return { mode: "system", found: true, path: system, safePath: system };
+    if (system) return runtimeFromPath("system", system);
 
-    return { mode: "bundled", found: false, path: "", safePath: "" };
+    return { mode: "bundled", found: false, path: "", safePath: "", modulesDir: "", modulesFound: false, ready: false };
   }
 
   isManagedRunning() {
@@ -554,8 +562,10 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
       {
         key: "runtime",
         label: "Asterisk runtime",
-        status: runtime.found ? "pass" : "fail",
-        detail: runtime.found ? `${runtime.mode}: ${runtime.safePath}` : "安装包还没有随带 Asterisk 可执行文件。",
+        status: runtime.ready ? "pass" : "fail",
+        detail: runtime.found
+          ? `${runtime.mode}: ${runtime.safePath}${runtime.modulesFound ? ` · modules ${runtime.modulesDir}` : " · 缺少 modules"}`
+          : "安装包还没有随带 Asterisk 可执行文件。",
       },
       {
         key: "config",
@@ -610,11 +620,14 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
     let title = "客户现场可单号试拨";
     let message = `客户端已绑定语音网关 ${gatewayAddress}，后端环境已生成，下一步做单号真实拨测。`;
 
-    if (!runtime.found) {
+    if (!runtime.ready) {
       status = "fail";
       title = "安装包缺少 Asterisk 运行时";
-      message = "客户电脑不能依赖开发机 Docker 或网页预览，必须由桌面客户端内置或指定 Asterisk。";
-      actionItems.push("把 Asterisk runtime 打进桌面客户端安装包，或用 AI_ACQ_ASTERISK_BIN 指向本机可执行文件。");
+      message = runtime.found
+        ? "客户端找到了 Asterisk binary，但没有找到可加载的 modules，不能保证 PJSIP/AudioSocket 可用。"
+        : "客户电脑不能依赖开发机 Docker 或网页预览，必须由桌面客户端内置或指定 Asterisk。";
+      actionItems.push("运行 npm run desktop:runtime:prepare 准备 runtime，再运行 npm run desktop:dist 打正式安装包。");
+      actionItems.push("如果使用外部 Asterisk，设置 AI_ACQ_ASTERISK_BIN 和 AI_ACQ_ASTERISK_MODULE_DIR。");
     } else if (voiceGatewayDiscovery?.status === "not_found") {
       status = "fail";
       title = "没有在当前网络发现语音网关";
@@ -669,8 +682,8 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
   }
 
   nextStep({ runtime, running, amiReachable, audioSocketReachable, layout }) {
-    if (!runtime.found) {
-      return "把 Asterisk runtime 打进桌面客户端安装包，或在开发机用 AI_ACQ_ASTERISK_BIN 指向可执行文件后再启动。";
+    if (!runtime.ready) {
+      return "先准备完整 Asterisk runtime（binary + modules），再启动桌面客户端 sidecar。";
     }
     if (!running && !amiReachable) {
       return "点击启动内置 Asterisk；客户端会使用本机专用配置和 AMI 密钥。";
@@ -705,6 +718,53 @@ function fileExists(filePath) {
   } catch {
     return false;
   }
+}
+
+function dirExists(filePath) {
+  try {
+    return Boolean(filePath) && fs.existsSync(filePath) && fs.statSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function runtimeFromPath(mode, binaryPath) {
+  const root = runtimeRootFromBinary(binaryPath);
+  const modulesDir = process.env.AI_ACQ_ASTERISK_MODULE_DIR || findFirstDir([
+    path.join(root, "lib", "asterisk", "modules"),
+    path.join(root, "lib64", "asterisk", "modules"),
+    path.join(path.dirname(path.dirname(binaryPath)), "lib", "asterisk", "modules"),
+    "/opt/homebrew/lib/asterisk/modules",
+    "/usr/local/lib/asterisk/modules",
+    "/usr/lib/asterisk/modules",
+    "/usr/lib64/asterisk/modules",
+  ]);
+  const libDir = findFirstDir([path.join(root, "lib"), path.join(root, "lib64")]);
+  const env = {};
+  if (libDir) {
+    env.DYLD_LIBRARY_PATH = [libDir, process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
+    env.LD_LIBRARY_PATH = [libDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
+  }
+  return {
+    mode,
+    found: true,
+    path: binaryPath,
+    safePath: binaryPath,
+    root,
+    modulesDir,
+    modulesFound: dirExists(modulesDir),
+    ready: dirExists(modulesDir),
+    env,
+  };
+}
+
+function runtimeRootFromBinary(binaryPath) {
+  const parent = path.dirname(binaryPath);
+  return path.basename(parent) === "bin" || path.basename(parent) === "sbin" ? path.dirname(parent) : parent;
+}
+
+function findFirstDir(candidates) {
+  return candidates.find((candidate) => dirExists(candidate)) || "";
 }
 
 function commandPath(command) {

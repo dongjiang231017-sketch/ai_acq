@@ -3,13 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "desktop": "electron electron/main.cjs",
     "desktop:preview": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:4178 electron electron/main.cjs",
-    "desktop:dev": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:5173 electron electron/main.cjs"
+    "desktop:dev": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:5173 electron electron/main.cjs",
+    "desktop:runtime:prepare": "node scripts/prepare-asterisk-runtime.cjs --copy",
+    "desktop:runtime:check": "node scripts/prepare-asterisk-runtime.cjs --check",
+    "desktop:package": "npm run build && npm run desktop:runtime:check && electron-builder --dir",
+    "desktop:dist": "npm run build && npm run desktop:runtime:check && electron-builder"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -22,7 +27,46 @@
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
     "electron": "^42.5.1",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.8.0",
     "vite": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.aiacq.qian",
+    "productName": "商家AI获客客户端",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/asterisk",
+        "to": "asterisk",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
   }
 }
