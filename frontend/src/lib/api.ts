@@ -171,6 +171,34 @@ export type TelephonyPreflight = {
   steps: TelephonyPreflightStep[];
 };
 
+export type TelephonyCellularDiagnostic = {
+  status: "pass" | "warn" | "fail" | string;
+  stage: string;
+  title: string;
+  summary: string;
+  detail: string;
+  actionItems: string[];
+  technicalDetail: string;
+  canRetry: boolean;
+  customerActionRequired: boolean;
+};
+
+export type TelephonyRecoveryCommand = {
+  command: string;
+  ok: boolean;
+  message: string;
+  output: string;
+};
+
+export type TelephonyLineRecovery = {
+  checkedAt: string;
+  status: "pass" | "warn" | "fail" | string;
+  summary: string;
+  commands: TelephonyRecoveryCommand[];
+  health: TelephonyHealth;
+  nextStep: string;
+};
+
 export type TelephonyTestCallResult = {
   accepted: boolean;
   actionId: string;
@@ -187,6 +215,8 @@ export type TelephonyTestCallResult = {
   conversationConfirmed: boolean;
   acceptanceReady: boolean;
   acceptanceNote: string;
+  cellularDiagnostic: TelephonyCellularDiagnostic;
+  autoRecovery?: TelephonyLineRecovery | null;
 };
 
 export type RealtimePipelineStep = {
@@ -961,6 +991,10 @@ export const api = {
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  recoverTelephonyLine: () =>
+    request<TelephonyLineRecovery>("/outbound/telephony/recover-line", {
+      method: "POST",
     }),
   realtimePipeline: () => request<RealtimePipeline>("/outbound/realtime/pipeline"),
   realtimeLiveEvents: (limit = 80, callId?: string | null) => {

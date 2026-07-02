@@ -182,6 +182,34 @@ class TelephonyTestCallCreate(BaseModel):
     caller_id: Annotated[str | None, Field(alias="callerId")] = None
 
 
+class TelephonyCellularDiagnosticRead(BaseModel):
+    status: str
+    stage: str
+    title: str
+    summary: str
+    detail: str
+    action_items: Annotated[list[str], Field(alias="actionItems")]
+    technical_detail: Annotated[str, Field(alias="technicalDetail")] = ""
+    can_retry: Annotated[bool, Field(alias="canRetry")]
+    customer_action_required: Annotated[bool, Field(alias="customerActionRequired")]
+
+
+class TelephonyRecoveryCommandRead(BaseModel):
+    command: str
+    ok: bool
+    message: str = ""
+    output: str = ""
+
+
+class TelephonyLineRecoveryRead(BaseModel):
+    checked_at: Annotated[datetime, Field(alias="checkedAt")]
+    status: str
+    summary: str
+    commands: list[TelephonyRecoveryCommandRead]
+    health: TelephonyHealthRead
+    next_step: Annotated[str, Field(alias="nextStep")]
+
+
 class TelephonyTestCallRead(BaseModel):
     accepted: bool
     action_id: Annotated[str, Field(alias="actionId")]
@@ -198,6 +226,8 @@ class TelephonyTestCallRead(BaseModel):
     conversation_confirmed: Annotated[bool, Field(alias="conversationConfirmed")] = False
     acceptance_ready: Annotated[bool, Field(alias="acceptanceReady")]
     acceptance_note: Annotated[str, Field(alias="acceptanceNote")]
+    cellular_diagnostic: Annotated[TelephonyCellularDiagnosticRead, Field(alias="cellularDiagnostic")]
+    auto_recovery: Annotated[TelephonyLineRecoveryRead | None, Field(alias="autoRecovery")] = None
 
 
 class RealtimePipelineStepRead(BaseModel):

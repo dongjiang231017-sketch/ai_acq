@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 
 from app.core.config import settings
+from app.services.telephony_runtime_config import telephony_int, telephony_str
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,7 @@ def _env(*names: str, default: str = "") -> str:
         value = os.getenv(name)
         if value is not None and value != "":
             return value
-    return default
+    return telephony_str(*names, fallback=default)
 
 
 def _int_env(*names: str, default: int = 0) -> int:
@@ -157,7 +158,7 @@ def _int_env(*names: str, default: int = 0) -> int:
             return int(value)
         except ValueError:
             return default
-    return default
+    return telephony_int(*names, fallback=default)
 
 
 def _default_admin_url(host: str) -> str:

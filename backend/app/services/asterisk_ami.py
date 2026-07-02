@@ -6,6 +6,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.telephony_runtime_config import telephony_bool, telephony_int, telephony_str
 from app.services.voice_gateway_profiles import current_voice_gateway_profile, voice_gateway_label
 
 
@@ -171,11 +172,11 @@ class AsteriskAmiClient:
         timeout_seconds: int | None = None,
         events: bool = False,
     ) -> None:
-        self.host = host or settings.asterisk_host
-        self.port = port or settings.asterisk_ami_port
-        self.username = username if username is not None else settings.asterisk_ami_username
-        self.password = password if password is not None else settings.asterisk_ami_password
-        self.timeout_seconds = timeout_seconds or settings.asterisk_ami_timeout_seconds
+        self.host = host or telephony_str("ASTERISK_HOST", "AI_ACQ_ASTERISK_HOST", fallback=settings.asterisk_host)
+        self.port = port or telephony_int("ASTERISK_AMI_PORT", "AI_ACQ_ASTERISK_AMI_PORT", fallback=settings.asterisk_ami_port)
+        self.username = username if username is not None else telephony_str("ASTERISK_AMI_USERNAME", "AI_ACQ_ASTERISK_AMI_USERNAME", fallback=settings.asterisk_ami_username)
+        self.password = password if password is not None else telephony_str("ASTERISK_AMI_PASSWORD", "AI_ACQ_ASTERISK_AMI_PASSWORD", fallback=settings.asterisk_ami_password)
+        self.timeout_seconds = timeout_seconds or telephony_int("ASTERISK_AMI_TIMEOUT_SECONDS", fallback=settings.asterisk_ami_timeout_seconds)
         self.events = events
         self._socket: socket.socket | None = None
         self._incoming_messages: list[str] = []
@@ -242,11 +243,11 @@ class AsteriskAmiClient:
             "Action": "Originate",
             "ActionID": action_id,
             "Channel": channel,
-            "Context": settings.asterisk_originate_context,
-            "Exten": settings.asterisk_originate_extension,
+            "Context": telephony_str("ASTERISK_ORIGINATE_CONTEXT", fallback=settings.asterisk_originate_context),
+            "Exten": telephony_str("ASTERISK_ORIGINATE_EXTENSION", fallback=settings.asterisk_originate_extension),
             "Priority": "1",
             "CallerID": clean_ami_field_value(caller_id or settings.asterisk_caller_id, "AMI CallerID"),
-            "Timeout": str(settings.asterisk_originate_timeout_ms),
+            "Timeout": str(telephony_int("ASTERISK_ORIGINATE_TIMEOUT_MS", fallback=settings.asterisk_originate_timeout_ms)),
             "Async": "true",
         }
         if variables:
@@ -461,9 +462,10 @@ def normalize_originate_phone(phone: str) -> str:
 
 def render_originate_channel(phone: str) -> str:
     profile = current_voice_gateway_profile()
-    channel = settings.asterisk_originate_channel_template.format(
+    template = telephony_str("ASTERISK_ORIGINATE_CHANNEL_TEMPLATE", fallback=settings.asterisk_originate_channel_template)
+    channel = template.format(
         phone=normalize_originate_phone(phone),
-        trunk=profile.trunk_name,
+        trunk=profile.trunk_name or telephony_str("ASTERISK_TRUNK_NAME", fallback=settings.asterisk_trunk_name),
     )
     return clean_ami_field_value(channel, "AMI Channel")
 
@@ -485,22 +487,25 @@ def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
 def check_asterisk_health() -> AsteriskHealth:
     errors: list[str] = []
     profile = current_voice_gateway_profile()
-    configured = bool(settings.asterisk_ami_username and settings.asterisk_ami_password)
+    configured = bool(
+        telephony_str("ASTERISK_AMI_USERNAME", "AI_ACQ_ASTERISK_AMI_USERNAME", fallback=settings.asterisk_ami_username)
+        and telephony_str("ASTERISK_AMI_PASSWORD", "AI_ACQ_ASTERISK_AMI_PASSWORD", fallback=settings.asterisk_ami_password)
+    )
     trunk_configured = bool(profile.trunk_name)
     health = {
         "checked_at": datetime.utcnow(),
-        "gateway_mode": settings.telephony_gateway_mode,
+        "gateway_mode": telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode),
         "voice_gateway_profile": profile.as_dict(),
         "configured": configured,
-        "live_call_enabled": settings.asterisk_live_call_enabled,
-        "bulk_call_enabled": settings.asterisk_bulk_call_enabled,
+        "live_call_enabled": telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled),
+        "bulk_call_enabled": telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled),
         "ami_reachable": False,
         "authenticated": False,
         "ping_ok": False,
         "trunk_configured": trunk_configured,
         "trunk_reachable": None,
         "trunk_status": "待检测",
-        "max_channels": profile.max_channels,
+        "max_channels": telephony_int("ASTERISK_MAX_CHANNELS", "VOICE_GATEWAY_MAX_CHANNELS", fallback=profile.max_channels),
         "errors": errors,
     }
     if not configured:
@@ -538,7 +543,7 @@ def check_asterisk_health() -> AsteriskHealth:
 
 
 def originate_test_call(phone: str, caller_id: str | None = None) -> AsteriskOriginateResult:
-    if not settings.asterisk_live_call_enabled:
+    if not telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled):
         raise AsteriskAmiError("真实线路拨号开关未启用，请先设置 ASTERISK_LIVE_CALL_ENABLED=true")
     render_originate_channel(phone)
     if caller_id:

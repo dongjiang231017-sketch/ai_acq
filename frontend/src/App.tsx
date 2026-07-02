@@ -63,6 +63,7 @@ import {
   SystemVoice,
   TelephonyConfig,
   TelephonyHealth,
+  TelephonyLineRecovery,
   TelephonyPreflight,
   TelephonyTestCallResult,
   VoiceGatewayProfile,
@@ -1274,6 +1275,12 @@ function telephonyPreflightStatusText(status: string) {
   return "WARN";
 }
 
+function telephonyDiagnosticStatusText(status: string) {
+  if (status === "pass") return "通过";
+  if (status === "fail") return "故障";
+  return "待确认";
+}
+
 function telephonyPreflightSummary(preflight: TelephonyPreflight) {
   if (preflight.readyForBulkTasks) return "真实批量外呼已开放";
   if (preflight.readyForSingleNumberTest) return "可做单号试拨";
@@ -1471,9 +1478,11 @@ function App() {
     callerId: "",
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
+  const [telephonyLineRecovery, setTelephonyLineRecovery] = useState<TelephonyLineRecovery | null>(null);
   const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认语音网关/Asterisk 可用后再做单号试拨。");
   const [isCheckingTelephony, setIsCheckingTelephony] = useState(false);
   const [isTestingTelephony, setIsTestingTelephony] = useState(false);
+  const [isRecoveringTelephony, setIsRecoveringTelephony] = useState(false);
   const [realtimeForm, setRealtimeForm] = useState({
     merchantName: "模拟火锅店",
     phone: "",
@@ -2222,6 +2231,7 @@ function App() {
     if (!telephonyTestForm.phone.trim()) return;
     setIsTestingTelephony(true);
     setTelephonyTestResult(null);
+    setTelephonyLineRecovery(null);
     setTelephonyMessage("正在提交单号试拨请求...");
     await refreshRealtimeLiveEvents(false);
     try {
@@ -2230,7 +2240,10 @@ function App() {
         callerId: telephonyTestForm.callerId.trim() || null,
       });
       setTelephonyTestResult(result);
-      setTelephonyMessage(result.message || (result.accepted ? "试拨请求已被 Asterisk 接收。" : "测试拨号失败"));
+      setTelephonyLineRecovery(result.autoRecovery ?? null);
+      setTelephonyMessage(
+        result.cellularDiagnostic?.title || result.message || (result.accepted ? "试拨请求已被 Asterisk 接收。" : "测试拨号失败"),
+      );
       await refreshRealtimeLiveEvents(false);
       try {
         const preflight = await api.telephonyPreflight(telephonyTestForm.phone);
@@ -2244,6 +2257,28 @@ function App() {
     } finally {
       setIsTestingTelephony(false);
       void refreshRealtimeLiveEvents(false);
+    }
+  }
+
+  async function recoverTelephonyLine() {
+    setIsRecoveringTelephony(true);
+    setTelephonyMessage("正在恢复 Asterisk/语音网关线路...");
+    try {
+      const recovery = await api.recoverTelephonyLine();
+      setTelephonyLineRecovery(recovery);
+      setTelephonyHealth(recovery.health);
+      setTelephonyMessage(recovery.nextStep || recovery.summary);
+      try {
+        const preflight = await api.telephonyPreflight(telephonyTestForm.phone);
+        setTelephonyHealth(preflight.health);
+        setTelephonyPreflight(preflight);
+      } catch {
+        // 恢复结果已经返回，预检刷新失败不覆盖恢复提示。
+      }
+    } catch (error) {
+      setTelephonyMessage(error instanceof Error ? error.message : "线路恢复失败");
+    } finally {
+      setIsRecoveringTelephony(false);
     }
   }
 
@@ -5288,6 +5323,47 @@ function App() {
                   )}
                 </div>
               </div>
+              {telephonyTestResult?.cellularDiagnostic && (
+                <div className={`cellular-diagnostic is-${telephonyTestResult.cellularDiagnostic.status}`}>
+                  <div>
+                    <span>蜂窝线路诊断</span>
+                    <strong>{telephonyTestResult.cellularDiagnostic.title}</strong>
+                    <small>{telephonyDiagnosticStatusText(telephonyTestResult.cellularDiagnostic.status)} · {telephonyTestResult.cellularDiagnostic.stage}</small>
+                  </div>
+                  <p>{telephonyTestResult.cellularDiagnostic.summary}</p>
+                  <p>{telephonyTestResult.cellularDiagnostic.detail}</p>
+                  <div className="cellular-action-list">
+                    {telephonyTestResult.cellularDiagnostic.actionItems.slice(0, 4).map((item) => (
+                      <span key={item}>{item}</span>
+                    ))}
+                  </div>
+                  {telephonyTestResult.cellularDiagnostic.technicalDetail && (
+                    <code>{telephonyTestResult.cellularDiagnostic.technicalDetail}</code>
+                  )}
+                  <div className="button-row cellular-actions">
+                    <button className="secondary-button" disabled={isRecoveringTelephony} onClick={() => void recoverTelephonyLine()} type="button">
+                      <RefreshCw size={16} className={isRecoveringTelephony ? "spin" : ""} />
+                      {isRecoveringTelephony ? "恢复中" : "恢复线路"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {telephonyLineRecovery && (
+                <div className={`cellular-recovery-result is-${telephonyLineRecovery.status}`}>
+                  <div>
+                    <span>恢复结果</span>
+                    <strong>{telephonyLineRecovery.summary}</strong>
+                    <small>{telephonyLineRecovery.nextStep}</small>
+                  </div>
+                  <div className="cellular-command-list">
+                    {telephonyLineRecovery.commands.slice(0, 5).map((command) => (
+                      <span key={command.command}>
+                        {command.ok ? "PASS" : "WARN"} · {command.command}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </article>
 
             {renderRealtimePipelinePanel()}

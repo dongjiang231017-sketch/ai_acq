@@ -3,6 +3,7 @@ from datetime import datetime
 
 from app.core.config import settings
 from app.services.asterisk_ami import AsteriskAmiError, check_asterisk_health, render_originate_channel
+from app.services.telephony_runtime_config import telephony_bool, telephony_int, telephony_str
 from app.services.voice_gateway_profiles import current_voice_gateway_profile
 
 
@@ -31,9 +32,12 @@ def _step(key: str, label: str, status: str, detail: str, action: str = "") -> T
 def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object]:
     profile = current_voice_gateway_profile()
     health = check_asterisk_health()
+    gateway_mode = telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode)
+    live_call_enabled = telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled)
+    bulk_call_enabled = telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled)
     steps: list[TelephonyPreflightStep] = []
 
-    if settings.telephony_gateway_mode == "asterisk":
+    if gateway_mode == "asterisk":
         steps.append(_step("gateway_mode", "网关模式", "pass", f"当前已切到 Asterisk/{profile.label} 真实线路模式。"))
     else:
         steps.append(
@@ -70,7 +74,9 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
         )
 
     if health.ami_reachable:
-        steps.append(_step("ami_reachable", "AMI 连接", "pass", f"后端能连接 {settings.asterisk_host}:{settings.asterisk_ami_port}。"))
+        ami_host = telephony_str("ASTERISK_HOST", "AI_ACQ_ASTERISK_HOST", fallback=settings.asterisk_host)
+        ami_port = telephony_int("ASTERISK_AMI_PORT", "AI_ACQ_ASTERISK_AMI_PORT", fallback=settings.asterisk_ami_port)
+        steps.append(_step("ami_reachable", "AMI 连接", "pass", f"后端能连接 {ami_host}:{ami_port}。"))
     elif health.configured:
         steps.append(
             _step(
@@ -125,12 +131,12 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "dial_channel",
                 "拨号通道",
                 "warn",
-                f"当前模板：{settings.asterisk_originate_channel_template}",
+                f"当前模板：{telephony_str('ASTERISK_ORIGINATE_CHANNEL_TEMPLATE', fallback=settings.asterisk_originate_channel_template)}",
                 "传入 --phone 或在页面输入测试号码后可看到实际 Channel。",
             )
         )
 
-    if settings.asterisk_live_call_enabled:
+    if live_call_enabled:
         steps.append(_step("live_switch", "单号试拨开关", "pass", "ASTERISK_LIVE_CALL_ENABLED 已开启。"))
     else:
         steps.append(
@@ -143,7 +149,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
             )
         )
 
-    if settings.asterisk_bulk_call_enabled:
+    if bulk_call_enabled:
         steps.append(_step("bulk_switch", "批量拨号开关", "pass", "ASTERISK_BULK_CALL_ENABLED 已开启。"))
     else:
         steps.append(
@@ -156,9 +162,9 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
             )
         )
 
-    ready_for_device_test = settings.telephony_gateway_mode == "asterisk" and health.ready_for_test_call
-    ready_for_single_number_test = ready_for_device_test and settings.asterisk_live_call_enabled
-    ready_for_bulk_tasks = ready_for_single_number_test and settings.asterisk_bulk_call_enabled
+    ready_for_device_test = gateway_mode == "asterisk" and health.ready_for_test_call
+    ready_for_single_number_test = ready_for_device_test and live_call_enabled
+    ready_for_bulk_tasks = ready_for_single_number_test and bulk_call_enabled
     next_step = _next_step(ready_for_device_test, ready_for_single_number_test, ready_for_bulk_tasks, steps)
 
     return {

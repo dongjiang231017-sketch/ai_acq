@@ -1078,6 +1078,90 @@ button:disabled {
   gap: 6px;
 }
 
+.cellular-diagnostic,
+.cellular-recovery-result {
+  border: 1px solid #dce7f5;
+  border-left: 4px solid #b77a00;
+  border-radius: 12px;
+  background: #fffaf0;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.cellular-diagnostic.is-pass,
+.cellular-recovery-result.is-pass {
+  border-left-color: #0c9f6f;
+  background: #f5fff9;
+}
+
+.cellular-diagnostic.is-fail,
+.cellular-recovery-result.is-fail {
+  border-left-color: #d64545;
+  background: #fff8f8;
+}
+
+.cellular-diagnostic span,
+.cellular-recovery-result span,
+.cellular-diagnostic small,
+.cellular-recovery-result small {
+  display: block;
+  color: #6b7c93;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.45;
+}
+
+.cellular-diagnostic strong,
+.cellular-recovery-result strong {
+  display: block;
+  margin-top: 4px;
+  color: #26364d;
+  font-size: 17px;
+  font-weight: 950;
+  line-height: 1.35;
+}
+
+.cellular-diagnostic p {
+  margin: 0;
+  color: #40526b;
+  font-size: 13px;
+  font-weight: 820;
+  line-height: 1.6;
+}
+
+.cellular-action-list,
+.cellular-command-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cellular-action-list span,
+.cellular-command-list span {
+  border: 1px solid rgba(140, 159, 184, 0.28);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #3f526d;
+  padding: 8px 10px;
+}
+
+.cellular-diagnostic code {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid rgba(140, 159, 184, 0.28);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #3c4f68;
+  font-size: 12px;
+  padding: 9px 10px;
+  white-space: nowrap;
+}
+
+.cellular-actions {
+  justify-content: flex-start;
+}
+
 .realtime-voice-panel {
   display: grid;
   gap: 14px;
@@ -3179,6 +3263,11 @@ button:disabled {
   .line-test-row,
   .line-test-form,
   .realtime-call-form {
+    grid-template-columns: 1fr;
+  }
+
+  .cellular-action-list,
+  .cellular-command-list {
     grid-template-columns: 1fr;
   }
 

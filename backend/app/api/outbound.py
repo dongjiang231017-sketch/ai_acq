@@ -25,6 +25,7 @@ from app.schemas.task import (
     TaskRead,
     TelephonyConfigRead,
     TelephonyHealthRead,
+    TelephonyLineRecoveryRead,
     TelephonyPreflightRead,
     TelephonyTestCallCreate,
     TelephonyTestCallRead,
@@ -48,7 +49,9 @@ from app.services.realtime_outbound import (
     interrupt_realtime_session,
     read_realtime_live_events,
 )
+from app.services.telephony_cellular import build_cellular_diagnostic, recover_telephony_line
 from app.services.telephony_preflight import build_telephony_preflight
+from app.services.telephony_runtime_config import telephony_bool, telephony_int, telephony_str
 from app.services.voice_gateway_profiles import current_voice_gateway_profile
 
 router = APIRouter()
@@ -104,18 +107,18 @@ def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
 def telephony_config() -> dict[str, object]:
     profile = current_voice_gateway_profile()
     return {
-        "gatewayMode": settings.telephony_gateway_mode,
+        "gatewayMode": telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode),
         "voiceGatewayProfile": profile.as_dict(),
         "queueEnabled": settings.outbound_queue_enabled,
         "queueName": settings.outbound_queue_name,
         "redisUrlConfigured": bool(settings.redis_url),
-        "asteriskHost": settings.asterisk_host,
-        "asteriskAmiPort": settings.asterisk_ami_port,
-        "asteriskUsernameConfigured": bool(settings.asterisk_ami_username),
+        "asteriskHost": telephony_str("ASTERISK_HOST", "AI_ACQ_ASTERISK_HOST", fallback=settings.asterisk_host),
+        "asteriskAmiPort": telephony_int("ASTERISK_AMI_PORT", "AI_ACQ_ASTERISK_AMI_PORT", fallback=settings.asterisk_ami_port),
+        "asteriskUsernameConfigured": bool(telephony_str("ASTERISK_AMI_USERNAME", "AI_ACQ_ASTERISK_AMI_USERNAME", fallback=settings.asterisk_ami_username)),
         "asteriskTrunkName": profile.trunk_name,
-        "asteriskMaxChannels": profile.max_channels,
-        "asteriskLiveCallEnabled": settings.asterisk_live_call_enabled,
-        "asteriskBulkCallEnabled": settings.asterisk_bulk_call_enabled,
+        "asteriskMaxChannels": telephony_int("ASTERISK_MAX_CHANNELS", "VOICE_GATEWAY_MAX_CHANNELS", fallback=profile.max_channels),
+        "asteriskLiveCallEnabled": telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled),
+        "asteriskBulkCallEnabled": telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled),
     }
 
 
@@ -127,6 +130,11 @@ def telephony_health() -> dict[str, object]:
 @router.get("/telephony/preflight", response_model=TelephonyPreflightRead)
 def telephony_preflight(phone: str | None = None) -> dict[str, object]:
     return build_telephony_preflight(test_phone=phone)
+
+
+@router.post("/telephony/recover-line", response_model=TelephonyLineRecoveryRead)
+def recover_telephony_line_api() -> dict[str, object]:
+    return recover_telephony_line()
 
 
 @router.post("/telephony/test-call", response_model=TelephonyTestCallRead)
@@ -158,6 +166,21 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         acceptance_note = "线路和实时媒体桥已接通，但还没同时确认真人语音和 AI 首句播出。"
     if call_screening_detected and not human_speech_confirmed:
         acceptance_note = "检测到电话助理/秘书提示，已说明来电原因；还未确认真人客户接听。"
+    cellular_diagnostic = build_cellular_diagnostic(
+        result,
+        media_loop_confirmed=media_loop_confirmed,
+        human_speech_confirmed=human_speech_confirmed,
+        ai_speech_confirmed=ai_speech_confirmed,
+        call_screening_detected=call_screening_detected,
+    )
+    auto_recovery = None
+    if (
+        not result.cellular_confirmed
+        and not media_loop_confirmed
+        and cellular_diagnostic.get("canRetry")
+        and cellular_diagnostic.get("status") == "fail"
+    ):
+        auto_recovery = recover_telephony_line()
     return {
         "accepted": result.accepted,
         "actionId": result.action_id,
@@ -174,6 +197,8 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "conversationConfirmed": conversation_confirmed,
         "acceptanceReady": acceptance_ready,
         "acceptanceNote": acceptance_note,
+        "cellularDiagnostic": cellular_diagnostic,
+        "autoRecovery": auto_recovery,
     }
 
 

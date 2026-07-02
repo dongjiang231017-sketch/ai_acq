@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
 from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, render_originate_channel
+from app.services.telephony_runtime_config import telephony_bool, telephony_str
 from app.services.voice_gateway_profiles import voice_gateway_label
 
 
@@ -116,9 +117,9 @@ class SimulatorGateway:
 class AsteriskGateway:
     def place_call(self, attempt: CallAttempt) -> CallResult:
         gateway = voice_gateway_label()
-        if not settings.asterisk_live_call_enabled:
+        if not telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled):
             raise OutboundGatewayConfigurationError("真实线路拨号开关未启用，请先完成语音网关单号试拨。")
-        if not settings.asterisk_bulk_call_enabled:
+        if not telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled):
             raise OutboundGatewayConfigurationError("批量真实外呼未启用，请确认单号试拨稳定后再开启。")
         if not attempt.lead.phone:
             return CallResult(
@@ -177,6 +178,6 @@ class AsteriskGateway:
 
 
 def get_outbound_gateway() -> OutboundGateway:
-    if settings.telephony_gateway_mode == "asterisk":
+    if telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode) == "asterisk":
         return AsteriskGateway()
     return SimulatorGateway()
