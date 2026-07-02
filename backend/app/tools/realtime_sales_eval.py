@@ -4,9 +4,16 @@ import argparse
 import json
 from dataclasses import dataclass
 
+from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType
+from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_sales_brain import render_sales_reply, score_realtime_events
-from app.services.realtime_sales_playbook import build_omni_turn_instruction, classify_realtime_call_input
+from app.services.realtime_sales_playbook import (
+    build_barge_recovery_instruction,
+    build_omni_turn_instruction,
+    classify_realtime_call_input,
+)
+from app.services.realtime_sales_state import SalesStateMachine
 
 
 @dataclass(frozen=True)
@@ -305,6 +312,74 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "barge_recovery_scored_within_1s",
             "score": int(turn_metric.get("score") or 0),
             "issues": [] if int(turn_metric.get("score") or 0) >= 85 else ["barge_recovery_too_slow"],
+        }
+    )
+    recovery_instruction = build_barge_recovery_instruction(
+        [{"role": "assistant", "content": "费用看套餐和投放，先判断适不适合再报价。"}],
+        last_assistant_reply="费用看套餐和投放，先判断适不适合再报价。",
+    )
+    gates.append(
+        {
+            "text": "barge_recovery_contextual_no_technical_tone",
+            "score": 100
+            if "费用看套餐" in recovery_instruction
+            and all(word not in recovery_instruction for word in ["被打断", "系统识别", "没听清"])
+            else 45,
+            "issues": []
+            if "费用看套餐" in recovery_instruction
+            and all(word not in recovery_instruction for word in ["被打断", "系统识别", "没听清"])
+            else ["bad_barge_recovery_instruction"],
+        }
+    )
+    assistant_classifier = AnswerClassifier()
+    assistant_type = assistant_classifier.on_asr_text("我是您的来电助理，为了保护机主，请简短说明来电原因。")
+    gates.append(
+        {
+            "text": "answer_classifier_phone_assistant",
+            "score": 100 if assistant_type == CallAnswerType.PHONE_ASSISTANT else 35,
+            "issues": [] if assistant_type == CallAnswerType.PHONE_ASSISTANT else [f"type:{assistant_type}"],
+        }
+    )
+    voicemail_classifier = AnswerClassifier()
+    voicemail_type = voicemail_classifier.on_asr_text("您好，请在提示音后留言，挂断即可。")
+    gates.append(
+        {
+            "text": "answer_classifier_voicemail",
+            "score": 100 if voicemail_type == CallAnswerType.VOICEMAIL else 35,
+            "issues": [] if voicemail_type == CallAnswerType.VOICEMAIL else [f"type:{voicemail_type}"],
+        }
+    )
+    human_classifier = AnswerClassifier()
+    human_type = human_classifier.on_asr_text("你好。")
+    gates.append(
+        {
+            "text": "answer_classifier_human_greeting",
+            "score": 100 if human_type == CallAnswerType.HUMAN else 35,
+            "issues": [] if human_type == CallAnswerType.HUMAN else [f"type:{human_type}"],
+        }
+    )
+    fsm = SalesStateMachine()
+    stage = fsm.update("不用加微信，你直接说效果。", "效果询问", "direct_answer_only")
+    constrained = fsm.constrain_reply("可以，我加您微信发资料。")
+    gates.append(
+        {
+            "text": "sales_state_suppresses_push_after_refusal",
+            "score": 100 if stage.value == "objection" and "资料" not in constrained and "加微信" not in constrained else 45,
+            "issues": [] if stage.value == "objection" and "资料" not in constrained and "加微信" not in constrained else ["push_not_suppressed"],
+        }
+    )
+    quality_chain = RealtimeAudioQualityChain(enabled=True)
+    loud = b"".join((32760).to_bytes(2, "little", signed=True) for _ in range(160))
+    processed = quality_chain.process(loud)
+    raw_stats = analyze_pcm16(loud)
+    processed_stats = analyze_pcm16(processed)
+    gates.append(
+        {
+            "text": "audio_quality_limits_clipped_frame",
+            "score": 100 if processed_stats.peak <= raw_stats.peak and processed_stats.clipped <= raw_stats.clipped else 45,
+            "issues": []
+            if processed_stats.peak <= raw_stats.peak and processed_stats.clipped <= raw_stats.clipped
+            else ["audio_quality_not_limiting"],
         }
     )
     return gates

@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     realtime_opening_grace_seconds: float = 1.2
     realtime_debug_audio_capture_enabled: bool = False
     realtime_debug_audio_capture_dir: str = "/tmp/ai-acq-realtime-audio"
+    realtime_audio_quality_enabled: bool = True
+    realtime_answer_classification_seconds: float = 7.0
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"

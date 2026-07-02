@@ -297,6 +297,7 @@ def build_omni_turn_instruction(
     recent_history: list[dict[str, str]] | None = None,
     first_human_after_screening: bool = False,
     last_reply: str = "",
+    stage_instruction: str = "",
 ) -> str:
     clean = " ".join(text.strip().split())
     context = _omni_context_prefix(recent_history, first_human_after_screening, last_reply)
@@ -307,6 +308,8 @@ def build_omni_turn_instruction(
         first_human_after_screening=first_human_after_screening,
         last_reply=last_reply,
     )
+    if stage_instruction:
+        sales_instruction = f"{sales_instruction}\n阶段控制：{stage_instruction}"
     if signal == "call_screening":
         return (
             "这句话来自电话助理或电话秘书，不是真人客户。只用普通话原句回答："
@@ -389,6 +392,39 @@ def build_omni_turn_instruction(
         "除非客户明确要资料，否则不要主动说发资料；除非客户问是否AI，否则不要主动说智能助手。"
         "最多两句，只用普通话，不要粤语。"
     )
+
+
+def build_barge_recovery_instruction(
+    recent_history: list[dict[str, str]] | None,
+    last_customer_text: str = "",
+    last_assistant_reply: str = "",
+) -> str:
+    history_text = _format_omni_recent_history(recent_history)
+    prefix = [
+        "客户插话后进入新一轮。现在必须直接接客户刚才的话回答。",
+        "禁止提刚才停顿、听辨、系统、模型、识别、线路。",
+        "如果客户话不完整，不要猜费用、效果、美团、餐饮或美业；只自然补一句。",
+    ]
+    if history_text:
+        prefix.append(f"最近对话：\n{history_text}")
+    if last_customer_text:
+        prefix.append(f"客户打断内容：{last_customer_text[:80]}")
+    if last_assistant_reply:
+        prefix.append(f"上一句AI：{last_assistant_reply[:80]}")
+    if any(keyword in last_assistant_reply for keyword in ["费用", "价格", "收费", "多少钱"]):
+        prefix.append("上一句在讲费用。客户如果接着问，短答：费用看套餐和投放，先判断适不适合再报价。")
+    elif any(keyword in last_assistant_reply for keyword in ["效果", "客流", "到店", "曝光", "保底"]):
+        prefix.append("上一句在讲效果。客户如果质疑，短答：效果先小范围测曝光、咨询和到店，不空口保底。")
+    elif any(keyword in last_assistant_reply for keyword in ["微信", "资料", "案例", "发"]):
+        prefix.append("上一句在推资料。客户如果没明确要资料，本轮停止推资料，只回答当前问题。")
+    elif any(keyword in last_assistant_reply for keyword in ["美团", "抖音", "渠道"]):
+        prefix.append("上一句在讲渠道区别。短答：美团偏搜索成交，视频号偏微信同城和私域补充。")
+    elif any(keyword in last_assistant_reply for keyword in ["我是", "身份", "视频号团购", "来电"]):
+        prefix.append("上一句在说明身份。客户可能没听清或急着问问题，只短答身份和来电目的。")
+    else:
+        prefix.append("默认只说一句：您说，我在听。")
+    prefix.append("最多两句，像真人销售，不要机械推进。")
+    return "\n".join(prefix)
 
 
 def _identity_handoff_reply(last_reply: str, recent_history: list[dict[str, str]] | None) -> str:

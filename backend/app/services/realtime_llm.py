@@ -65,6 +65,7 @@ def generate_realtime_reply(
     merchant_name: str,
     fallback_reply: str,
     conversation_history: list[dict[str, str]] | None = None,
+    stage_instruction: str = "",
 ) -> RealtimeReplyResult:
     history = conversation_history or []
     if intent in _FAST_LOCAL_INTENTS:
@@ -102,7 +103,7 @@ def generate_realtime_reply(
         )
 
     started = time.perf_counter()
-    future = _DEEPSEEK_EXECUTOR.submit(_request_deepseek_reply, text, intent, merchant_name, history)
+    future = _DEEPSEEK_EXECUTOR.submit(_request_deepseek_reply, text, intent, merchant_name, history, stage_instruction)
     try:
         reply = future.result(timeout=max(0.5, settings.realtime_llm_timeout_seconds))
     except TimeoutError:
@@ -524,7 +525,13 @@ def _avoid_repeat(reply: str, last_assistant: str, topic_alternatives: list[str]
     return reply
 
 
-def _request_deepseek_reply(text: str, intent: str, merchant_name: str, conversation_history: list[dict[str, str]] | None = None) -> str:
+def _request_deepseek_reply(
+    text: str,
+    intent: str,
+    merchant_name: str,
+    conversation_history: list[dict[str, str]] | None = None,
+    stage_instruction: str = "",
+) -> str:
     recent_history = _format_conversation_history(conversation_history or [])
     payload = {
         "model": settings.deepseek_chat_model,
@@ -552,6 +559,7 @@ def _request_deepseek_reply(text: str, intent: str, merchant_name: str, conversa
                 "content": (
                     f"商家：{merchant_name or '客户门店'}\n"
                     f"本地意图：{intent}\n"
+                    f"销售状态：{stage_instruction or '无'}\n"
                     f"最近对话：\n{recent_history}\n"
                     f"客户刚说：{text}\n"
                     "请给出下一句电话回复，必须像真人顺着客户的话回答，不要像录播话术。"
