@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 
 from app.services.realtime_outbound import _build_reply, _classify_intent
-from app.services.realtime_sales_brain import render_sales_reply
+from app.services.realtime_sales_brain import render_sales_reply, score_realtime_events
 from app.services.realtime_sales_playbook import build_omni_turn_instruction, classify_realtime_call_input
 
 
@@ -124,6 +124,15 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": [] if screening_followup_signal == "call_screening" else [f"signal:{screening_followup_signal}"],
         }
     )
+    apple_assistant_text = "我是您的来电助理，为了保护机主，请简短说明来电原因。"
+    apple_assistant_signal = classify_realtime_call_input(apple_assistant_text)
+    gates.append(
+        {
+            "text": "phone_assistant_not_human",
+            "score": 100 if apple_assistant_signal == "call_screening" else 35,
+            "issues": [] if apple_assistant_signal == "call_screening" else [f"signal:{apple_assistant_signal}"],
+        }
+    )
     screening_reply_instruction = build_omni_turn_instruction(screening_text, "call_screening")
     gates.append(
         {
@@ -160,6 +169,47 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "omni_identity_no_push",
             "score": 100 if all(word not in identity_reply for word in identity_forbidden) else 45,
             "issues": [] if all(word not in identity_reply for word in identity_forbidden) else ["identity_push_instruction"],
+        }
+    )
+    repeated_identity_history = [
+        {"role": "user", "content": "你是谁？"},
+        {"role": "assistant", "content": "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"},
+    ]
+    repeated_identity_reply = render_sales_reply(
+        "你是谁？",
+        "身份确认",
+        "测试门店",
+        "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
+        repeated_identity_history,
+    ).reply
+    gates.append(
+        {
+            "text": "repeat_identity_uses_new_wording",
+            "reply": repeated_identity_reply,
+            "score": 100
+            if "简单说" in repeated_identity_reply
+            and "发资料" not in repeated_identity_reply
+            and "加微信" not in repeated_identity_reply
+            else 45,
+            "issues": []
+            if "简单说" in repeated_identity_reply
+            and "发资料" not in repeated_identity_reply
+            and "加微信" not in repeated_identity_reply
+            else ["repeat_identity_not_reworded"],
+        }
+    )
+    omni_repeat_identity_instruction = build_omni_turn_instruction(
+        "你是谁？",
+        "identity_handoff",
+        recent_history=repeated_identity_history,
+        last_reply="我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
+    )
+    omni_repeat_identity_reply = _extract_forced_reply(omni_repeat_identity_instruction)
+    gates.append(
+        {
+            "text": "omni_repeat_identity_no_replay",
+            "score": 100 if "简单说" in omni_repeat_identity_reply else 45,
+            "issues": [] if "简单说" in omni_repeat_identity_reply else ["omni_identity_replayed"],
         }
     )
     short_who_signal = classify_realtime_call_input("谁？")
@@ -224,6 +274,37 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "omni_correction_no_guess",
             "score": 100 if all(word not in correction_reply for word in correction_forbidden) else 45,
             "issues": [] if all(word not in correction_reply for word in correction_forbidden) else ["correction_guessing"],
+        }
+    )
+    fast_barge_score = score_realtime_events(
+        [
+            {"type": "call_connected", "callId": "gate", "at": "2026-07-01T00:00:00Z"},
+            {"type": "human_speech_confirmed", "callId": "gate", "text": "你是谁", "at": "2026-07-01T00:00:01Z"},
+            {
+                "type": "tts_start",
+                "callId": "gate",
+                "raw": {"sentBytes": 320, "firstAudioMs": 520},
+                "at": "2026-07-01T00:00:01.520Z",
+            },
+            {"type": "barge_in", "callId": "gate", "at": "2026-07-01T00:00:02Z"},
+            {"type": "barge_recovery_ready", "callId": "gate", "at": "2026-07-01T00:00:02.080Z"},
+            {
+                "type": "omni_response_slow_fallback",
+                "callId": "gate",
+                "fallbackText": "您刚才是问我身份，还是问具体做什么？",
+                "at": "2026-07-01T00:00:02.850Z",
+            },
+        ],
+    )
+    turn_metric = next(
+        (metric for metric in (fast_barge_score or {}).get("metrics", []) if metric.get("name") == "打断恢复"),
+        {},
+    )
+    gates.append(
+        {
+            "text": "barge_recovery_scored_within_1s",
+            "score": int(turn_metric.get("score") or 0),
+            "issues": [] if int(turn_metric.get("score") or 0) >= 85 else ["barge_recovery_too_slow"],
         }
     )
     return gates

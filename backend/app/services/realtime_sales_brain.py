@@ -38,6 +38,7 @@ TOPIC_ANSWERS = {
     "identity": [
         "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
         "我这边是本地生活服务顾问，来电是确认视频号团购到店获客和微信同城曝光。",
+        "简单说，我是做视频号团购到店获客服务的，主要确认微信同城曝光需求。",
     ],
     "price": [
         "这是付费服务，费用看套餐设计和投放节奏，不合适不建议做。",
@@ -64,8 +65,8 @@ TOPIC_ANSWERS = {
         "那我不多讲，麻烦转给负责到店获客的人更合适。",
     ],
     "source": [
-        "不方便我就标记不再联系，这通只做门店业务沟通。",
-        "您介意的话我马上标记不再联系，只做门店业务沟通。",
+        "不方便我就不再联系，这通只做门店业务沟通。",
+        "您介意的话我马上结束，只做门店业务沟通。",
     ],
     "quality": [
         "视频号团购，就是帮门店做可下单套餐，再用微信同城曝光引到店。",
@@ -113,10 +114,19 @@ def render_sales_reply(
     answers = TOPIC_ANSWERS.get(plan.topic) or []
     answer = _choose_variant(answers, text, last_assistant) if answers else fallback_reply
     compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if plan.topic == "identity" and _recently_answered_identity(history):
+        answer = "简单说，我是做视频号团购到店获客服务的，主要确认微信同城曝光需求。"
     if plan.topic == "identity" and compact in {"喂", "喂喂", "你好", "您好"}:
-        answer = "您好，我在。我是做视频号团购到店获客的，给您来电是确认微信同城曝光这块。"
+        if _recently_answered_identity(history):
+            answer = "我在，刚才说的是视频号团购到店获客，主要确认微信同城曝光需求。"
+        else:
+            answer = "您好，我在。我是做视频号团购到店获客的，给您来电是确认微信同城曝光这块。"
     if plan.topic == "identity" and _has_any(text, ["干嘛", "打电话", "什么事", "来电原因", "为什么"]):
-        answer = "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
+        answer = (
+            "简单说，我是做视频号团购到店获客服务的，确认微信同城曝光需求。"
+            if _recently_answered_identity(history)
+            else "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
+        )
     ack = _choose_variant(EMOTION_ACKS.get(plan.emotion, EMOTION_ACKS["neutral"]), text + intent, last_assistant)
     if plan.direct_answer_only and plan.topic == "open_need":
         answer = "不推材料，我直接答。您问费用、效果或流程，我就按这个说。"
@@ -342,8 +352,26 @@ def _push_forbidden(text: str, history: list[dict[str, str]]) -> bool:
 def _repeat_risk(text: str, history: list[dict[str, str]]) -> bool:
     if _has_any(text, ["重复", "总说", "老说", "别重复", "不要重复"]):
         return True
+    current = _normalize_reply(text)
+    if current:
+        recent_users = [
+            _normalize_reply(turn.get("content", ""))
+            for turn in history[-8:]
+            if turn.get("role") == "user"
+        ]
+        if current in {item for item in recent_users if item}:
+            return True
     replies = [_normalize_reply(turn.get("content", "")) for turn in history if turn.get("role") == "assistant"]
     return bool(len(replies) >= 2 and replies[-1] and replies[-1] == replies[-2])
+
+
+def _recently_answered_identity(history: list[dict[str, str]]) -> bool:
+    recent_replies = [
+        str(turn.get("content") or "")
+        for turn in history[-6:]
+        if (turn.get("role") or "").strip().lower() == "assistant"
+    ]
+    return any(_has_any(reply, ["做视频号团购", "到店获客", "同城曝光"]) for reply in recent_replies)
 
 
 def _infer_previous_topic(history: list[dict[str, str]]) -> str | None:
@@ -448,11 +476,11 @@ def _metric_turn_taking(events: list[dict[str, object]]) -> dict[str, object]:
     if not barge_events:
         return _metric("打断恢复", 78, 0.9, "本轮没有明显打断，按基础稳定分")
     recovered = any(
-        _has_event_after(scored_events, start_type, {"tts_start", "llm_reply"}, within_seconds=4.5)
+        _has_event_after(scored_events, start_type, {"tts_start", "llm_reply", "omni_response_slow_fallback"}, within_seconds=1.2)
         for start_type in ("barge_recovery_ready", "barge_turn_committed", "barge_in", "tts_interrupted")
     )
     score = 92 if recovered else 48
-    return _metric("打断恢复", score, 1.1, "打断后已重新回复" if recovered else "打断后未在4.5秒内恢复回复")
+    return _metric("打断恢复", score, 1.1, "打断后约1秒内已重新回复" if recovered else "打断后未在1.2秒内恢复回复")
 
 
 def _metric_understanding(events: list[dict[str, object]]) -> dict[str, object]:

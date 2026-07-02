@@ -91,6 +91,24 @@ def classify_realtime_call_input(text: str) -> str:
         "電話助理",
         "电话秘书",
         "電話秘書",
+        "来电助理",
+        "來電助理",
+        "我是您的来电助理",
+        "我是你的来电助理",
+        "您正在与来电助理通话",
+        "正在与来电助理通话",
+        "为了保护机主",
+        "為了保護機主",
+        "请简短说明",
+        "請簡短說明",
+        "简短说明来意",
+        "簡短說明來意",
+        "确认是否接听",
+        "確認是否接聽",
+        "稍后为您转达",
+        "稍後為您轉達",
+        "机主接听前",
+        "機主接聽前",
         "请不要挂断",
         "請不要掛斷",
         "不要挂断电话",
@@ -330,10 +348,11 @@ def build_omni_turn_instruction(
             "只用普通话，不要粤语。"
         )
     if signal == "identity_handoff":
+        identity_reply = _identity_handoff_reply(last_reply, recent_history)
         return (
             f"{context}\n{sales_instruction}\n客户问身份或没听到开头：{clean}。"
             "只回答身份和来电原因，不要推进业务，不要问费用/效果/美团区别，不要解释系统："
-            "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
+            f"{identity_reply}"
             "禁止主动说自己是智能助手，禁止主动说发资料。"
         )
     if signal == "audio_issue":
@@ -370,3 +389,15 @@ def build_omni_turn_instruction(
         "除非客户明确要资料，否则不要主动说发资料；除非客户问是否AI，否则不要主动说智能助手。"
         "最多两句，只用普通话，不要粤语。"
     )
+
+
+def _identity_handoff_reply(last_reply: str, recent_history: list[dict[str, str]] | None) -> str:
+    recent_text = " ".join(
+        str(turn.get("content") or "")
+        for turn in (recent_history or [])[-6:]
+        if (turn.get("role") or "").strip().lower() == "assistant"
+    )
+    combined = last_reply + " " + recent_text
+    if any(keyword in combined for keyword in ["做视频号团购", "同城曝光", "到店获客"]):
+        return "简单说，我是做视频号团购到店获客服务的，给您来电是确认微信同城曝光需求。"
+    return "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"

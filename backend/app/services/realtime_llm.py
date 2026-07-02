@@ -240,7 +240,7 @@ def _build_contextual_local_reply(
         )
 
     if signal.topic == "source":
-        return _avoid_repeat("不方便我就标记不再联系，只做门店业务沟通。", last_assistant)
+        return _avoid_repeat("不方便我就不再联系，这通只做门店业务沟通。", last_assistant)
 
     if signal.topic == "owner":
         return _avoid_repeat("方便转给负责团购的人吗？我简单说。", last_assistant)
@@ -330,7 +330,7 @@ def _build_contextual_local_reply(
         return _avoid_repeat("方便转给负责团购的人吗？我简单说。", last_assistant)
 
     if intent == "来源/隐私":
-        return _avoid_repeat("不方便我就标记不再联系，只做门店业务沟通。", last_assistant)
+        return _avoid_repeat("不方便我就不再联系，这通只做门店业务沟通。", last_assistant)
 
     if intent == "需求探索":
         if _has_any(clean, ["都这样", "都这么", "每家", "都一样"]):

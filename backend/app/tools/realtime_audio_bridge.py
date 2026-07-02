@@ -45,10 +45,11 @@ AUDIO_SOCKET_KIND_ERROR = 0xFF
 PCM_FRAME_BYTES = 320
 PCM_FRAME_SECONDS = 0.02
 OMNI_LOCAL_BARGE_MIN_SENT_BYTES = PCM_FRAME_BYTES * 12
-OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.55
-OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.7
-OMNI_BARGE_RECOVERY_MAX_SECONDS = 2.4
+OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.35
+OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.35
+OMNI_BARGE_RECOVERY_MAX_SECONDS = 1.0
 OMNI_BARGE_FORCED_RESPONSE_SKIP_SECONDS = 4.0
+OMNI_FIRST_AUDIO_DEADLINE_SECONDS = 1.15
 OMNI_NO_AUDIO_FALLBACK_TEXT = "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
 REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS = 7.0
 REMOTE_AUDIO_SILENCE_SECONDS = 1.3
@@ -448,14 +449,26 @@ class AudioSocketCallSession:
 
     def _wait_for_remote_classification_before_opening(self, mode: str) -> bool:
         deadline = time.monotonic() + REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS
+        saw_remote_audio = bool(self._last_remote_audio_at)
         while time.monotonic() < deadline and not self.stop_event.is_set():
             if self._opening_blocked():
                 return False
+            if self._last_remote_audio_at:
+                saw_remote_audio = True
             if self._last_remote_audio_at and time.monotonic() - self._last_remote_audio_at < REMOTE_AUDIO_SILENCE_SECONDS:
                 time.sleep(0.08)
                 continue
             time.sleep(0.08)
         if self._opening_blocked():
+            return False
+        if saw_remote_audio:
+            self.logger.emit(
+                "human_confirmation_pending",
+                callId=self.call_id,
+                mode=mode,
+                waitMs=int(REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS * 1000),
+                detail="对端已有声音但还没有分清真人/电话助理，暂不主动开销售话术。",
+            )
             return False
         self.logger.emit(
             "opening_after_remote_silence",
@@ -1209,13 +1222,13 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             callId=self.call_id,
             elapsedMs=int(elapsed * 1000),
             silenceMs=int(silence * 1000),
-            detail="客户打断后未及时产出最终转写，已请求兜底回复；若随后转写到达会改用转写回复。",
+            detail="客户打断后短暂停顿，已在一秒内请求恢复回复；若随后转写到达会改用转写回复。",
         )
         self._request_omni_response(
             "客户插话后继续说了内容。请根据刚才提交的客户语音直接回答。"
             "如果语音不完整或客户没有给出具体问题，禁止猜费用、效果、美团、餐饮或美业。"
-            "只自然澄清一句：我刚才没听完整，您是问我是谁，还是让我直接说来电目的？"
-            "不要解释技术状态，不要说被打断，不要沉默。"
+            "只自然澄清一句：您刚才是问我身份，还是问具体做什么？"
+            "不要解释技术状态，不要说被打断，不要说没听完整，不要沉默。"
         )
 
     def start_omni_response(self, response_id: str) -> None:
@@ -1237,6 +1250,77 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self.interrupt_event.clear()
         self._mark_speech_job_started()
         self.logger.emit("omni_response_start", callId=self.call_id, responseId=response_id, generation=generation)
+        threading.Thread(
+            target=self._omni_response_audio_watchdog,
+            args=(generation, response_id),
+            daemon=True,
+        ).start()
+
+    def _omni_response_audio_watchdog(self, generation: int, response_id: str) -> None:
+        time.sleep(OMNI_FIRST_AUDIO_DEADLINE_SECONDS)
+        with self._omni_lock:
+            should_fallback = (
+                self._omni_generation == generation
+                and self._omni_response_id == response_id
+                and not self._omni_tts_started
+                and not self._omni_closed
+            )
+            pending_text = self._omni_pending_customer_text
+            pending_signal = self._omni_pending_signal
+        if not should_fallback or self.stop_event.is_set() or self._speech_is_obsolete(generation):
+            return
+        fallback_text = self._local_omni_timeout_reply(pending_text, pending_signal)
+        if self._omni:
+            try:
+                self._omni.cancel_response()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("omni_cancel_error", callId=self.call_id, error=str(exc), source="first_audio_watchdog")
+        self._mark_speech_job_finished()
+        with self.generation_lock:
+            if self.speech_generation != generation:
+                return
+            self.speech_generation += 1
+            fallback_generation = self.speech_generation
+        self.interrupt_event.set()
+        self.logger.emit(
+            "omni_response_slow_fallback",
+            callId=self.call_id,
+            responseId=response_id,
+            text=pending_text,
+            signal=pending_signal,
+            fallbackText=fallback_text,
+            deadlineMs=int(OMNI_FIRST_AUDIO_DEADLINE_SECONDS * 1000),
+            generation=fallback_generation,
+            detail="实时模型超过首音频预算，已切到本地短句，避免电话里长时间沉默。",
+        )
+        threading.Thread(
+            target=self._speak,
+            args=(fallback_text, "omni_response_slow_fallback", fallback_generation),
+            daemon=True,
+        ).start()
+
+    def _local_omni_timeout_reply(self, pending_text: str, pending_signal: str) -> str:
+        signal = (pending_signal or "").strip()
+        text = (pending_text or "").strip()
+        if signal == "call_screening":
+            return "您好，我这边做视频号团购到店获客，来电想确认门店微信同城曝光合作，麻烦转接负责人，谢谢。"
+        if signal in {"identity_handoff", "human_greeting"}:
+            return "您好，我在。我是做视频号团购到店获客的，来电是确认微信同城曝光这块。"
+        if signal == "audio_issue":
+            return "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
+        if signal == "repetition_complaint":
+            return "明白，我不重复。您想听费用、效果，还是和美团区别？"
+        if signal == "direct_answer_only":
+            return "明白，不推资料。您直接问费用、效果或流程，我按问题答。"
+        if signal in {"terminal_close", "rejection"}:
+            return "好的，不打扰了，再见。"
+        if any(keyword in text for keyword in ["费用", "价格", "收费", "要钱", "付费"]):
+            return "这是付费服务，费用看套餐和投放节奏，不合适不建议做。"
+        if any(keyword in text for keyword in ["美团", "抖音", "大众点评"]):
+            return "美团偏搜索成交，视频号偏微信同城曝光和私域沉淀，是补充。"
+        if any(keyword in text for keyword in ["效果", "客流", "到店", "保证", "保底"]):
+            return "效果不能空口保底，只能先测曝光、咨询和到店数据。"
+        return OMNI_NO_AUDIO_FALLBACK_TEXT
 
     def append_omni_transcript_delta(self, delta: str) -> None:
         if not delta:
