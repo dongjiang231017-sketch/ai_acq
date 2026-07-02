@@ -42,6 +42,8 @@ type AiAcqDesktopDmAction = {
   sent: boolean;
   sendClicked?: boolean;
   sentConfirmed?: boolean;
+  receiptStatus?: string;
+  receiptMessage?: string;
   outgoingContent?: string;
   message: string;
   url?: string;
@@ -137,6 +139,13 @@ interface Window {
       sendIntervalSeconds?: number;
       dmMessage?: string;
       allowSend?: boolean;
+      selectors?: {
+        riskCheckSelector?: string;
+        messageButtonSelector?: string;
+        inputSelector?: string;
+        sendButtonSelector?: string;
+        sentSuccessSelector?: string;
+      };
     }) => Promise<AiAcqDesktopCommentAutomationResult>;
     getAsteriskSidecarStatus: () => Promise<AiAcqDesktopAsteriskStatus>;
     startAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;

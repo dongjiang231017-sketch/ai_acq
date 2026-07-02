@@ -531,6 +531,8 @@ export type BrowserDmAction = {
   sent: boolean;
   sendClicked?: boolean;
   sentConfirmed?: boolean;
+  receiptStatus?: string;
+  receiptMessage?: string;
   outgoingContent?: string;
   message?: string;
   url?: string;
@@ -546,6 +548,57 @@ export type BrowserDmActionRecordResult = {
   failed: number;
   leadIds: string[];
   conversationIds: string[];
+  message: string;
+};
+
+export type CommentAutomationQueueItem = {
+  sourceId: string;
+  sourceName: string;
+  platform: string;
+  sourceType: string;
+  keyword: string;
+  videoUrl: string;
+  syncStatus: string;
+  lastSyncAt?: string | null;
+  nextRunAt?: string | null;
+  due: boolean;
+  status: string;
+  blockedReason: string;
+  nextAccountId?: string | null;
+  nextAccountName?: string | null;
+  eligibleAccountCount: number;
+  remainingQuota: number;
+  riskStatus: string;
+  selectorProfile: string;
+  liveSendSupported: boolean;
+};
+
+export type CommentAutomationQueueOverview = {
+  items: CommentAutomationQueueItem[];
+  dueCount: number;
+  readyCount: number;
+  pausedCount: number;
+  blockedCount: number;
+  message: string;
+};
+
+export type CommentAutomationRiskReport = {
+  platform?: string;
+  accountId?: string | null;
+  status: string;
+  reason?: string;
+  step?: string;
+  url?: string;
+  rawPayload?: Record<string, unknown> | null;
+};
+
+export type CommentAutomationRiskResult = {
+  sourceId: string;
+  accountId?: string | null;
+  paused: boolean;
+  sourceStatus: string;
+  accountStatus?: string | null;
+  riskStatus?: string | null;
   message: string;
 };
 
@@ -1108,6 +1161,17 @@ export const api = {
       conversationId ? `/direct-messages/messages?conversationId=${encodeURIComponent(conversationId)}` : "/direct-messages/messages",
     ),
   commentInterceptOverview: () => request<CommentInterceptOverview>("/direct-messages/intercepts/overview"),
+  commentInterceptAutomationQueue: () =>
+    request<CommentAutomationQueueOverview>("/direct-messages/intercepts/automation/queue"),
+  preflightCommentInterceptAutomation: (sourceId: string) =>
+    request<CommentAutomationQueueItem>(`/direct-messages/intercepts/sources/${sourceId}/automation-preflight`, {
+      method: "POST",
+    }),
+  reportCommentInterceptAutomationRisk: (sourceId: string, payload: CommentAutomationRiskReport) =>
+    request<CommentAutomationRiskResult>(`/direct-messages/intercepts/sources/${sourceId}/automation-risk`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   commentInterceptSources: () => request<CommentInterceptSource[]>("/direct-messages/intercepts/sources"),
   createCommentInterceptSource: (source: {
     platform: string;

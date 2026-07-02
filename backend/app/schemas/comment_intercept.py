@@ -95,6 +95,8 @@ class BrowserDmAction(BaseModel):
     sent: bool = False
     send_clicked: Annotated[bool, Field(alias="sendClicked")] = False
     sent_confirmed: Annotated[bool, Field(alias="sentConfirmed")] = False
+    receipt_status: Annotated[str, Field(alias="receiptStatus", max_length=60)] = ""
+    receipt_message: Annotated[str, Field(alias="receiptMessage", max_length=500)] = ""
     outgoing_content: Annotated[str, Field(alias="outgoingContent")] = ""
     message: str = Field(default="", max_length=500)
     url: str = ""
@@ -121,6 +123,65 @@ class BrowserDmActionRecordResult(BaseModel):
     failed: int
     lead_ids: Annotated[list[str], Field(alias="leadIds")]
     conversation_ids: Annotated[list[str], Field(alias="conversationIds")]
+    message: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CommentAutomationQueueItem(BaseModel):
+    source_id: Annotated[str, Field(alias="sourceId")]
+    source_name: Annotated[str, Field(alias="sourceName")]
+    platform: str
+    source_type: Annotated[str, Field(alias="sourceType")]
+    keyword: str
+    video_url: Annotated[str, Field(alias="videoUrl")]
+    sync_status: Annotated[str, Field(alias="syncStatus")]
+    last_sync_at: Annotated[datetime | None, Field(alias="lastSyncAt")]
+    next_run_at: Annotated[datetime | None, Field(alias="nextRunAt")]
+    due: bool
+    status: str
+    blocked_reason: Annotated[str, Field(alias="blockedReason")]
+    next_account_id: Annotated[str | None, Field(alias="nextAccountId")]
+    next_account_name: Annotated[str | None, Field(alias="nextAccountName")]
+    eligible_account_count: Annotated[int, Field(alias="eligibleAccountCount")]
+    remaining_quota: Annotated[int, Field(alias="remainingQuota")]
+    risk_status: Annotated[str, Field(alias="riskStatus")]
+    selector_profile: Annotated[str, Field(alias="selectorProfile")]
+    live_send_supported: Annotated[bool, Field(alias="liveSendSupported")]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CommentAutomationQueueOverview(BaseModel):
+    items: list[CommentAutomationQueueItem]
+    due_count: Annotated[int, Field(alias="dueCount")]
+    ready_count: Annotated[int, Field(alias="readyCount")]
+    paused_count: Annotated[int, Field(alias="pausedCount")]
+    blocked_count: Annotated[int, Field(alias="blockedCount")]
+    message: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CommentAutomationRiskReport(BaseModel):
+    platform: str = ""
+    account_id: Annotated[str | None, Field(alias="accountId")] = None
+    status: str = Field(min_length=1, max_length=60)
+    reason: str = Field(default="", max_length=500)
+    step: str = Field(default="", max_length=80)
+    url: str = ""
+    raw_payload: Annotated[dict[str, Any] | None, Field(alias="rawPayload")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CommentAutomationRiskResult(BaseModel):
+    source_id: Annotated[str, Field(alias="sourceId")]
+    account_id: Annotated[str | None, Field(alias="accountId")]
+    paused: bool
+    source_status: Annotated[str, Field(alias="sourceStatus")]
+    account_status: Annotated[str | None, Field(alias="accountStatus")]
+    risk_status: Annotated[str | None, Field(alias="riskStatus")]
     message: str
 
     model_config = ConfigDict(populate_by_name=True)

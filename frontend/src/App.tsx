@@ -30,6 +30,8 @@ import {
   ChannelReport,
   BrowserDmAction,
   BrowserCapturedComment,
+  CommentAutomationQueueItem,
+  CommentAutomationQueueOverview,
   CommentConvertResult,
   CommentInterceptOverview,
   CommentInterceptSource,
@@ -98,6 +100,7 @@ const fallbackModules: ModuleSummary[] = [
 
 type DmLoginWebviewElement = HTMLElement & {
   getWebContentsId?: () => number;
+  isLoading?: () => boolean;
   reload?: () => void;
 };
 
@@ -555,6 +558,15 @@ const fallbackCommentInterceptOverview: CommentInterceptOverview = {
   convertedLeads: 0,
 };
 
+const fallbackCommentAutomationQueue: CommentAutomationQueueOverview = {
+  items: [],
+  dueCount: 0,
+  readyCount: 0,
+  pausedCount: 0,
+  blockedCount: 0,
+  message: "自动化队列尚未加载。",
+};
+
 const fallbackCommentSources: CommentInterceptSource[] = [];
 const fallbackSocialComments: SocialComment[] = [];
 
@@ -570,6 +582,14 @@ const loginCapablePlatforms = ["美团", "饿了么", "抖音", "视频号"] as 
 const commentCapturePlatforms = ["抖音", "视频号"] as const;
 const unsupportedDmPlatformTips: Record<string, string> = {
   视频号: "视频号助手当前不支持主动私信商家，可改用外呼或其他合规触达方式。",
+};
+
+const defaultCommentSelectorDraft = {
+  riskCheckSelector: "",
+  messageButtonSelector: "",
+  inputSelector: "",
+  sendButtonSelector: "",
+  sentSuccessSelector: "",
 };
 
 function isSupportedDmPlatform(platform: string) {
@@ -641,6 +661,28 @@ function platformLoginEntryLabel(config: DmPlatformConfig) {
   if (config.homeUrl?.trim()) return "客户端内置个人号入口";
   if (platformLoginUrls[config.platform]) return "客户端内置个人号入口";
   return "客户端内置个人号入口";
+}
+
+function selectorDraftFromConfig(config?: DmPlatformConfig | null) {
+  return {
+    riskCheckSelector: config?.riskCheckSelector ?? "",
+    messageButtonSelector: config?.messageButtonSelector ?? "",
+    inputSelector: config?.inputSelector ?? "",
+    sendButtonSelector: config?.sendButtonSelector ?? "",
+    sentSuccessSelector: config?.sentSuccessSelector ?? "",
+  };
+}
+
+function commentAutomationStatusText(status: string) {
+  if (status === "ready") return "可执行";
+  if (status === "waiting") return "等待";
+  if (status === "paused") return "已暂停";
+  if (status === "blocked") return "阻塞";
+  return status || "未知";
+}
+
+function compactDateTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "现在";
 }
 
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
@@ -1404,6 +1446,14 @@ function App() {
   const [isCapturingBrowserComments, setIsCapturingBrowserComments] = useState(false);
   const [isRunningCommentAutomation, setIsRunningCommentAutomation] = useState(false);
   const [lastCommentAutomationResult, setLastCommentAutomationResult] = useState<AiAcqDesktopCommentAutomationResult | null>(null);
+  const [commentAutomationQueue, setCommentAutomationQueue] =
+    useState<CommentAutomationQueueOverview>(fallbackCommentAutomationQueue);
+  const [isLoadingCommentAutomationQueue, setIsLoadingCommentAutomationQueue] = useState(false);
+  const [isDispatchingCommentQueue, setIsDispatchingCommentQueue] = useState(false);
+  const [isCommentSchedulerEnabled, setIsCommentSchedulerEnabled] = useState(false);
+  const [commentSchedulerIntervalMinutes, setCommentSchedulerIntervalMinutes] = useState(10);
+  const [commentSelectorDraft, setCommentSelectorDraft] = useState(defaultCommentSelectorDraft);
+  const [isSavingCommentSelectors, setIsSavingCommentSelectors] = useState(false);
   const [isConvertingComments, setIsConvertingComments] = useState(false);
   const [lastCommentConvertResult, setLastCommentConvertResult] = useState<CommentConvertResult | null>(null);
   const [intentOverview, setIntentOverview] = useState<IntentOverview>(fallbackIntentOverview);
@@ -1675,6 +1725,12 @@ function App() {
     personalLoginUrl(activeCommentCaptureAccount?.platform ?? "", activeCommentCaptureConfig?.homeUrl) ||
     personalLoginUrl(activeCommentCaptureAccount?.platform ?? "", activeCommentCaptureAccount ? platformLoginUrls[activeCommentCaptureAccount.platform] : "") ||
     "";
+  const activeCommentQueueItem = activeBrowserCaptureSource
+    ? commentAutomationQueue.items.find((item) => item.sourceId === activeBrowserCaptureSource.id)
+    : undefined;
+  const nextReadyCommentQueueItem =
+    commentAutomationQueue.items.find((item) => item.status === "ready" && item.due) ??
+    commentAutomationQueue.items.find((item) => item.status === "ready");
   const activeLoginEntryText = activeLoginAccount
     ? activeLoginConfig
       ? platformLoginEntryLabel(activeLoginConfig)
@@ -1863,6 +1919,33 @@ function App() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [activeModule, activeOutboundTab, isTestingTelephony]);
+
+  useEffect(() => {
+    if (activeModule !== "dm" || activeDmTab !== "评论截流") return;
+    void refreshCommentAutomationQueue();
+  }, [activeDmTab, activeModule]);
+
+  useEffect(() => {
+    setCommentSelectorDraft(selectorDraftFromConfig(activeCommentCaptureConfig));
+  }, [activeCommentCaptureConfig?.id, activeCommentCaptureAccount?.platform]);
+
+  useEffect(() => {
+    if (!isCommentSchedulerEnabled || activeModule !== "dm" || activeDmTab !== "评论截流") return;
+    const intervalMs = Math.max(1, Number(commentSchedulerIntervalMinutes) || 1) * 60 * 1000;
+    const timer = window.setInterval(() => {
+      if (!isRunningCommentAutomation && !isDispatchingCommentQueue) {
+        void dispatchNextCommentAutomation("scheduled");
+      }
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [
+    activeDmTab,
+    activeModule,
+    commentSchedulerIntervalMinutes,
+    isCommentSchedulerEnabled,
+    isDispatchingCommentQueue,
+    isRunningCommentAutomation,
+  ]);
 
   useEffect(() => {
     if (activeModule !== "dm" || activeDmTab !== "评论截流") return;
@@ -2429,6 +2512,148 @@ function App() {
     return commentsData;
   }
 
+  async function refreshCommentAutomationQueue() {
+    setIsLoadingCommentAutomationQueue(true);
+    try {
+      const queue = await api.commentInterceptAutomationQueue();
+      setCommentAutomationQueue(queue);
+      return queue;
+    } catch (error) {
+      setCommentInterceptMessage(error instanceof Error ? error.message : "自动化队列刷新失败");
+      return commentAutomationQueue;
+    } finally {
+      setIsLoadingCommentAutomationQueue(false);
+    }
+  }
+
+  function selectorsForCommentAutomation(platform: string) {
+    const draftPlatform = activeCommentCaptureAccount?.platform ?? commentSourceForm.platform;
+    const config = dmPlatformConfigs.find((item) => item.platform === platform);
+    const source = platform === draftPlatform ? commentSelectorDraft : selectorDraftFromConfig(config);
+    return {
+      riskCheckSelector: source.riskCheckSelector.trim(),
+      messageButtonSelector: source.messageButtonSelector.trim(),
+      inputSelector: source.inputSelector.trim(),
+      sendButtonSelector: source.sendButtonSelector.trim(),
+      sentSuccessSelector: source.sentSuccessSelector.trim(),
+    };
+  }
+
+  async function saveCommentSelectorDraft() {
+    const platform = activeCommentCaptureAccount?.platform ?? commentSourceForm.platform;
+    if (!platform) {
+      setCommentInterceptMessage("请选择一个评论截流平台后再保存选择器。");
+      return;
+    }
+    setIsSavingCommentSelectors(true);
+    try {
+      const realConfig = dmPlatformConfigs.find((config) => config.platform === platform && !config.id.startsWith("dm_platform_"));
+      const baseConfig = dmPlatformConfigs.find((config) => config.platform === platform);
+      const payload = {
+        platform,
+        homeUrl: baseConfig?.homeUrl ?? platformLoginUrls[platform] ?? "",
+        inboxUrl: baseConfig?.inboxUrl ?? "",
+        merchantSearchUrl: baseConfig?.merchantSearchUrl ?? "",
+        loginCheckSelector: baseConfig?.loginCheckSelector ?? "",
+        riskCheckSelector: commentSelectorDraft.riskCheckSelector.trim(),
+        merchantLinkSelector: baseConfig?.merchantLinkSelector ?? "",
+        messageButtonSelector: commentSelectorDraft.messageButtonSelector.trim(),
+        inputSelector: commentSelectorDraft.inputSelector.trim(),
+        sendButtonSelector: commentSelectorDraft.sendButtonSelector.trim(),
+        sentSuccessSelector: commentSelectorDraft.sentSuccessSelector.trim(),
+        unreadSelector: baseConfig?.unreadSelector ?? "",
+        conversationItemSelector: baseConfig?.conversationItemSelector ?? "",
+        conversationTitleSelector: baseConfig?.conversationTitleSelector ?? "",
+        messageTextSelector: baseConfig?.messageTextSelector ?? "",
+        enabled: true,
+      };
+      const saved = realConfig
+        ? await api.updateDmPlatformConfig(realConfig.id, payload)
+        : await api.createDmPlatformConfig(payload);
+      setDmPlatformConfigs((current) => [saved, ...current.filter((config) => config.id !== saved.id && config.platform !== platform)]);
+      setCommentInterceptMessage(`${platform}选择器配置已保存，下一次自动化会优先使用这些选择器。`);
+      await refreshCommentAutomationQueue();
+    } catch (error) {
+      setCommentInterceptMessage(error instanceof Error ? error.message : "选择器配置保存失败");
+    } finally {
+      setIsSavingCommentSelectors(false);
+    }
+  }
+
+  async function pauseCommentAutomationForLoginRequired(source: CommentInterceptSource, account: DmAccount, reason: string) {
+    const result = await api.reportCommentInterceptAutomationRisk(source.id, {
+      platform: source.platform,
+      accountId: account.id,
+      status: "login-required",
+      reason,
+      step: "account_switch",
+    });
+    await refreshCommentAutomationQueue();
+    return result.message;
+  }
+
+  async function reportCommentAutomationRiskFromResult(
+    source: CommentInterceptSource,
+    accountId: string | null,
+    automation: AiAcqDesktopCommentAutomationResult,
+  ) {
+    if (automation.dmActions.length === 0) return "";
+    const blocked = automation.dmActions.find((action) => action.status === "send-blocked" || action.receiptStatus === "blocked");
+    const allSelectorMissing = automation.dmActions.every((action) => ["no-input", "send-button-missing"].includes(action.status));
+    const selectorMissing = allSelectorMissing ? automation.dmActions[0] : undefined;
+    const action = blocked ?? selectorMissing;
+    if (!action) return "";
+
+    const status = blocked ? "send-blocked" : action.status === "send-button-missing" ? "send-button-missing" : "no-input";
+    const result = await api.reportCommentInterceptAutomationRisk(source.id, {
+      platform: source.platform,
+      accountId,
+      status,
+      reason: action.receiptMessage || action.message || action.status,
+      step: "prepare_dm",
+      url: action.url,
+      rawPayload: {
+        authorName: action.authorName,
+        profileUrl: action.profileUrl,
+        status: action.status,
+        receiptStatus: action.receiptStatus,
+      },
+    });
+    await refreshCommentAutomationQueue();
+    return result.message;
+  }
+
+  async function dispatchNextCommentAutomation(trigger: "manual" | "scheduled" = "manual") {
+    if (isDispatchingCommentQueue || isRunningCommentAutomation || isCapturingBrowserComments) return;
+    setIsDispatchingCommentQueue(true);
+    try {
+      const queue = await refreshCommentAutomationQueue();
+      const nextItem =
+        queue.items.find((item) => item.status === "ready" && item.due) ??
+        queue.items.find((item) => item.status === "ready");
+      if (!nextItem) {
+        setCommentInterceptMessage(queue.message || "当前没有可执行的评论截流队列任务。");
+        return;
+      }
+      let source = commentSources.find((item) => item.id === nextItem.sourceId);
+      if (!source) {
+        const sources = await api.commentInterceptSources();
+        setCommentSources(sources);
+        source = sources.find((item) => item.id === nextItem.sourceId);
+      }
+      if (!source) {
+        setCommentInterceptMessage("队列中的评论截流来源不存在，请刷新后重试。");
+        return;
+      }
+      setCommentInterceptMessage(
+        `${trigger === "scheduled" ? "定时队列" : "手动队列"}选择「${source.name}」，账号 ${nextItem.nextAccountName ?? "待分配"}。`,
+      );
+      await runCommentAutomationForSource(source.id, source, nextItem.nextAccountId ?? undefined);
+    } finally {
+      setIsDispatchingCommentQueue(false);
+    }
+  }
+
   function selectHighIntentCommentRows(commentsData: SocialComment[]) {
     const newHighIntentIds = commentsData
       .filter((comment) => ["A", "B"].includes(comment.intentLevel) && comment.status !== "已转线索")
@@ -2452,7 +2677,12 @@ function App() {
     }
   }
 
-  async function prepareCommentCaptureWebview(source: CommentInterceptSource, actionLabel: string) {
+  async function prepareCommentCaptureWebview(
+    source: CommentInterceptSource,
+    actionLabel: string,
+    preferredAccountId?: string | null,
+    pauseOnLoginFailure = false,
+  ) {
     if (!source) {
       setCommentInterceptMessage("评论截流来源不存在，请刷新后重试。");
       return null;
@@ -2462,10 +2692,14 @@ function App() {
       return null;
     }
 
-    const captureAccount =
-      activeLoginAccount?.platform === source.platform
+    const preferredAccount = preferredAccountId
+      ? commentCaptureAccounts.find((account) => account.id === preferredAccountId && account.platform === source.platform)
+      : undefined;
+    let captureAccount =
+      preferredAccount ??
+      (activeLoginAccount?.platform === source.platform
         ? activeLoginAccount
-        : commentCaptureAccounts.find((account) => account.platform === source.platform);
+        : commentCaptureAccounts.find((account) => account.platform === source.platform));
     if (!captureAccount) {
       setCommentInterceptMessage(`请先在账号管理里添加一个${source.platform}个人号，再使用内置登录页采集评论。`);
       setActiveDmTab("账号管理");
@@ -2478,17 +2712,51 @@ function App() {
       return null;
     }
 
-    if (activeLoginAccount?.id !== captureAccount.id) {
-      await openRealDmLogin(captureAccount.id);
-      setCommentInterceptMessage(`已切换到${captureAccount.platform}内置登录页。请完成登录后再次点击“${actionLabel}”。`);
-      return null;
+    const currentWebview = nativeLoginWebviewRef.current;
+    const currentWebContentsId =
+      currentWebview?.getAttribute("data-account-id") === captureAccount.id ? currentWebview.getWebContentsId?.() ?? 0 : 0;
+    let webContentsId = currentWebContentsId;
+
+    if (!webContentsId) {
+      setCommentInterceptMessage(`正在自动切换到${captureAccount.accountName}，加载该账号的内置登录页...`);
+      const session = await openRealDmLogin(captureAccount.id);
+      if (!session) return null;
+      try {
+        const ready = await waitForNativeLoginWebview(captureAccount.id, 20000);
+        webContentsId = ready.webContentsId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "账号内置页加载超时";
+        if (pauseOnLoginFailure) {
+          const riskMessage = await pauseCommentAutomationForLoginRequired(source, captureAccount, message).catch(() => "");
+          setCommentInterceptMessage(`${captureAccount.accountName}切换失败，自动化已暂停。${riskMessage || message}`);
+        } else {
+          setCommentInterceptMessage(`${captureAccount.accountName}内置页未就绪：${message}`);
+        }
+        return null;
+      }
     }
 
-    const webview = nativeLoginWebviewRef.current;
-    const webContentsId = webview?.getWebContentsId?.();
-    if (!dmLoginEntryReady || !webContentsId) {
-      await openRealDmLogin(captureAccount.id);
-      setCommentInterceptMessage(`已打开${captureAccount.platform}内置登录页。请登录后再次点击“${actionLabel}”。`);
+    try {
+      const updatedAccount = await inspectEmbeddedDmLoginAccount(captureAccount, webContentsId, actionLabel);
+      captureAccount = updatedAccount;
+      if (!isDmLoginReadyStatus(updatedAccount.sessionStatus)) {
+        const reason = updatedAccount.lastError || `${updatedAccount.accountName}未检测到真实平台登录态`;
+        if (pauseOnLoginFailure) {
+          const riskMessage = await pauseCommentAutomationForLoginRequired(source, updatedAccount, reason).catch(() => "");
+          setCommentInterceptMessage(`${updatedAccount.accountName}未登录，自动化已暂停。${riskMessage || reason}`);
+        } else {
+          setCommentInterceptMessage(reason);
+        }
+        return null;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "自动检测账号登录态失败";
+      if (pauseOnLoginFailure) {
+        const riskMessage = await pauseCommentAutomationForLoginRequired(source, captureAccount, message).catch(() => "");
+        setCommentInterceptMessage(`${captureAccount.accountName}登录态检测失败，自动化已暂停。${riskMessage || message}`);
+      } else {
+        setCommentInterceptMessage(message);
+      }
       return null;
     }
 
@@ -2532,13 +2800,33 @@ function App() {
     }
   }
 
-  async function runCommentAutomationForSource(sourceId: string, sourceOverride?: CommentInterceptSource) {
+  async function runCommentAutomationForSource(
+    sourceId: string,
+    sourceOverride?: CommentInterceptSource,
+    preferredAccountId?: string | null,
+  ) {
     const source = sourceOverride ?? commentSources.find((item) => item.id === sourceId);
     if (!source) {
       setCommentInterceptMessage("评论截流来源不存在，请刷新后重试。");
       return;
     }
-    const prepared = await prepareCommentCaptureWebview(source, "自动搜索并执行");
+    let queueItem: CommentAutomationQueueItem | null = null;
+    try {
+      queueItem = await api.preflightCommentInterceptAutomation(source.id);
+      setCommentAutomationQueue((current) => ({
+        ...current,
+        items: [queueItem as CommentAutomationQueueItem, ...current.items.filter((item) => item.sourceId !== source.id)],
+      }));
+    } catch (error) {
+      setCommentInterceptMessage(error instanceof Error ? error.message : "自动化预检失败");
+      return;
+    }
+    if (!queueItem) return;
+    if (["blocked", "paused"].includes(queueItem.status)) {
+      setCommentInterceptMessage(`「${source.name}」暂不能自动执行：${queueItem.blockedReason || commentAutomationStatusText(queueItem.status)}`);
+      return;
+    }
+    const prepared = await prepareCommentCaptureWebview(source, "自动搜索并执行", preferredAccountId ?? queueItem.nextAccountId, true);
     if (!prepared) return;
     const { captureAccount, webContentsId } = prepared;
 
@@ -2593,6 +2881,7 @@ function App() {
         sendIntervalSeconds,
         dmMessage: commentAutomationForm.dmMessage,
         allowSend,
+        selectors: selectorsForCommentAutomation(source.platform),
       });
       setLastCommentAutomationResult(automation);
       if (automation.error) {
@@ -2620,9 +2909,15 @@ function App() {
               sent: action.sent,
               sendClicked: Boolean(action.sendClicked),
               sentConfirmed: Boolean(action.sentConfirmed),
+              receiptStatus: action.receiptStatus || "",
+              receiptMessage: action.receiptMessage || "",
               outgoingContent: action.outgoingContent || commentAutomationForm.dmMessage,
               message: action.message,
               url: action.url,
+              rawPayload: {
+                receiptStatus: action.receiptStatus || "",
+                receiptMessage: action.receiptMessage || "",
+              },
             }),
           ),
         });
@@ -2642,13 +2937,16 @@ function App() {
         setDmAccounts(accountData);
         setTasks(taskData);
       }
+      const riskMessage = await reportCommentAutomationRiskFromResult(source, captureAccount.id, automation);
+      if (!riskMessage) await refreshCommentAutomationQueue();
       const draftCount = automation.dmActions.filter((action) => action.status === "draft-ready").length;
       const sentCount = automation.dmActions.filter((action) => action.sent).length;
+      const receiptUnconfirmedCount = automation.dmActions.filter((action) => action.receiptStatus === "unconfirmed").length;
       const failedCount = automation.dmActions.filter((action) =>
         ["failed", "no-input", "send-button-missing", "send-blocked"].includes(action.status),
       ).length;
       setCommentInterceptMessage(
-        `${result.message} 自动化完成：${automation.steps.length} 步，处理作者 ${automation.dmActions.length} 个，草稿 ${draftCount} 条，已发送 ${sentCount} 条，异常 ${failedCount} 个。${recordMessage ? ` ${recordMessage}` : ""}`,
+        `${result.message} 自动化完成：${automation.steps.length} 步，处理作者 ${automation.dmActions.length} 个，草稿 ${draftCount} 条，已发送 ${sentCount} 条，回执未确认 ${receiptUnconfirmedCount} 条，异常 ${failedCount} 个。${recordMessage ? ` ${recordMessage}` : ""}${riskMessage ? ` ${riskMessage}` : ""}`,
       );
     } catch (error) {
       await refreshCommentInterceptData().catch(() => undefined);
@@ -2836,6 +3134,28 @@ function App() {
     }, 80);
   }
 
+  function waitForNativeLoginWebview(accountId: string, timeoutMs = 15000) {
+    return new Promise<{ webview: DmLoginWebviewElement; webContentsId: number }>((resolve, reject) => {
+      const startedAt = Date.now();
+      const poll = () => {
+        const webview = nativeLoginWebviewRef.current;
+        const webContentsId = webview?.getWebContentsId?.() ?? 0;
+        const matchedAccount = webview?.getAttribute("data-account-id") === accountId;
+        const isLoading = Boolean(webview?.isLoading?.());
+        if (matchedAccount && webContentsId > 0 && !isLoading) {
+          resolve({ webview, webContentsId });
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          reject(new Error("账号内置页加载超时，请检查客户端 WebView 或平台入口。"));
+          return;
+        }
+        window.setTimeout(poll, 250);
+      };
+      poll();
+    });
+  }
+
   function selectDmLoginAccount(accountId: string) {
     setSelectedDmLoginAccountId(accountId);
     if (dmLoginSession?.accountId !== accountId) {
@@ -2858,7 +3178,7 @@ function App() {
     if (!isDesktopClient) {
       setDmLoginMessage("这里是网页预览，不能登录。请打开桌面客户端；登录入口会出现在同一个内置登录工作台区域。");
       revealDmLoginWorkbench();
-      return;
+      return null;
     }
     setIsPreparingDmLogin(true);
     setDmLoginMessage("正在加载客户端内置登录页...");
@@ -2883,11 +3203,32 @@ function App() {
             : account,
         ),
       );
+      return session;
     } catch (error) {
       setDmLoginMessage(error instanceof Error ? error.message : "加载客户端内置登录页失败");
+      return null;
     } finally {
       setIsPreparingDmLogin(false);
     }
+  }
+
+  async function inspectEmbeddedDmLoginAccount(account: DmAccount, webContentsId: number, contextLabel: string) {
+    if (!window.aiAcqDesktop?.inspectDmLogin) {
+      throw new Error("桌面客户端未开放登录态检测能力。");
+    }
+    setDmLoginMessage(`正在自动检测${account.accountName}登录态...`);
+    const evidence: DmDesktopLoginEvidence = await window.aiAcqDesktop.inspectDmLogin({
+      webContentsId,
+      platform: account.platform,
+    });
+    const updated = await api.completeDmDesktopLoginCheck(account.id, evidence);
+    setDmAccounts((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    setDmLoginMessage(
+      isDmLoginReadyStatus(updated.sessionStatus)
+        ? `${contextLabel}：${updated.accountName} 登录态检测通过。`
+        : updated.lastError || `${contextLabel}：${updated.accountName} 未检测到登录态。`,
+    );
+    return updated;
   }
 
   async function preflightDmAccount(accountId: string) {
@@ -5797,6 +6138,128 @@ function App() {
                       <span>允许真实点击发送，执行前还会二次确认</span>
                     </label>
                   </div>
+                  <div className="comment-queue-panel">
+                    <div className="comment-queue-toolbar">
+                      <div>
+                        <strong>本机自动化队列</strong>
+                        <small>
+                          到期 {commentAutomationQueue.dueCount} · 可执行 {commentAutomationQueue.readyCount} · 暂停{" "}
+                          {commentAutomationQueue.pausedCount} · 阻塞 {commentAutomationQueue.blockedCount}
+                        </small>
+                      </div>
+                      <div className="comment-queue-actions">
+                        <label className="mini-toggle">
+                          <input
+                            checked={isCommentSchedulerEnabled}
+                            onChange={(event) => setIsCommentSchedulerEnabled(event.target.checked)}
+                            type="checkbox"
+                          />
+                          <span>定时队列</span>
+                        </label>
+                        <input
+                          aria-label="调度间隔分钟"
+                          className="mini-number-input"
+                          min={1}
+                          max={240}
+                          type="number"
+                          value={commentSchedulerIntervalMinutes}
+                          onChange={(event) => setCommentSchedulerIntervalMinutes(Number(event.target.value))}
+                        />
+                        <button
+                          className="row-action"
+                          disabled={isLoadingCommentAutomationQueue}
+                          onClick={() => void refreshCommentAutomationQueue()}
+                          type="button"
+                        >
+                          <RefreshCw size={14} />
+                          {isLoadingCommentAutomationQueue ? "刷新中" : "刷新队列"}
+                        </button>
+                        <button
+                          className="row-action is-primary"
+                          disabled={!isDesktopClient || !nextReadyCommentQueueItem || isDispatchingCommentQueue || isRunningCommentAutomation}
+                          onClick={() => void dispatchNextCommentAutomation("manual")}
+                          type="button"
+                        >
+                          <Clock3 size={14} />
+                          {isDispatchingCommentQueue ? "调度中" : "运行下一条"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="comment-queue-list">
+                      {commentAutomationQueue.items.length === 0 && <div className="empty-state compact">队列暂无来源。</div>}
+                      {commentAutomationQueue.items.slice(0, 4).map((item) => (
+                        <div className={`comment-queue-row is-${item.status}`} key={item.sourceId}>
+                          <div>
+                            <strong>{item.sourceName}</strong>
+                            <small>
+                              {item.platform} · {item.sourceType} · 下次 {compactDateTime(item.nextRunAt)}
+                            </small>
+                          </div>
+                          <span className="queue-status">{commentAutomationStatusText(item.status)}</span>
+                          <small>{item.nextAccountName ?? "无可用账号"}</small>
+                          <small>{item.blockedReason || `选择器 ${item.selectorProfile}`}</small>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="comment-selector-panel">
+                    <div className="section-caption">
+                      <div>
+                        <strong>{activeCommentCaptureAccount?.platform ?? commentSourceForm.platform} 选择器快速修复</strong>
+                        <small>
+                          {activeCommentQueueItem
+                            ? `${commentAutomationStatusText(activeCommentQueueItem.status)} · ${activeCommentQueueItem.selectorProfile}`
+                            : "当前平台自动化选择器"}
+                        </small>
+                      </div>
+                      <button
+                        className="row-action is-primary"
+                        disabled={isSavingCommentSelectors}
+                        onClick={() => void saveCommentSelectorDraft()}
+                        type="button"
+                      >
+                        <CheckCircle2 size={14} />
+                        {isSavingCommentSelectors ? "保存中" : "保存选择器"}
+                      </button>
+                    </div>
+                    <div className="comment-selector-grid">
+                      <label>
+                        私信按钮
+                        <input
+                          value={commentSelectorDraft.messageButtonSelector}
+                          onChange={(event) => setCommentSelectorDraft({ ...commentSelectorDraft, messageButtonSelector: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        输入框
+                        <input
+                          value={commentSelectorDraft.inputSelector}
+                          onChange={(event) => setCommentSelectorDraft({ ...commentSelectorDraft, inputSelector: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        发送按钮
+                        <input
+                          value={commentSelectorDraft.sendButtonSelector}
+                          onChange={(event) => setCommentSelectorDraft({ ...commentSelectorDraft, sendButtonSelector: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        成功回执
+                        <input
+                          value={commentSelectorDraft.sentSuccessSelector}
+                          onChange={(event) => setCommentSelectorDraft({ ...commentSelectorDraft, sentSuccessSelector: event.target.value })}
+                        />
+                      </label>
+                      <label className="wide">
+                        风控提示
+                        <input
+                          value={commentSelectorDraft.riskCheckSelector}
+                          onChange={(event) => setCommentSelectorDraft({ ...commentSelectorDraft, riskCheckSelector: event.target.value })}
+                        />
+                      </label>
+                    </div>
+                  </div>
                   <div className="comment-capture-shell">
                     <aside className="login-account-rail comment-capture-account-rail">
                       {commentCaptureAccounts.length === 0 && <div className="empty-state compact">暂无抖音/视频号个人号。</div>}
@@ -5889,7 +6352,8 @@ function App() {
                             ))}
                             {lastCommentAutomationResult.dmActions.slice(0, 4).map((action) => (
                               <span className={`automation-step is-${action.status}`} key={`${action.profileUrl}-${action.status}`}>
-                                {action.authorName}：{action.message || action.status}
+                                {action.authorName}：{action.receiptStatus ? `${action.receiptStatus} · ` : ""}
+                                {action.message || action.status}
                               </span>
                             ))}
                           </div>

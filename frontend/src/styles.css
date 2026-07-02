@@ -1400,6 +1400,119 @@ button:disabled {
   min-height: 84px;
 }
 
+.comment-queue-panel,
+.comment-selector-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  background: #fff;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.comment-queue-toolbar,
+.comment-queue-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.comment-queue-toolbar strong,
+.comment-selector-panel strong {
+  display: block;
+  color: #253858;
+  font-size: 13px;
+}
+
+.comment-queue-toolbar small,
+.comment-selector-panel small {
+  color: #6b7c93;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.mini-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #42526c;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.mini-number-input {
+  width: 64px;
+  min-height: 32px;
+  padding: 6px 8px;
+}
+
+.comment-queue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.comment-queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) 72px minmax(96px, 0.7fr) minmax(0, 1.4fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e2ebf7;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 8px;
+}
+
+.comment-queue-row strong,
+.comment-queue-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.queue-status {
+  justify-self: start;
+  border: 1px solid #c8d8ec;
+  border-radius: 999px;
+  background: #f5f8fc;
+  color: #42526c;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 4px 8px;
+}
+
+.comment-queue-row.is-ready .queue-status {
+  border-color: #bfe3cf;
+  background: #f2fff6;
+  color: #277044;
+}
+
+.comment-queue-row.is-paused .queue-status,
+.comment-queue-row.is-blocked .queue-status {
+  border-color: #f1cf92;
+  background: #fff8e9;
+  color: #8a5c10;
+}
+
+.comment-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.comment-selector-grid label {
+  display: grid;
+  gap: 6px;
+  color: #64758e;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.comment-selector-grid .wide {
+  grid-column: 1 / -1;
+}
+
 .checkbox-field {
   display: flex !important;
   grid-template-columns: none !important;
@@ -3395,6 +3508,8 @@ button:disabled {
   .rotation-pool-row,
 	  .rotation-setting-row,
 	  .comment-capture-shell,
+	  .comment-queue-row,
+	  .comment-selector-grid,
 	  .real-login-steps,
 	  .profile-grid,
 	  .profile-inspector,

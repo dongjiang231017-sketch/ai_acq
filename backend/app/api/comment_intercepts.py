@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -14,6 +14,7 @@ from app.models.task import (
     DirectMessage,
     DirectMessageAccount,
     DirectMessageConversation,
+    DirectMessagePlatformConfig,
     OutreachTask,
     SocialComment,
 )
@@ -22,6 +23,10 @@ from app.schemas.comment_intercept import (
     BrowserDmActionRecordRequest,
     BrowserDmActionRecordResult,
     BrowserCommentCaptureRequest,
+    CommentAutomationQueueItem,
+    CommentAutomationQueueOverview,
+    CommentAutomationRiskReport,
+    CommentAutomationRiskResult,
     CommentConvertRequest,
     CommentConvertResult,
     CommentInterceptOverview,
@@ -30,13 +35,18 @@ from app.schemas.comment_intercept import (
     CommentSyncResult,
     SocialCommentRead,
 )
-from app.services.dm_policy import SUPPORTED_DM_PLATFORMS, mark_account_sent
+from app.services.dm_policy import SUPPORTED_DM_PLATFORMS, account_send_check, mark_account_sent, pause_account_for_risk
 from app.services.comment_intercept_adapter import CommentInterceptAdapterUnavailable, PlatformComment, sync_platform_comments
 
 router = APIRouter()
 
 INTENT_WORDS = ("合作", "价格", "报名", "入驻", "求资料", "想了解", "怎么做", "加我", "联系", "开通")
 RISK_WORDS = ("兼职", "刷单", "贷款", "博彩", "色情")
+ACCOUNT_BLOCKED_RISK_STATUSES = {"需验证", "风控暂停", "封禁", "异常"}
+SOURCE_PAUSED_STATUSES = {"风控暂停", "自动化暂停", "选择器暂停", "登录暂停"}
+LOGIN_REQUIRED_AUTOMATION_STATUSES = {"login-required"}
+ACCOUNT_RISK_AUTOMATION_STATUSES = {"captcha", "rate-limited", "send-blocked"}
+SELECTOR_AUTOMATION_STATUSES = {"selector-missing", "no-input", "send-button-missing"}
 
 
 def _intent_score(content: str, like_count: int, keyword_rules: str) -> tuple[int, str]:
@@ -149,7 +159,128 @@ def _source_comment_count(source_id: str, db: Session) -> int:
     return int(db.scalar(select(func.count()).select_from(SocialComment).where(SocialComment.source_id == source_id)) or 0)
 
 
+def _source_next_run_at(source: CommentInterceptSource) -> datetime | None:
+    if not source.last_sync_at:
+        return None
+    return source.last_sync_at + timedelta(minutes=max(5, source.sync_frequency_minutes or 120))
+
+
+def _capture_account_check(account: DirectMessageAccount, at: datetime) -> tuple[bool, str]:
+    if account.status in {"封禁", "停用", "不支持私信"}:
+        return False, f"账号状态为{account.status}"
+    if (account.session_status or "未登录") != "已登录":
+        return False, f"登录态为{account.session_status or '未登录'}"
+    if (account.risk_status or "正常") in ACCOUNT_BLOCKED_RISK_STATUSES:
+        return False, f"账号风险状态为{account.risk_status}"
+    if account.cooldown_until and account.cooldown_until > at:
+        return False, f"账号冷却至{account.cooldown_until.isoformat()}"
+    return True, "可采集"
+
+
+def _source_selector_profile(platform: str, db: Session) -> str:
+    config = db.scalar(
+        select(DirectMessagePlatformConfig)
+        .where(DirectMessagePlatformConfig.platform == platform, DirectMessagePlatformConfig.enabled.is_(True))
+        .order_by(DirectMessagePlatformConfig.created_at.desc())
+    )
+    if not config:
+        return "默认启发式"
+    configured = [
+        config.risk_check_selector,
+        config.message_button_selector,
+        config.input_selector,
+        config.send_button_selector,
+        config.sent_success_selector,
+    ]
+    return "已配置" if any(value.strip() for value in configured if value) else "默认启发式"
+
+
+def _eligible_automation_accounts(
+    source: CommentInterceptSource,
+    db: Session,
+    now: datetime,
+) -> tuple[list[DirectMessageAccount], str]:
+    stmt = (
+        select(DirectMessageAccount)
+        .where(DirectMessageAccount.platform == source.platform)
+        .order_by(
+            DirectMessageAccount.sent_today.asc(),
+            DirectMessageAccount.last_sent_at.asc().nullsfirst(),
+            DirectMessageAccount.created_at.asc(),
+        )
+    )
+    accounts = list(db.scalars(stmt).all())
+    live_send_supported = source.platform in SUPPORTED_DM_PLATFORMS
+    eligible: list[DirectMessageAccount] = []
+    blocked_reasons: list[str] = []
+    for account in accounts:
+        if live_send_supported:
+            check = account_send_check(account, now)
+            ok, reason = check.ok, check.reason
+        else:
+            ok, reason = _capture_account_check(account, now)
+        if ok:
+            eligible.append(account)
+        else:
+            blocked_reasons.append(f"{account.account_name}:{reason}")
+    if eligible:
+        return eligible, "可执行"
+    if not accounts:
+        return [], f"{source.platform}暂无个人号"
+    return [], "；".join(blocked_reasons[:3])
+
+
+def _automation_queue_item(source: CommentInterceptSource, db: Session, now: datetime) -> dict[str, object]:
+    next_run_at = _source_next_run_at(source)
+    due = next_run_at is None or next_run_at <= now
+    eligible_accounts, account_reason = _eligible_automation_accounts(source, db, now)
+    next_account = eligible_accounts[0] if eligible_accounts else None
+    remaining_quota = sum(max(0, account.daily_limit - account.sent_today) for account in eligible_accounts)
+    live_send_supported = source.platform in SUPPORTED_DM_PLATFORMS
+    blocked_reason = ""
+    status = "ready" if due and next_account else "waiting" if next_account else "blocked"
+
+    if source.sync_status in SOURCE_PAUSED_STATUSES:
+        status = "paused"
+        blocked_reason = source.last_error or source.sync_status
+    elif not next_account:
+        blocked_reason = account_reason
+    elif not due:
+        blocked_reason = f"下次运行 {next_run_at.isoformat() if next_run_at else '待计算'}"
+    elif not live_send_supported:
+        blocked_reason = "仅采集/草稿，当前平台未开放真实私信发送"
+
+    risk_status = next_account.risk_status if next_account else "待分配"
+    return {
+        "sourceId": source.id,
+        "sourceName": source.name,
+        "platform": source.platform,
+        "sourceType": source.source_type,
+        "keyword": source.keyword,
+        "videoUrl": source.video_url,
+        "syncStatus": source.sync_status,
+        "lastSyncAt": source.last_sync_at,
+        "nextRunAt": next_run_at,
+        "due": due,
+        "status": status,
+        "blockedReason": blocked_reason,
+        "nextAccountId": next_account.id if next_account else None,
+        "nextAccountName": next_account.account_name if next_account else None,
+        "eligibleAccountCount": len(eligible_accounts),
+        "remainingQuota": remaining_quota,
+        "riskStatus": risk_status or "正常",
+        "selectorProfile": _source_selector_profile(source.platform, db),
+        "liveSendSupported": live_send_supported,
+    }
+
+
 def _browser_dm_conversation_status(action: BrowserDmAction) -> str:
+    if action.receipt_status == "confirmed":
+        return "已发送"
+    if action.receipt_status in {"unconfirmed", "missing"} and (action.sent or action.send_clicked):
+        return "回执未确认"
+    if action.receipt_status == "blocked":
+        return "发送受限"
     if action.sent or action.send_clicked:
         return "已发送" if action.sent_confirmed else "已点击发送"
     if action.status == "draft-ready":
@@ -159,12 +290,24 @@ def _browser_dm_conversation_status(action: BrowserDmAction) -> str:
     return "失败"
 
 
+def _browser_dm_delivery_confirmed(action: BrowserDmAction) -> bool:
+    if action.receipt_status:
+        return action.receipt_status == "confirmed"
+    return action.sent_confirmed or action.sent
+
+
+def _browser_dm_account_attempt(action: BrowserDmAction) -> bool:
+    if action.receipt_status == "blocked":
+        return False
+    return action.sent or action.send_clicked
+
+
 def _browser_dm_is_failed(action: BrowserDmAction) -> bool:
     return _browser_dm_conversation_status(action) in {"发送受限", "失败"}
 
 
 def _browser_dm_external_id(source: CommentInterceptSource, action: BrowserDmAction) -> str | None:
-    if not (action.sent or action.send_clicked):
+    if not _browser_dm_delivery_confirmed(action):
         return None
     seed = f"{source.id}|{action.profile_url}|{action.author_name}|{action.outgoing_content}|{action.status}"
     return f"browser-dm-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:20]}"
@@ -209,7 +352,7 @@ def _upsert_lead_from_browser_action(
             .order_by(MerchantLead.created_at.desc())
         )
     if lead:
-        lead.status = "已私信" if action.sent or action.send_clicked else lead.status
+        lead.status = "已私信" if _browser_dm_delivery_confirmed(action) else lead.status
         lead.intent_score = max(lead.intent_score, comment.intent_score if comment else lead.intent_score)
         if action.profile_url and not lead.platform_url:
             lead.platform_url = action.profile_url
@@ -225,7 +368,7 @@ def _upsert_lead_from_browser_action(
         platform_url=action.profile_url or None,
         source="评论截流",
         intent_score=comment.intent_score if comment else 60,
-        status="已私信" if action.sent or action.send_clicked else "待私信",
+        status="已私信" if _browser_dm_delivery_confirmed(action) else "待私信",
     )
     db.add(lead)
     db.flush()
@@ -242,11 +385,11 @@ def _link_comment_conversion(comment: SocialComment | None, lead: MerchantLead, 
                 comment_id=comment.id,
                 lead_id=lead.id,
                 action="浏览器自动私信",
-                status="已完成" if action.sent or action.send_clicked else "草稿待确认",
+                status="已完成" if _browser_dm_delivery_confirmed(action) else "草稿待确认",
                 note=action.message or action.status,
             )
         )
-    if action.sent or action.send_clicked:
+    if _browser_dm_delivery_confirmed(action):
         comment.status = "已私信"
     elif action.status == "draft-ready":
         comment.status = "草稿待确认"
@@ -265,6 +408,94 @@ def comment_intercept_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "comments": int(comments),
         "highIntentComments": int(high_intent),
         "convertedLeads": int(converted),
+    }
+
+
+@router.get("/automation/queue", response_model=CommentAutomationQueueOverview)
+def comment_automation_queue(db: Session = Depends(get_db)) -> dict[str, object]:
+    now = datetime.utcnow()
+    sources = list(db.scalars(select(CommentInterceptSource).order_by(CommentInterceptSource.created_at.desc())).all())
+    items = [_automation_queue_item(source, db, now) for source in sources]
+    due_count = sum(1 for item in items if item["due"])
+    ready_count = sum(1 for item in items if item["status"] == "ready")
+    paused_count = sum(1 for item in items if item["status"] == "paused")
+    blocked_count = sum(1 for item in items if item["status"] == "blocked")
+    return {
+        "items": items,
+        "dueCount": due_count,
+        "readyCount": ready_count,
+        "pausedCount": paused_count,
+        "blockedCount": blocked_count,
+        "message": f"自动化队列：到期 {due_count} 个，可执行 {ready_count} 个，暂停 {paused_count} 个，阻塞 {blocked_count} 个。",
+    }
+
+
+@router.post("/sources/{source_id}/automation-preflight", response_model=CommentAutomationQueueItem)
+def comment_source_automation_preflight(source_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    source = db.get(CommentInterceptSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="评论截流来源不存在")
+    return _automation_queue_item(source, db, datetime.utcnow())
+
+
+@router.post("/sources/{source_id}/automation-risk", response_model=CommentAutomationRiskResult)
+def report_comment_automation_risk(
+    source_id: str,
+    payload: CommentAutomationRiskReport,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    source = db.get(CommentInterceptSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="评论截流来源不存在")
+    if payload.platform and payload.platform != source.platform:
+        raise HTTPException(status_code=400, detail=f"当前来源是{source.platform}，不能记录{payload.platform}风控")
+
+    status = payload.status.strip()
+    reason = payload.reason.strip() or status
+    step = payload.step.strip() or "automation"
+    now = datetime.utcnow()
+    account = db.get(DirectMessageAccount, payload.account_id) if payload.account_id else None
+    paused = False
+
+    if status in LOGIN_REQUIRED_AUTOMATION_STATUSES:
+        source.sync_status = "登录暂停"
+        source.last_error = f"{step}：{reason}"
+        paused = True
+        if account:
+            account.status = "待登录"
+            account.session_status = "未登录"
+            account.risk_status = "正常"
+            account.last_error = reason
+    elif status in ACCOUNT_RISK_AUTOMATION_STATUSES:
+        source.sync_status = "风控暂停"
+        source.last_error = f"{step}：{reason}"
+        paused = True
+        if account:
+            pause_account_for_risk(account, reason, now)
+            if status == "captcha":
+                account.risk_status = "需验证"
+            elif status == "rate-limited":
+                account.risk_status = "风控暂停"
+    elif status in SELECTOR_AUTOMATION_STATUSES:
+        source.sync_status = "选择器暂停"
+        source.last_error = f"{step}：{reason}"
+        paused = True
+        if account:
+            account.last_error = f"选择器需修复：{reason}"
+    else:
+        source.last_error = f"{step}：{reason}"
+        if account:
+            account.last_error = reason
+
+    db.commit()
+    return {
+        "sourceId": source.id,
+        "accountId": account.id if account else None,
+        "paused": paused,
+        "sourceStatus": source.sync_status,
+        "accountStatus": account.status if account else None,
+        "riskStatus": account.risk_status if account else None,
+        "message": "已暂停自动化并记录风控状态。" if paused else "已记录自动化状态。",
     }
 
 
@@ -475,14 +706,17 @@ def record_browser_dm_actions(
                         "sent": action.sent,
                         "sendClicked": action.send_clicked,
                         "sentConfirmed": action.sent_confirmed,
+                        "receiptStatus": action.receipt_status,
+                        "receiptMessage": action.receipt_message,
                         "message": action.message,
                         "rawPayload": action.raw_payload or {},
                     }
                 ),
             )
         )
-        if action.sent or action.send_clicked:
+        if _browser_dm_delivery_confirmed(action):
             lead.status = "已私信"
+        if _browser_dm_account_attempt(action):
             if account:
                 mark_account_sent(account, now)
         if lead.id not in lead_ids:

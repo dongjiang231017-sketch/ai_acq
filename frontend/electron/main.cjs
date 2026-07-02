@@ -472,10 +472,21 @@ function scrollCommentsScript(rounds) {
 function fillDirectMessageScript(message, options = {}) {
   const allowSend = Boolean(options.allowSend);
   const confirmTimeoutMs = clampInteger(options.confirmTimeoutMs, 3500, 500, 15000);
+  const selectors =
+    options.selectors && typeof options.selectors === "object"
+      ? {
+          riskCheckSelector: String(options.selectors.riskCheckSelector || "").trim(),
+          messageButtonSelector: String(options.selectors.messageButtonSelector || "").trim(),
+          inputSelector: String(options.selectors.inputSelector || "").trim(),
+          sendButtonSelector: String(options.selectors.sendButtonSelector || "").trim(),
+          sentSuccessSelector: String(options.selectors.sentSuccessSelector || "").trim(),
+        }
+      : {};
   return `(async () => {
     const message = ${JSON.stringify(message)};
     const allowSend = ${allowSend ? "true" : "false"};
     const confirmTimeoutMs = ${confirmTimeoutMs};
+    const selectors = ${JSON.stringify(selectors)};
     const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const isVisible = (element) => {
       const rect = element.getBoundingClientRect();
@@ -494,6 +505,25 @@ function fillDirectMessageScript(message, options = {}) {
       cleanText(element.textContent || "").slice(0, 40),
     ].join(" ");
     const notDisabled = (element) => !element.disabled && element.getAttribute("aria-disabled") !== "true";
+    const queryVisible = (selector) => {
+      if (!selector) return [];
+      try {
+        return Array.from(document.querySelectorAll(selector)).filter((element) => isVisible(element) && notDisabled(element));
+      } catch {
+        return [];
+      }
+    };
+    const clickSelector = (selector) => {
+      const selected = queryVisible(selector)[0];
+      if (!selected) return false;
+      selected.scrollIntoView({ block: "center", inline: "center" });
+      selected.click();
+      return true;
+    };
+    const selectorText = (selector) => {
+      const element = queryVisible(selector)[0];
+      return element ? cleanText(element.innerText || element.textContent || element.getAttribute("aria-label") || element.getAttribute("title") || "") : "";
+    };
     const visibleClickables = () => Array.from(document.querySelectorAll("button, a, [role='button'], div, span"))
         .filter((element) => isVisible(element) && notDisabled(element))
         .map((element) => ({
@@ -547,9 +577,10 @@ function fillDirectMessageScript(message, options = {}) {
       const match = text.match(/(验证码|安全验证|滑动验证|登录后|请登录|操作频繁|发送失败|发送过快|风险|限制|异常|稍后再试|verify|captcha|too frequent|failed)/i);
       return match?.[0] || "";
     };
-    const openedMessageEntry = clickByPattern(/(私信|发消息|发送消息|联系|聊天|message|chat|dm)/i);
+    const openedMessageEntry = clickSelector(selectors.messageButtonSelector) || clickByPattern(/(私信|发消息|发送消息|联系|聊天|message|chat|dm)/i);
     if (openedMessageEntry) await wait(1200);
-    const input = Array.from(document.querySelectorAll("textarea, input, [contenteditable='true'], [role='textbox']"))
+    const configuredInput = queryVisible(selectors.inputSelector)[0] || null;
+    const input = configuredInput || Array.from(document.querySelectorAll("textarea, input, [contenteditable='true'], [role='textbox']"))
       .filter((element) => isVisible(element) && notDisabled(element))
       .map((element) => {
         const info = descriptor(element);
@@ -561,11 +592,19 @@ function fillDirectMessageScript(message, options = {}) {
       })
       .sort((left, right) => right.score - left.score)[0]?.element;
     if (!input) {
+      const risk = selectorText(selectors.riskCheckSelector) || pageRiskText();
       return {
         ok: false,
-        status: "no-input",
+        status: risk ? "send-blocked" : "no-input",
         openedMessageEntry,
-        message: openedMessageEntry ? "已打开私信入口，但未找到可填写的输入框。" : "未找到私信入口或输入框。",
+        sent: false,
+        sendClicked: false,
+        sentConfirmed: false,
+        receiptStatus: risk ? "blocked" : "missing",
+        receiptMessage: risk || "未找到可填写的私信输入框。",
+        message: risk
+          ? \`平台疑似风控或登录拦截：\${risk}\`
+          : openedMessageEntry ? "已打开私信入口，但未找到可填写的输入框。" : "未找到私信入口或输入框。",
         url: window.location.href,
         title: document.title,
       };
@@ -581,13 +620,15 @@ function fillDirectMessageScript(message, options = {}) {
         sent: false,
         sendClicked: false,
         sentConfirmed: false,
+        receiptStatus: "draft",
+        receiptMessage: "已填写草稿，未点击发送。",
         outgoingContent: message,
         message: "已填写私信草稿，按安全策略停在发送前。",
         url: window.location.href,
         title: document.title,
       };
     }
-    const sendButton = findSendButton();
+    const sendButton = queryVisible(selectors.sendButtonSelector)[0] || findSendButton();
     if (!sendButton) {
       return {
         ok: false,
@@ -597,6 +638,8 @@ function fillDirectMessageScript(message, options = {}) {
         sent: false,
         sendClicked: false,
         sentConfirmed: false,
+        receiptStatus: "missing",
+        receiptMessage: "未找到可点击的发送按钮。",
         outgoingContent: message,
         message: "已填写草稿，但未找到可点击的发送按钮。",
         url: window.location.href,
@@ -606,9 +649,11 @@ function fillDirectMessageScript(message, options = {}) {
     sendButton.scrollIntoView({ block: "center", inline: "center" });
     sendButton.click();
     await wait(confirmTimeoutMs);
-    const risk = pageRiskText();
+    const selectorRisk = selectorText(selectors.riskCheckSelector);
+    const receiptText = selectorText(selectors.sentSuccessSelector);
+    const risk = selectorRisk || pageRiskText();
     const remainingValue = inputValue(input);
-    const sentConfirmed = !risk && remainingValue !== message;
+    const sentConfirmed = !risk && (Boolean(receiptText) || remainingValue !== message);
     const status = risk ? "send-blocked" : sentConfirmed ? "sent-confirmed" : "send-clicked-unconfirmed";
     return {
       ok: !risk,
@@ -618,6 +663,8 @@ function fillDirectMessageScript(message, options = {}) {
       sent: !risk,
       sendClicked: true,
       sentConfirmed,
+      receiptStatus: risk ? "blocked" : sentConfirmed ? "confirmed" : "unconfirmed",
+      receiptMessage: risk || receiptText || (sentConfirmed ? "已观察到发送回执或输入框状态变化。" : "未在会话记录中确认发送回执。"),
       outgoingContent: message,
       message: risk
         ? \`平台疑似拦截发送：\${risk}\`
@@ -641,6 +688,7 @@ async function runCommentAutomation(payload) {
   const maxAuthors = clampInteger(payload?.maxAuthors, 3, 0, 12);
   const sendIntervalSeconds = clampInteger(payload?.sendIntervalSeconds, 45, 0, 600);
   const allowSend = Boolean(payload?.allowSend);
+  const selectors = payload?.selectors && typeof payload.selectors === "object" ? payload.selectors : {};
   const steps = [];
   const dmActions = [];
   const addStep = (name, status, message, extra = {}) => {
@@ -730,7 +778,7 @@ async function runCommentAutomation(payload) {
           await waitForWebContentsIdle(targetContents, 10000);
           await delay(900);
           const dmResult = await targetContents.executeJavaScript(
-            fillDirectMessageScript(dmMessage, { allowSend, confirmTimeoutMs: 4000 }),
+            fillDirectMessageScript(dmMessage, { allowSend, confirmTimeoutMs: 4000, selectors }),
             true,
           );
           dmActions.push({
@@ -740,6 +788,8 @@ async function runCommentAutomation(payload) {
             sent: Boolean(dmResult?.sent),
             sendClicked: Boolean(dmResult?.sendClicked),
             sentConfirmed: Boolean(dmResult?.sentConfirmed),
+            receiptStatus: dmResult?.receiptStatus || "",
+            receiptMessage: dmResult?.receiptMessage || "",
             outgoingContent: dmResult?.outgoingContent || dmMessage,
             message: dmResult?.message || "",
             url: dmResult?.url || targetContents.getURL(),
@@ -752,6 +802,8 @@ async function runCommentAutomation(payload) {
             sent: false,
             sendClicked: false,
             sentConfirmed: false,
+            receiptStatus: "failed",
+            receiptMessage: error instanceof Error ? error.message : "进入作者主页或填写私信失败",
             outgoingContent: dmMessage,
             message: error instanceof Error ? error.message : "进入作者主页或填写私信失败",
             url: targetContents.getURL(),
