@@ -16,7 +16,7 @@ from typing import Any
 import dashscope
 from dashscope.audio.qwen_omni import MultiModality, OmniRealtimeCallback, OmniRealtimeConversation
 
-from app.core.config import settings
+from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.realtime_sales_playbook import build_video_group_buying_sales_instructions
 
 
@@ -144,12 +144,13 @@ def drain_queue(items: queue.Queue[dict[str, Any]]) -> None:
 
 
 def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
-    if not settings.dashscope_api_key.strip():
+    runtime_config = get_runtime_ai_config()
+    if not runtime_config.dashscope_api_key.strip():
         raise RuntimeError("缺少 DASHSCOPE_API_KEY，不能测试 Qwen Omni Realtime。")
 
-    model = args.model or settings.dashscope_omni_realtime_model
-    url = args.url or settings.dashscope_omni_realtime_url
-    voice = args.voice or settings.dashscope_omni_realtime_voice
+    model = args.model or runtime_config.dashscope_omni_realtime_model
+    url = args.url or runtime_config.dashscope_omni_realtime_url
+    voice = args.voice or runtime_config.dashscope_omni_realtime_voice
     output_wav = Path(args.output_wav).expanduser() if args.output_wav else None
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -158,12 +159,12 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             generate_question_pcm(args.question, pcm_path, args.say_voice)
 
         callback = SmokeCallback()
-        dashscope.api_key = settings.dashscope_api_key
+        dashscope.api_key = runtime_config.dashscope_api_key
         conversation = OmniRealtimeConversation(
             model=model,
             callback=callback,
             url=url,
-            workspace=settings.dashscope_workspace.strip() or None,
+            workspace=runtime_config.dashscope_workspace.strip() or None,
         )
         started = time.perf_counter()
         try:
@@ -172,7 +173,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
                 voice=voice,
                 enable_input_audio_transcription=True,
-                input_audio_transcription_model=settings.dashscope_omni_input_transcription_model,
+                input_audio_transcription_model=runtime_config.dashscope_omni_input_transcription_model,
                 enable_turn_detection=False,
                 instructions=build_sales_instructions(),
             )

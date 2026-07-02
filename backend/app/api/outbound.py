@@ -108,6 +108,7 @@ def telephony_config() -> dict[str, object]:
     profile = current_voice_gateway_profile()
     return {
         "gatewayMode": telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode),
+        "asteriskDeploymentMode": telephony_str("ASTERISK_DEPLOYMENT_MODE", "AI_ACQ_ASTERISK_DEPLOYMENT_MODE", fallback=settings.asterisk_deployment_mode),
         "voiceGatewayProfile": profile.as_dict(),
         "queueEnabled": settings.outbound_queue_enabled,
         "queueName": settings.outbound_queue_name,

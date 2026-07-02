@@ -12,6 +12,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.realtime_sales_brain import render_sales_reply
+from app.services.runtime_ai_config import RuntimeAiConfig, get_runtime_ai_config
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ _CONTEXT_LOCAL_FIRST_INTENTS = {
 
 
 def deepseek_configured() -> bool:
-    return bool(settings.deepseek_api_key.strip())
+    return bool(get_runtime_ai_config().deepseek_api_key.strip())
 
 
 def generate_realtime_reply(
@@ -103,9 +104,18 @@ def generate_realtime_reply(
         )
 
     started = time.perf_counter()
-    future = _DEEPSEEK_EXECUTOR.submit(_request_deepseek_reply, text, intent, merchant_name, history, stage_instruction)
+    runtime_config = get_runtime_ai_config()
+    future = _DEEPSEEK_EXECUTOR.submit(
+        _request_deepseek_reply,
+        text,
+        intent,
+        merchant_name,
+        runtime_config,
+        history,
+        stage_instruction,
+    )
     try:
-        reply = future.result(timeout=max(0.5, settings.realtime_llm_timeout_seconds))
+        reply = future.result(timeout=max(0.5, runtime_config.realtime_llm_timeout_seconds))
     except TimeoutError:
         _open_deepseek_backoff()
         return RealtimeReplyResult(
@@ -113,7 +123,7 @@ def generate_realtime_reply(
             strategy="local_context_deepseek_timeout",
             latency_ms=int((time.perf_counter() - started) * 1000),
             fallback_used=True,
-            error=f"DeepSeek 超过 {settings.realtime_llm_timeout_seconds:.1f}s 电话预算",
+            error=f"DeepSeek 超过 {runtime_config.realtime_llm_timeout_seconds:.1f}s 电话预算",
         )
     except Exception as exc:  # noqa: BLE001
         _open_deepseek_backoff()
@@ -136,7 +146,7 @@ def generate_realtime_reply(
         )
     return RealtimeReplyResult(
         reply=cleaned,
-        strategy="deepseek_stream_first_sentence" if settings.deepseek_stream_first_sentence else "deepseek_chat",
+        strategy="deepseek_stream_first_sentence" if runtime_config.deepseek_stream_first_sentence else "deepseek_chat",
         latency_ms=int((time.perf_counter() - started) * 1000),
     )
 
@@ -529,12 +539,13 @@ def _request_deepseek_reply(
     text: str,
     intent: str,
     merchant_name: str,
+    runtime_config: RuntimeAiConfig,
     conversation_history: list[dict[str, str]] | None = None,
     stage_instruction: str = "",
 ) -> str:
     recent_history = _format_conversation_history(conversation_history or [])
     payload = {
-        "model": settings.deepseek_chat_model,
+        "model": runtime_config.deepseek_chat_model,
         "messages": [
             {
                 "role": "system",
@@ -566,34 +577,37 @@ def _request_deepseek_reply(
                 ),
             },
         ],
-        "max_tokens": settings.deepseek_max_tokens,
-        "stream": settings.deepseek_stream_first_sentence,
+        "max_tokens": runtime_config.deepseek_max_tokens,
+        "stream": runtime_config.deepseek_stream_first_sentence,
         "thinking": {"type": "disabled"},
     }
     request = urllib.request.Request(
-        _deepseek_chat_url(),
+        _deepseek_chat_url(runtime_config.deepseek_base_url),
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {settings.deepseek_api_key.strip()}",
+            "Authorization": f"Bearer {runtime_config.deepseek_api_key.strip()}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
-    timeout_seconds = max(0.5, min(settings.deepseek_timeout_seconds, settings.realtime_llm_timeout_seconds))
+    timeout_seconds = max(
+        0.5,
+        min(runtime_config.deepseek_timeout_seconds, runtime_config.realtime_llm_timeout_seconds),
+    )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-        if settings.deepseek_stream_first_sentence:
-            return _read_streaming_content(response)
+        if runtime_config.deepseek_stream_first_sentence:
+            return _read_streaming_content(response, runtime_config.realtime_reply_max_chars)
         data = json.loads(response.read().decode("utf-8"))
     return _extract_message_content(data)
 
 
-def _deepseek_chat_url() -> str:
-    return settings.deepseek_base_url.strip().rstrip("/") + "/chat/completions"
+def _deepseek_chat_url(base_url: str) -> str:
+    return base_url.strip().rstrip("/") + "/chat/completions"
 
 
-def _read_streaming_content(response: Any) -> str:
+def _read_streaming_content(response: Any, reply_max_chars: int) -> str:
     chunks: list[str] = []
-    max_chars = max(24, settings.realtime_reply_max_chars)
+    max_chars = max(24, reply_max_chars)
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="ignore").strip()
         if not line or not line.startswith("data:"):
@@ -652,7 +666,7 @@ def _clean_phone_reply(reply: str) -> str:
     cleaned = re.sub(r"\s+", " ", reply).strip()
     cleaned = cleaned.strip("`*_#- \t\r\n")
     cleaned = cleaned.replace("AI：", "").replace("客服：", "").strip()
-    max_chars = max(24, settings.realtime_reply_max_chars)
+    max_chars = max(24, get_runtime_ai_config().realtime_reply_max_chars)
     if len(cleaned) <= max_chars:
         return cleaned
     sentence_match = re.search(r"^(.{12,%d}?[。！？!?])" % max_chars, cleaned)

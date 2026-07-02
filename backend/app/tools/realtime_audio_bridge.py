@@ -39,6 +39,7 @@ from app.services.realtime_sales_playbook import (
     classify_realtime_call_input,
 )
 from app.services.realtime_sales_state import SalesStateMachine
+from app.services.runtime_ai_config import get_runtime_ai_config
 
 
 AUDIO_SOCKET_KIND_HANGUP = 0x00
@@ -388,9 +389,10 @@ class AudioSocketCallSession:
         return False
 
     def _start_asr(self) -> None:
-        if not settings.dashscope_api_key:
+        runtime_config = get_runtime_ai_config()
+        if not runtime_config.dashscope_api_key:
             raise AudioSocketProtocolError("缺少 DASHSCOPE_API_KEY，不能启动实时 ASR。")
-        dashscope.api_key = settings.dashscope_api_key
+        dashscope.api_key = runtime_config.dashscope_api_key
         callback = CallRecognitionCallback(self)
         self._recognition = Recognition(
             model=self.config.asr_model,
@@ -1087,9 +1089,10 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self.logger.emit("call_disconnected", callId=self.call_id, mode="omni")
 
     def _start_omni(self) -> None:
-        if not settings.dashscope_api_key:
+        runtime_config = get_runtime_ai_config()
+        if not runtime_config.dashscope_api_key:
             raise AudioSocketProtocolError("缺少 DASHSCOPE_API_KEY，不能启动 Qwen Omni Realtime。")
-        dashscope.api_key = settings.dashscope_api_key
+        dashscope.api_key = runtime_config.dashscope_api_key
         callback = CallOmniCallback(self)
         self._omni = OmniRealtimeConversation(
             model=self.config.omni_model,
@@ -1726,7 +1729,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
 
 
 def synthesize_tts_pcm(text: str, config: BridgeConfig) -> bytes:
-    dashscope.api_key = settings.dashscope_api_key
+    runtime_config = get_runtime_ai_config()
+    dashscope.api_key = runtime_config.dashscope_api_key
     synthesizer = SpeechSynthesizer(
         model=config.tts_model,
         voice=config.tts_voice_id,
@@ -1754,7 +1758,8 @@ class _PcmDownsampleState:
 
 
 def stream_qwen_realtime_tts_pcm(text: str, config: BridgeConfig):
-    if not settings.dashscope_api_key:
+    runtime_config = get_runtime_ai_config()
+    if not runtime_config.dashscope_api_key:
         raise RuntimeError("缺少 DASHSCOPE_API_KEY，不能启动 Qwen 实时 TTS。")
 
     from dashscope.audio.qwen_tts_realtime import AudioFormat as QwenAudioFormat
@@ -1791,7 +1796,7 @@ def stream_qwen_realtime_tts_pcm(text: str, config: BridgeConfig):
             self.closed = True
             self.items.put(("done", None))
 
-    dashscope.api_key = settings.dashscope_api_key
+    dashscope.api_key = runtime_config.dashscope_api_key
     callback = Callback()
     tts = QwenTtsRealtime(model=config.tts_model, callback=callback, workspace=config.workspace)
     downsample_state = _PcmDownsampleState()
@@ -1801,7 +1806,7 @@ def stream_qwen_realtime_tts_pcm(text: str, config: BridgeConfig):
             voice=config.tts_voice_id,
             response_format=QwenAudioFormat.PCM_24000HZ_MONO_16BIT,
             mode="commit",
-            language_type=settings.dashscope_system_tts_language_type,
+            language_type=runtime_config.dashscope_system_tts_language_type,
         )
         tts.append_text(text)
         tts.commit()
@@ -1883,22 +1888,23 @@ def _upsample_pcm_8k_to_16k(chunk: bytes) -> bytes:
 
 
 def build_config(args: argparse.Namespace) -> BridgeConfig:
+    runtime_config = get_runtime_ai_config()
     voice = resolve_tts_voice(args.voice_id, args.voice_name)
-    workspace = settings.dashscope_workspace.strip() or None
+    workspace = runtime_config.dashscope_workspace.strip() or None
     return BridgeConfig(
         bind_host=args.host or settings.asterisk_audio_socket_bind_host,
         port=int(args.port or settings.asterisk_audio_socket_port),
-        asr_model=args.asr_model or settings.realtime_asr_model,
+        asr_model=args.asr_model or runtime_config.realtime_asr_model,
         tts_model=args.tts_model or voice.tts_model,
         tts_voice_id=voice.voice_id,
         tts_voice_name=voice.voice_name,
         tts_voice_type=voice.voice_type,
-        conversation_mode=(args.conversation_mode or settings.realtime_conversation_mode or "pipeline").strip().lower(),
-        omni_model=(args.omni_model or settings.dashscope_omni_realtime_model).strip(),
-        omni_url=(args.omni_url or settings.dashscope_omni_realtime_url).strip(),
-        omni_voice=(args.omni_voice or settings.dashscope_omni_realtime_voice or voice.voice_id or "Serena").strip(),
+        conversation_mode=(args.conversation_mode or runtime_config.realtime_conversation_mode or "pipeline").strip().lower(),
+        omni_model=(args.omni_model or runtime_config.dashscope_omni_realtime_model).strip(),
+        omni_url=(args.omni_url or runtime_config.dashscope_omni_realtime_url).strip(),
+        omni_voice=(args.omni_voice or runtime_config.dashscope_omni_realtime_voice or voice.voice_id or "Serena").strip(),
         omni_input_transcription_model=(
-            args.omni_input_transcription_model or settings.dashscope_omni_input_transcription_model
+            args.omni_input_transcription_model or runtime_config.dashscope_omni_input_transcription_model
         ).strip(),
         opening_text=args.opening_text or settings.realtime_call_opening_text,
         log_path=Path(args.log_path or settings.realtime_call_event_log_path).expanduser(),
@@ -1923,6 +1929,7 @@ class ResolvedTtsVoice:
 
 
 def resolve_tts_voice(explicit_voice_id: str | None = None, explicit_voice_name: str | None = None) -> ResolvedTtsVoice:
+    runtime_config = get_runtime_ai_config()
     voice_id = (
         explicit_voice_id
         or os.environ.get("AI_ACQ_REALTIME_TTS_VOICE_ID")
@@ -1942,14 +1949,14 @@ def resolve_tts_voice(explicit_voice_id: str | None = None, explicit_voice_name:
                 voice_id=voice_id,
                 voice_name=voice_name or voice_id,
                 voice_type="clone",
-                tts_model=settings.dashscope_tts_model,
+                tts_model=runtime_config.dashscope_tts_model,
             )
         voice_param = _qwen_voice_param(voice_id)
         return ResolvedTtsVoice(
             voice_id=voice_param,
             voice_name=voice_name or _qwen_voice_display_name(voice_param),
             voice_type="system",
-            tts_model=settings.dashscope_realtime_tts_model,
+            tts_model=runtime_config.dashscope_realtime_tts_model,
         )
 
     if voice_type in {"clone", "cloned", "voice_clone"}:
@@ -1964,16 +1971,16 @@ def resolve_tts_voice(explicit_voice_id: str | None = None, explicit_voice_name:
                     voice_id=record.external_voice_id,
                     voice_name=record.cloned_voice_name or record.external_voice_id,
                     voice_type="clone",
-                    tts_model=settings.dashscope_tts_model,
+                    tts_model=runtime_config.dashscope_tts_model,
                 )
         raise RuntimeError("没有可用于实时电话 TTS 的复刻 voice_id，请先在声音档案训练可用音色或设置 REALTIME_TTS_VOICE_ID。")
 
-    default_voice = _qwen_voice_param(settings.dashscope_realtime_tts_voice or "Ethan")
+    default_voice = _qwen_voice_param(runtime_config.dashscope_realtime_tts_voice or "Ethan")
     return ResolvedTtsVoice(
         voice_id=default_voice,
         voice_name=voice_name or _qwen_voice_display_name(default_voice),
         voice_type="system",
-        tts_model=settings.dashscope_realtime_tts_model,
+        tts_model=runtime_config.dashscope_realtime_tts_model,
     )
 
 
@@ -2052,7 +2059,7 @@ def config_summary(config: BridgeConfig) -> dict[str, object]:
         "voice": config.tts_voice_name,
         "voiceType": config.tts_voice_type,
         "voiceConfigured": bool(config.tts_voice_id),
-        "dashscopeKeyConfigured": bool(settings.dashscope_api_key.strip()),
+        "dashscopeKeyConfigured": bool(get_runtime_ai_config().dashscope_api_key.strip()),
         "workspaceConfigured": bool(config.workspace),
         "logPath": str(config.log_path),
         "bargeRmsThreshold": config.barge_rms_threshold,

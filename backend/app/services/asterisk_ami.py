@@ -39,6 +39,7 @@ class AmiResponse:
 class AsteriskHealth:
     checked_at: datetime
     gateway_mode: str
+    asterisk_deployment_mode: str
     voice_gateway_profile: dict[str, object]
     configured: bool
     live_call_enabled: bool
@@ -60,6 +61,7 @@ class AsteriskHealth:
         return {
             "checkedAt": self.checked_at,
             "gatewayMode": self.gateway_mode,
+            "asteriskDeploymentMode": self.asterisk_deployment_mode,
             "voiceGatewayProfile": self.voice_gateway_profile,
             "configured": self.configured,
             "liveCallEnabled": self.live_call_enabled,
@@ -495,6 +497,11 @@ def check_asterisk_health() -> AsteriskHealth:
     health = {
         "checked_at": datetime.utcnow(),
         "gateway_mode": telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode),
+        "asterisk_deployment_mode": telephony_str(
+            "ASTERISK_DEPLOYMENT_MODE",
+            "AI_ACQ_ASTERISK_DEPLOYMENT_MODE",
+            fallback=settings.asterisk_deployment_mode,
+        ),
         "voice_gateway_profile": profile.as_dict(),
         "configured": configured,
         "live_call_enabled": telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled),

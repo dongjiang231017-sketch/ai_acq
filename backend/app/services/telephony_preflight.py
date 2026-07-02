@@ -33,6 +33,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
     profile = current_voice_gateway_profile()
     health = check_asterisk_health()
     gateway_mode = telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode)
+    deployment_mode = telephony_str("ASTERISK_DEPLOYMENT_MODE", "AI_ACQ_ASTERISK_DEPLOYMENT_MODE", fallback=settings.asterisk_deployment_mode)
     live_call_enabled = telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled)
     bulk_call_enabled = telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled)
     steps: list[TelephonyPreflightStep] = []
@@ -46,7 +47,11 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "网关模式",
                 "warn",
                 "当前仍是模拟线路，代码不会访问语音网关。",
-                "实机联调时让后端读取客户端生成的 backend-asterisk.env，并设置 TELEPHONY_GATEWAY_MODE=asterisk。",
+                (
+                    "实机联调时把服务器 Asterisk AMI/SIP 配好，并设置 TELEPHONY_GATEWAY_MODE=asterisk。"
+                    if deployment_mode == "server"
+                    else "实机联调时让后端读取客户端生成的 backend-asterisk.env，并设置 TELEPHONY_GATEWAY_MODE=asterisk。"
+                ),
             )
         )
 
@@ -56,7 +61,11 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
             "语音网关档案",
             "pass" if profile.host else "warn",
             f"{profile.label} · {profile.host}:{profile.sip_port} · trunk {profile.trunk_name} · {profile.max_channels} 路",
-            "设备 IP 变化时用客户端重新发现/重新绑定语音网关；UC100 只是当前已测试档案。",
+            (
+                "服务器模式下让语音网关主动注册到云端 Asterisk；客户换网络不需要重新发现本机网关地址。"
+                if deployment_mode == "server"
+                else "设备 IP 变化时用客户端重新发现/重新绑定语音网关；UC100 只是当前已测试档案。"
+            ),
         )
     )
 
@@ -69,7 +78,11 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "AMI 账号",
                 "fail",
                 "AMI 用户名或密码未配置。",
-                "优先使用桌面客户端内置 Asterisk 生成的 backend-asterisk.env；开发调试才手工配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。",
+                (
+                    "在服务器 Asterisk 的 manager.conf 创建 AMI 用户，并写入后端环境。"
+                    if deployment_mode == "server"
+                    else "优先使用桌面客户端内置 Asterisk 生成的 backend-asterisk.env；开发调试才手工配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。"
+                ),
             )
         )
 
@@ -83,8 +96,12 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "ami_reachable",
                 "AMI 连接",
                 "fail",
-                "后端连不上客户端内置 Asterisk AMI。",
-                "检查客户端 sidecar 是否已启动、ASTERISK_HOST、ASTERISK_AMI_PORT、manager.conf bindaddr/permit、防火墙。",
+                "后端连不上 Asterisk AMI。",
+                (
+                    "检查服务器 Asterisk 是否运行、manager.conf bindaddr/permit、本机防火墙，以及 ASTERISK_HOST/AMI 端口。"
+                    if deployment_mode == "server"
+                    else "检查客户端 sidecar 是否已启动、ASTERISK_HOST、ASTERISK_AMI_PORT、manager.conf bindaddr/permit、防火墙。"
+                ),
             )
         )
     else:
@@ -105,7 +122,17 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
     if health.trunk_reachable is True:
         steps.append(_step("trunk_reachable", "Trunk 可达", "pass", health.trunk_status))
     elif health.trunk_reachable is False:
-        steps.append(_step("trunk_reachable", "Trunk 可达", "fail", health.trunk_status, "检查语音网关 SIP 注册、PJSIP endpoint 名称和现场网络。"))
+        steps.append(
+            _step(
+                "trunk_reachable",
+                "Trunk 可达",
+                "fail",
+                health.trunk_status,
+                "检查鼎信 8T 是否已注册到服务器 Asterisk、PJSIP endpoint 名称和公网 SIP/RTP 防火墙。"
+                if deployment_mode == "server"
+                else "检查语音网关 SIP 注册、PJSIP endpoint 名称和现场网络。",
+            )
+        )
     elif health.authenticated:
         steps.append(
             _step(

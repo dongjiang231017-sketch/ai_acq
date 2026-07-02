@@ -9,6 +9,7 @@ const targetRoot = path.resolve(
   process.env.AI_ACQ_ASTERISK_RUNTIME_TARGET || path.join(frontendRoot, "electron", "asterisk", platform),
 );
 const mode = process.argv.includes("--copy") ? "copy" : "check";
+const optional = process.argv.includes("--optional") || process.env.AI_ACQ_ASTERISK_RUNTIME_REQUIRED === "false";
 
 function main() {
   if (mode === "copy") {
@@ -28,6 +29,10 @@ function main() {
   const report = inspectRuntime(targetRoot);
   printReport(report);
   if (!report.ready) {
+    if (optional) {
+      console.warn("Asterisk runtime 不完整；当前按服务器 Asterisk 交付模式继续打包。");
+      process.exit(0);
+    }
     fail("Asterisk runtime 不完整，不能打正式桌面安装包。");
   }
 }

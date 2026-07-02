@@ -192,26 +192,27 @@ const fallbackOverview: OutboundOverview = {
 };
 
 const fallbackVoiceGatewayProfile: VoiceGatewayProfile = {
-  key: "uc100_sip_volte",
-  label: "语音网关（UC100 测试档案）",
-  vendor: "ZHY",
-  model: "UC100",
-  category: "sip_volte_gateway",
-  transport: "sip_udp",
-  host: "192.168.10.100",
-  sipPort: 5080,
-  trunkName: "uc100",
-  maxChannels: 1,
-  lineType: "sim_volte",
-  adminUrl: "http://192.168.10.100/",
-  discoveryMode: "manual_or_lan_scan",
-  tested: true,
-  capabilities: ["sip_registration", "sip_to_volte", "asterisk_audiosocket"],
-  notes: ["UC100 是当前测试档案；客户现场可替换为其他语音网关适配器。"],
+  key: "dinstar_8t_server",
+  label: "鼎信 8T 多卡网关（服务器 Asterisk）",
+  vendor: "Dinstar/鼎信",
+  model: "8T GSM/LTE VoIP Gateway",
+  category: "multi_sim_lte_gateway",
+  transport: "sip_udp_server_registered",
+  host: "",
+  sipPort: 5060,
+  trunkName: "dinstar8t",
+  maxChannels: 8,
+  lineType: "multi_sim_cellular",
+  adminUrl: "",
+  discoveryMode: "gateway_registers_to_server",
+  tested: false,
+  capabilities: ["sip_registration_to_server", "multi_sim", "8_channel_pool", "asterisk_audiosocket"],
+  notes: ["交付默认让鼎信 8T 主动注册到服务器 Asterisk，客户电脑不需要内置 Asterisk。"],
 };
 
 const fallbackTelephonyConfig: TelephonyConfig = {
   gatewayMode: "simulator",
+  asteriskDeploymentMode: "server",
   voiceGatewayProfile: fallbackVoiceGatewayProfile,
   queueEnabled: false,
   queueName: "ai_acq:outbound_tasks",
@@ -219,8 +220,8 @@ const fallbackTelephonyConfig: TelephonyConfig = {
   asteriskHost: "127.0.0.1",
   asteriskAmiPort: 5038,
   asteriskUsernameConfigured: false,
-  asteriskTrunkName: "uc100",
-  asteriskMaxChannels: 1,
+  asteriskTrunkName: "dinstar8t",
+  asteriskMaxChannels: 8,
   asteriskLiveCallEnabled: false,
   asteriskBulkCallEnabled: false,
 };
@@ -228,6 +229,7 @@ const fallbackTelephonyConfig: TelephonyConfig = {
 const fallbackTelephonyHealth: TelephonyHealth = {
   checkedAt: new Date().toISOString(),
   gatewayMode: "simulator",
+  asteriskDeploymentMode: "server",
   voiceGatewayProfile: fallbackVoiceGatewayProfile,
   configured: false,
   liveCallEnabled: false,
@@ -238,7 +240,7 @@ const fallbackTelephonyHealth: TelephonyHealth = {
   trunkConfigured: false,
   trunkReachable: null,
   trunkStatus: "待配置",
-  maxChannels: 1,
+  maxChannels: 8,
   readyForTestCall: false,
   errors: ["Asterisk AMI 账号或密码未配置"],
 };
@@ -1257,6 +1259,9 @@ function isClientEnabledSetting(setting: SystemSetting) {
 
 function formatSettingValue(setting: SystemSetting, value = setting.value) {
   if (setting.valueType === "boolean") return value === "true" ? "开启" : "关闭";
+  if (setting.groupKey === "telephony" && setting.itemKey === "asterisk_deployment_mode") {
+    return value === "server" ? "服务器托管" : "客户端内置";
+  }
   if (setting.groupKey === "telephony" && setting.itemKey === "gateway_mode") {
     return value === "asterisk" ? "真实线路" : "模拟线路";
   }
@@ -5387,7 +5392,7 @@ function App() {
             <article className="panel span-2 line-health-panel">
               <div className="panel-title">
                 <div>
-                  <p>客户端Asterisk / 语音网关</p>
+                  <p>{telephonyConfig.asteriskDeploymentMode === "server" ? "服务器Asterisk / 语音网关" : "客户端Asterisk / 语音网关"}</p>
                   <h2>真实线路接入</h2>
                 </div>
                 <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
@@ -5395,6 +5400,43 @@ function App() {
                   {isCheckingTelephony ? "预检中" : "预检线路"}
                 </button>
               </div>
+              {telephonyConfig.asteriskDeploymentMode === "server" ? (
+                <div className={`asterisk-sidecar-strip is-${telephonyHealth.authenticated ? "pass" : telephonyHealth.amiReachable ? "warn" : "fail"}`}>
+                  <div className="asterisk-sidecar-main">
+                    <span className={`line-preflight-badge is-${telephonyHealth.authenticated ? "pass" : telephonyHealth.amiReachable ? "warn" : "fail"}`}>
+                      {telephonyHealth.authenticated ? "PASS" : telephonyHealth.amiReachable ? "WARN" : "FAIL"}
+                    </span>
+                    <div>
+                      <strong>服务器 Asterisk：{telephonyHealth.authenticated ? "AMI 已登录" : telephonyHealth.amiReachable ? "AMI 可达" : "待连接"}</strong>
+                      <small>交付默认由鼎信 8T 主动注册到云端 Asterisk；客户电脑不再依赖本机 Asterisk runtime。</small>
+                    </div>
+                  </div>
+                  <div className="asterisk-sidecar-meta">
+                    <div>
+                      <span>服务器 AMI</span>
+                      <strong>{telephonyConfig.asteriskHost}:{telephonyConfig.asteriskAmiPort}</strong>
+                    </div>
+                    <div>
+                      <span>网关注册</span>
+                      <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}</strong>
+                    </div>
+                    <div>
+                      <span>交付设备</span>
+                      <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
+                    </div>
+                    <div>
+                      <span>通道池</span>
+                      <strong>{telephonyConfig.voiceGatewayProfile.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
+                    </div>
+                  </div>
+                  <div className="asterisk-sidecar-actions">
+                    <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
+                      <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
+                      刷新服务器线路
+                    </button>
+                  </div>
+                </div>
+              ) : (
               <div className={`asterisk-sidecar-strip is-${asteriskSidecarBadgeStatus(asteriskSidecarStatus)}`}>
                 <div className="asterisk-sidecar-main">
                   <span className={`line-preflight-badge is-${asteriskSidecarBadgeStatus(asteriskSidecarStatus)}`}>
@@ -5467,16 +5509,33 @@ function App() {
                   </button>
                 </div>
               </div>
-              <div className={`customer-delivery-card is-${isDesktopClient ? asteriskCustomerDeliveryStatus(asteriskSidecarStatus) : "warn"}`}>
+              )}
+              <div className={`customer-delivery-card is-${
+                telephonyConfig.asteriskDeploymentMode === "server"
+                  ? telephonyHealth.authenticated && telephonyHealth.trunkReachable
+                    ? "pass"
+                    : telephonyHealth.amiReachable
+                      ? "warn"
+                      : "fail"
+                  : isDesktopClient
+                    ? asteriskCustomerDeliveryStatus(asteriskSidecarStatus)
+                    : "warn"
+              }`}>
                 <div className="customer-delivery-copy">
                   <span>客户交付状态</span>
                   <strong>
-                    {isDesktopClient
+                    {telephonyConfig.asteriskDeploymentMode === "server"
+                      ? telephonyHealth.readyForTestCall
+                        ? "云端线路可单号试拨"
+                        : "等待网关注册到云端 Asterisk"
+                      : isDesktopClient
                       ? asteriskSidecarStatus?.customerDelivery?.title ?? "等待客户端检测语音网关"
                       : "网页预览不能作为客户现场运行方式"}
                   </strong>
                   <small>
-                    {isDesktopClient
+                    {telephonyConfig.asteriskDeploymentMode === "server"
+                      ? "客户交付时只需要配置鼎信 8T 的 SIP Server/账号密码，让网关主动注册到服务器；客户端负责配置、监控和发起任务。"
+                      : isDesktopClient
                       ? asteriskSidecarStatus?.customerDelivery?.message ??
                         "桌面客户端会负责发现语音网关、生成 Asterisk 配置并输出后端环境。"
                       : "交付给客户时必须安装桌面客户端；设备发现、Asterisk、AMI 和本机媒体桥都在客户端内完成。"}
@@ -5487,13 +5546,19 @@ function App() {
                     <span>当前绑定</span>
                     <strong>
                       {asteriskSidecarStatus?.customerDelivery?.gatewayAddress ||
-                        `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
+                        (telephonyConfig.asteriskDeploymentMode === "server"
+                          ? `${telephonyConfig.asteriskHost}:${telephonyConfig.asteriskAmiPort}`
+                          : `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`)}
                     </strong>
                   </div>
                   <div>
                     <span>自动匹配</span>
                     <strong>
-                      {asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "updated"
+                      {telephonyConfig.asteriskDeploymentMode === "server"
+                        ? telephonyHealth.trunkReachable
+                          ? "已注册"
+                          : "待注册"
+                        : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "updated"
                         ? "已重绑"
                         : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "current"
                           ? "已确认"
@@ -5506,11 +5571,17 @@ function App() {
                   </div>
                   <div>
                     <span>上一地址</span>
-                    <strong>{asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}</strong>
+                    <strong>{telephonyConfig.asteriskDeploymentMode === "server" ? "不依赖客户网络地址" : asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}</strong>
                   </div>
                 </div>
                 <div className="customer-delivery-actions">
-                  {(isDesktopClient
+                  {(telephonyConfig.asteriskDeploymentMode === "server"
+                    ? [
+                        "在服务器 Asterisk 创建鼎信 8T 注册账号和 PJSIP endpoint。",
+                        "在鼎信 8T 后台填写服务器 SIP 地址、账号和密码。",
+                        "前端预检显示 AMI、Trunk、AudioSocket 通过后再做单号试拨。",
+                      ]
+                    : isDesktopClient
                     ? asteriskSidecarStatus?.customerDelivery?.actionItems ?? ["刷新客户端线路状态，确认设备绑定和 Asterisk 运行状态。"]
                     : ["安装并打开桌面客户端。", "让客户电脑和语音网关接入同一局域网。", "在客户端中刷新/启动内置 Asterisk。"]
                   ).map((item) => (
@@ -5518,7 +5589,7 @@ function App() {
                   ))}
                 </div>
               </div>
-              {asteriskSidecarStatus && (
+              {telephonyConfig.asteriskDeploymentMode !== "server" && asteriskSidecarStatus && (
                 <div className="asterisk-sidecar-checks">
                   {asteriskSidecarStatus.checks.map((check) => (
                     <div className="asterisk-sidecar-check" key={check.key}>

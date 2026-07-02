@@ -29,6 +29,7 @@ backend/.dm_browser_profiles/
 # Node / frontend
 frontend/node_modules/
 frontend/dist/
+frontend/release/
 frontend/.electron-user-data/
 frontend/*.tsbuildinfo
 frontend/vite.config.js

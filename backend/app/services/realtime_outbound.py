@@ -11,6 +11,7 @@ from uuid import uuid4
 from app.core.config import settings
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
 from app.services.realtime_sales_brain import score_realtime_events
+from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.voice_gateway_profiles import voice_gateway_label
 
 
@@ -127,7 +128,8 @@ _SESSIONS: dict[str, RealtimeSession] = {}
 
 
 def _normalize_conversation_route(route: str | None) -> str:
-    normalized = (route or settings.realtime_conversation_mode or "pipeline").strip().lower()
+    runtime_config = get_runtime_ai_config()
+    normalized = (route or runtime_config.realtime_conversation_mode or "pipeline").strip().lower()
     return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
 
 
@@ -150,8 +152,9 @@ def _route_latency(route: str, llm_ready: bool | None = None) -> int:
 
 
 def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[dict[str, object]]:
+    runtime_config = get_runtime_ai_config()
     llm_ready = deepseek_configured()
-    dashscope_ready = bool(settings.dashscope_api_key.strip())
+    dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
     return [
         {
             "key": "omni",
@@ -177,12 +180,13 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
 
 
 def build_realtime_pipeline() -> dict[str, object]:
+    runtime_config = get_runtime_ai_config()
     gateway_label = voice_gateway_label()
     audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
-    conversation_mode = _normalize_conversation_route(settings.realtime_conversation_mode)
+    conversation_mode = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
     if conversation_mode == "omni":
-        dashscope_ready = bool(settings.dashscope_api_key.strip())
+        dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
         steps = [
             _pipeline_step(
                 "media_bridge",
@@ -201,7 +205,7 @@ def build_realtime_pipeline() -> dict[str, object]:
                 "omni_realtime",
                 "端到端实时语音模型",
                 "pass" if dashscope_ready else "warn",
-                settings.dashscope_omni_realtime_model,
+                runtime_config.dashscope_omni_realtime_model,
                 520,
                 "Qwen Omni 直接听语音、理解上下文并流式输出语音，素材话术作为实时销售指令注入。",
             ),
@@ -246,7 +250,7 @@ def build_realtime_pipeline() -> dict[str, object]:
                 else f"真实媒体桥未完全就绪；需要 Asterisk/{gateway_label}、单号试拨开关和 AudioSocket bridge 同时在线。"
             ),
         ),
-        _pipeline_step("asr", "流式 ASR", "pass", settings.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
+        _pipeline_step("asr", "流式 ASR", "pass", runtime_config.realtime_asr_model, 380, "电话 8k PCM 直接送入 Paraformer realtime。"),
         _pipeline_step(
             "router",
             "语义意图路由",
@@ -259,7 +263,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             "llm",
             "LLM 生成",
             "pass" if llm_ready else "warn",
-            settings.deepseek_chat_model if llm_ready else "local rules fallback",
+            runtime_config.deepseek_chat_model if llm_ready else "local rules fallback",
             320 if llm_ready else 0,
             (
                 "DeepSeek 负责开放追问和复杂表达；电话主链路保留语义兜底，慢或失败不会卡住通话。"
@@ -271,7 +275,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             "tts",
             "流式 TTS",
             "pass",
-            settings.dashscope_realtime_tts_model,
+            runtime_config.dashscope_realtime_tts_model,
             140,
             "默认使用 Qwen-TTS 实时系统音色增量播放；客户在声音档案明确选择复刻音色时才切换到克隆音色。",
         ),

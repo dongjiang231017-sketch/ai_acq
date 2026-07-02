@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.admin import setup_admin
 from app.api.router import api_router
+from app.api.system_settings import _seed_settings
 from app.core.config import settings
+from app.db.session import SessionLocal
 
 
 def create_app() -> FastAPI:
@@ -20,6 +22,12 @@ def create_app() -> FastAPI:
 
     app.include_router(api_router, prefix=settings.api_prefix)
     setup_admin(app)
+
+    @app.on_event("startup")
+    def seed_runtime_settings() -> None:
+        with SessionLocal() as db:
+            _seed_settings(db)
+
     return app
 
 

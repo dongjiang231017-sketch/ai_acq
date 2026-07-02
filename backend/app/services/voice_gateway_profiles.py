@@ -48,6 +48,21 @@ class VoiceGatewayProfile:
 
 
 PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "dinstar_8t_server": {
+        "label": "鼎信 8T 多卡网关（服务器 Asterisk）",
+        "vendor": "Dinstar/鼎信",
+        "model": "8T GSM/LTE VoIP Gateway",
+        "category": "multi_sim_lte_gateway",
+        "transport": "sip_udp_server_registered",
+        "line_type": "multi_sim_cellular",
+        "tested": False,
+        "capabilities": ["sip_registration_to_server", "multi_sim", "8_channel_pool", "asterisk_audiosocket"],
+        "notes": [
+            "交付默认方案：鼎信 8T 主动注册到云端 Asterisk，客户电脑不需要内置 Asterisk。",
+            "并发按实际 SIM/蜂窝通道和运营商风控策略计算，默认按 8 路物理通道上限展示。",
+            "客户换网络时只要网关能访问公网 SIP/服务器地址，客户端后台链接不会跟着变。",
+        ],
+    },
     "uc100_sip_volte": {
         "label": "语音网关（UC100 测试档案）",
         "vendor": "ZHY",
@@ -99,7 +114,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
 
 
 def current_voice_gateway_profile() -> VoiceGatewayProfile:
-    key = _env("VOICE_GATEWAY_PROFILE", "AI_ACQ_VOICE_GATEWAY_PROFILE", default=settings.voice_gateway_profile).strip() or "uc100_sip_volte"
+    key = _env("VOICE_GATEWAY_PROFILE", "AI_ACQ_VOICE_GATEWAY_PROFILE", default=settings.voice_gateway_profile).strip() or "dinstar_8t_server"
     defaults = PROFILE_DEFAULTS.get(key, PROFILE_DEFAULTS["sip_volte_gateway"])
     host = _env("VOICE_GATEWAY_HOST", "AI_ACQ_VOICE_GATEWAY_HOST", "AI_ACQ_UC100_HOST", default=settings.voice_gateway_host)
     sip_port = _int_env("VOICE_GATEWAY_SIP_PORT", "AI_ACQ_VOICE_GATEWAY_SIP_PORT", "AI_ACQ_UC100_SIP_PORT", default=settings.voice_gateway_sip_port)

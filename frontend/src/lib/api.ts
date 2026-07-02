@@ -1,4 +1,18 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8017/api";
+const LOCAL_API_BASE_URL = "http://127.0.0.1:8017/api";
+const DEPLOYED_API_BASE_URL = "http://101.132.63.159/ai-acq-api/api";
+
+function resolveApiBaseUrl() {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configured) return configured;
+  if (typeof window === "undefined") return LOCAL_API_BASE_URL;
+
+  const { hostname, origin, protocol } = window.location;
+  if (protocol === "file:") return DEPLOYED_API_BASE_URL;
+  if (hostname === "127.0.0.1" || hostname === "localhost" || hostname === "0.0.0.0") return LOCAL_API_BASE_URL;
+  return `${origin.replace(/\/$/, "")}/ai-acq-api/api`;
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 export function apiAssetUrl(path: string) {
   if (!path) return "";
@@ -121,6 +135,7 @@ export type VoiceGatewayProfile = {
 
 export type TelephonyConfig = {
   gatewayMode: string;
+  asteriskDeploymentMode: string;
   voiceGatewayProfile: VoiceGatewayProfile;
   queueEnabled: boolean;
   queueName: string;
@@ -137,6 +152,7 @@ export type TelephonyConfig = {
 export type TelephonyHealth = {
   checkedAt: string;
   gatewayMode: string;
+  asteriskDeploymentMode: string;
   voiceGatewayProfile: VoiceGatewayProfile;
   configured: boolean;
   liveCallEnabled: boolean;

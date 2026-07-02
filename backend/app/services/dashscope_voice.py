@@ -12,6 +12,7 @@ from dashscope.audio.tts_v2.speech_synthesizer import AudioFormat
 
 from app.core.config import settings
 from app.models.growth import VoiceProfile, VoiceSample
+from app.services.runtime_ai_config import get_runtime_ai_config
 
 
 class VoiceProviderError(RuntimeError):
@@ -45,11 +46,11 @@ class SystemVoicePreviewResult:
 
 
 def _provider_name() -> str:
-    return (settings.voice_clone_provider or "dashscope").strip().lower()
+    return (get_runtime_ai_config().voice_clone_provider or "dashscope").strip().lower()
 
 
 def _api_key() -> str:
-    return settings.dashscope_api_key.strip()
+    return get_runtime_ai_config().dashscope_api_key.strip()
 
 
 def _configure_dashscope_sdk() -> None:
@@ -59,17 +60,17 @@ def _configure_dashscope_sdk() -> None:
 
 
 def _workspace() -> str | None:
-    value = settings.dashscope_workspace.strip()
+    value = get_runtime_ai_config().dashscope_workspace.strip()
     return value or None
 
 
 def _language_hints() -> list[str] | None:
-    hints = [item.strip() for item in settings.dashscope_voice_language_hints.split(",") if item.strip()]
+    hints = [item.strip() for item in get_runtime_ai_config().dashscope_voice_language_hints.split(",") if item.strip()]
     return hints or None
 
 
 def _normalized_prefix(profile: VoiceProfile) -> str:
-    configured = settings.dashscope_voice_prefix.strip().lower()
+    configured = get_runtime_ai_config().dashscope_voice_prefix.strip().lower()
     base = re.sub(r"[^a-z0-9]", "", configured or "aiacq")[:8] or "aiacq"
     suffix = re.sub(r"[^a-z0-9]", "", profile.id.lower())[:2]
     return (base + suffix)[:10]
@@ -77,9 +78,10 @@ def _normalized_prefix(profile: VoiceProfile) -> str:
 
 def dashscope_provider_status(probe: bool = False) -> VoiceProviderStatus:
     provider = _provider_name()
-    engine_name = settings.voice_clone_engine_name.strip() or "DashScope CosyVoice"
+    runtime_config = get_runtime_ai_config()
+    engine_name = runtime_config.voice_clone_engine_name.strip() or "DashScope CosyVoice"
     key_configured = bool(_api_key())
-    base_configured = bool(settings.voice_sample_public_base_url.strip())
+    base_configured = bool(runtime_config.voice_sample_public_base_url.strip())
 
     if provider != "dashscope":
         return VoiceProviderStatus(
@@ -89,13 +91,13 @@ def dashscope_provider_status(probe: bool = False) -> VoiceProviderStatus:
             status="不支持",
             message=f"当前只内置 DashScope CosyVoice 接入，暂不支持 {provider}。",
             engine_name=engine_name,
-            clone_model=settings.dashscope_voice_clone_model,
-            tts_model=settings.dashscope_tts_model,
+            clone_model=runtime_config.dashscope_voice_clone_model,
+            tts_model=runtime_config.dashscope_tts_model,
             sample_public_base_url_configured=base_configured,
         )
 
-    configured = bool(settings.voice_clone_training_enabled and key_configured)
-    if not settings.voice_clone_training_enabled:
+    configured = bool(runtime_config.voice_clone_training_enabled and key_configured)
+    if not runtime_config.voice_clone_training_enabled:
         status = "未启用"
         message = "声音复刻开关未启用，请配置 VOICE_CLONE_TRAINING_ENABLED=true。"
     elif not key_configured:
@@ -119,8 +121,8 @@ def dashscope_provider_status(probe: bool = False) -> VoiceProviderStatus:
                 status="连接失败",
                 message=f"DashScope 连接失败：{_safe_provider_error(exc)}",
                 engine_name=engine_name,
-                clone_model=settings.dashscope_voice_clone_model,
-                tts_model=settings.dashscope_tts_model,
+                clone_model=runtime_config.dashscope_voice_clone_model,
+                tts_model=runtime_config.dashscope_tts_model,
                 sample_public_base_url_configured=base_configured,
             )
         status = "连接正常" if base_configured else status
@@ -133,14 +135,14 @@ def dashscope_provider_status(probe: bool = False) -> VoiceProviderStatus:
         status=status,
         message=message,
         engine_name=engine_name,
-        clone_model=settings.dashscope_voice_clone_model,
-        tts_model=settings.dashscope_tts_model,
+        clone_model=runtime_config.dashscope_voice_clone_model,
+        tts_model=runtime_config.dashscope_tts_model,
         sample_public_base_url_configured=base_configured,
     )
 
 
 def public_sample_url(sample: VoiceSample) -> str:
-    base_url = settings.voice_sample_public_base_url.strip().rstrip("/")
+    base_url = get_runtime_ai_config().voice_sample_public_base_url.strip().rstrip("/")
     if not base_url:
         raise VoiceProviderError("DashScope 创建音色需要可公网访问的录音 URL，请先配置 VOICE_SAMPLE_PUBLIC_BASE_URL。")
     return f"{base_url}/api/voice/samples/{quote(sample.id)}/file"
@@ -154,7 +156,7 @@ def create_dashscope_voice_clone(profile: VoiceProfile, sample: VoiceSample, rec
     service = VoiceEnrollmentService(api_key=_api_key(), workspace=_workspace())
     try:
         voice_id = service.create_voice(
-            target_model=settings.dashscope_voice_clone_model,
+            target_model=get_runtime_ai_config().dashscope_voice_clone_model,
             prefix=_normalized_prefix(profile),
             url=public_sample_url(sample),
             language_hints=_language_hints(),
@@ -184,12 +186,12 @@ def synthesize_dashscope_preview(profile_id: str, record_id: str, voice_id: str)
     try:
         _configure_dashscope_sdk()
         synthesizer = SpeechSynthesizer(
-            model=settings.dashscope_tts_model,
+            model=get_runtime_ai_config().dashscope_tts_model,
             voice=voice_id,
             format=AudioFormat.WAV_16000HZ_MONO_16BIT,
             workspace=_workspace(),
         )
-        audio = synthesizer.call(settings.dashscope_preview_text)
+        audio = synthesizer.call(get_runtime_ai_config().dashscope_preview_text)
     except Exception as exc:  # noqa: BLE001
         raise VoiceProviderError(f"音色已创建，但生成试听失败：{_safe_provider_error(exc)}") from exc
 
@@ -206,10 +208,10 @@ def synthesize_qwen_system_voice_preview(voice_param: str, preview_text: str) ->
     try:
         response = dashscope.MultiModalConversation.call(
             api_key=_api_key(),
-            model=settings.dashscope_system_tts_model,
+            model=get_runtime_ai_config().dashscope_system_tts_model,
             text=preview_text,
             voice=voice_param,
-            language_type=settings.dashscope_system_tts_language_type,
+            language_type=get_runtime_ai_config().dashscope_system_tts_language_type,
         )
     except Exception as exc:  # noqa: BLE001
         raise VoiceProviderError(f"Qwen-TTS 试听生成失败：{_safe_provider_error(exc)}") from exc

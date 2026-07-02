@@ -127,6 +127,7 @@ class VoiceGatewayProfileRead(BaseModel):
 
 class TelephonyConfigRead(BaseModel):
     gateway_mode: Annotated[str, Field(alias="gatewayMode")]
+    asterisk_deployment_mode: Annotated[str, Field(alias="asteriskDeploymentMode")]
     voice_gateway_profile: Annotated[VoiceGatewayProfileRead, Field(alias="voiceGatewayProfile")]
     queue_enabled: Annotated[bool, Field(alias="queueEnabled")]
     queue_name: Annotated[str, Field(alias="queueName")]
@@ -143,6 +144,7 @@ class TelephonyConfigRead(BaseModel):
 class TelephonyHealthRead(BaseModel):
     checked_at: Annotated[datetime, Field(alias="checkedAt")]
     gateway_mode: Annotated[str, Field(alias="gatewayMode")]
+    asterisk_deployment_mode: Annotated[str, Field(alias="asteriskDeploymentMode")]
     voice_gateway_profile: Annotated[VoiceGatewayProfileRead, Field(alias="voiceGatewayProfile")]
     configured: bool
     live_call_enabled: Annotated[bool, Field(alias="liveCallEnabled")]
