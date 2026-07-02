@@ -1262,6 +1262,12 @@ function asteriskSidecarBadgeStatus(status?: AiAcqDesktopAsteriskStatus | null) 
   return "warn";
 }
 
+function asteriskCustomerDeliveryStatus(status?: AiAcqDesktopAsteriskStatus | null) {
+  const deliveryStatus = status?.customerDelivery?.status;
+  if (deliveryStatus === "pass" || deliveryStatus === "warn" || deliveryStatus === "fail") return deliveryStatus;
+  return asteriskSidecarBadgeStatus(status);
+}
+
 function telephonyPreflightStatusText(status: string) {
   if (status === "pass") return "PASS";
   if (status === "fail") return "FAIL";
@@ -5083,6 +5089,57 @@ function App() {
                   >
                     <RefreshCw size={16} />
                   </button>
+                </div>
+              </div>
+              <div className={`customer-delivery-card is-${isDesktopClient ? asteriskCustomerDeliveryStatus(asteriskSidecarStatus) : "warn"}`}>
+                <div className="customer-delivery-copy">
+                  <span>客户交付状态</span>
+                  <strong>
+                    {isDesktopClient
+                      ? asteriskSidecarStatus?.customerDelivery?.title ?? "等待客户端检测语音网关"
+                      : "网页预览不能作为客户现场运行方式"}
+                  </strong>
+                  <small>
+                    {isDesktopClient
+                      ? asteriskSidecarStatus?.customerDelivery?.message ??
+                        "桌面客户端会负责发现语音网关、生成 Asterisk 配置并输出后端环境。"
+                      : "交付给客户时必须安装桌面客户端；设备发现、Asterisk、AMI 和本机媒体桥都在客户端内完成。"}
+                  </small>
+                </div>
+                <div className="customer-delivery-meta">
+                  <div>
+                    <span>当前绑定</span>
+                    <strong>
+                      {asteriskSidecarStatus?.customerDelivery?.gatewayAddress ||
+                        `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>自动匹配</span>
+                    <strong>
+                      {asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "updated"
+                        ? "已重绑"
+                        : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "current"
+                          ? "已确认"
+                          : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "not_found"
+                            ? "未发现"
+                            : isDesktopClient
+                              ? "待检测"
+                              : "桌面端执行"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>上一地址</span>
+                    <strong>{asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}</strong>
+                  </div>
+                </div>
+                <div className="customer-delivery-actions">
+                  {(isDesktopClient
+                    ? asteriskSidecarStatus?.customerDelivery?.actionItems ?? ["刷新客户端线路状态，确认设备绑定和 Asterisk 运行状态。"]
+                    : ["安装并打开桌面客户端。", "让客户电脑和语音网关接入同一局域网。", "在客户端中刷新/启动内置 Asterisk。"]
+                  ).map((item) => (
+                    <span key={item}>{item}</span>
+                  ))}
                 </div>
               </div>
               {asteriskSidecarStatus && (

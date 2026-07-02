@@ -99,6 +99,16 @@ type AiAcqDesktopAsteriskStatus = {
       message: string;
     };
   };
+  customerDelivery?: {
+    status: "pass" | "warn" | "fail" | string;
+    title: string;
+    message: string;
+    gatewayAddress: string;
+    previousGatewayAddress?: string;
+    discoveryStatus?: string;
+    discoverySource?: string;
+    actionItems: string[];
+  };
   configDir: string;
   stateDir: string;
   backendEnvPath: string;

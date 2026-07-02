@@ -47,6 +47,7 @@ class AsteriskSidecar {
     const amiReachable = await isTcpOpen("127.0.0.1", layout.state.amiPort, 350);
     const audioSocketReachable = await isTcpOpen(layout.state.audioSocketHost, layout.state.audioSocketPort, 350);
     const checks = this.buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable, voiceGatewayDiscovery });
+    const customerDelivery = this.buildCustomerDelivery({ layout, runtime, running, amiReachable, audioSocketReachable, voiceGatewayDiscovery });
     return {
       deliveryMode: "client-sidecar",
       runtimeMode: runtime.mode,
@@ -78,6 +79,7 @@ class AsteriskSidecar {
       stateDir: layout.stateDir,
       backendEnvPath: layout.backendEnvPath,
       backendEnvReady: fs.existsSync(layout.backendEnvPath),
+      customerDelivery,
       checks,
       lastExit: this.lastExit,
       nextStep: this.nextStep({ runtime, running, amiReachable, audioSocketReachable, layout }),
@@ -599,6 +601,71 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
           : `Asterisk 接通后会连接 AudioSocket：${layout.state.audioSocketHost}:${layout.state.audioSocketPort}，请先启动实时音频桥。`,
       },
     ];
+  }
+
+  buildCustomerDelivery({ layout, runtime, running, amiReachable, audioSocketReachable, voiceGatewayDiscovery }) {
+    const gatewayAddress = `${layout.state.voiceGatewayHost}:${layout.state.voiceGatewaySipPort}`;
+    const actionItems = [];
+    let status = "pass";
+    let title = "客户现场可单号试拨";
+    let message = `客户端已绑定语音网关 ${gatewayAddress}，后端环境已生成，下一步做单号真实拨测。`;
+
+    if (!runtime.found) {
+      status = "fail";
+      title = "安装包缺少 Asterisk 运行时";
+      message = "客户电脑不能依赖开发机 Docker 或网页预览，必须由桌面客户端内置或指定 Asterisk。";
+      actionItems.push("把 Asterisk runtime 打进桌面客户端安装包，或用 AI_ACQ_ASTERISK_BIN 指向本机可执行文件。");
+    } else if (voiceGatewayDiscovery?.status === "not_found") {
+      status = "fail";
+      title = "没有在当前网络发现语音网关";
+      message = voiceGatewayDiscovery.message || "旧网关地址不可达，当前局域网没有识别到可绑定的语音网关。";
+      actionItems.push("确认客户电脑和语音网关接在同一个路由器或同一局域网。");
+      actionItems.push("确认语音网关已通电、网线接入正确，后台页面能从客户电脑打开。");
+      actionItems.push("如果客户现场有多个网段，先在系统设置里手动指定网关 IP，再重新预检。");
+    } else if (!layout.state.voiceGatewaySipUsername || !layout.state.voiceGatewaySipPassword) {
+      status = "warn";
+      title = "已发现网关，但缺少 SIP 注册账号";
+      message = `客户端可看到语音网关 ${gatewayAddress}，但还没有可注册到网关的 SIP 分机账号。`;
+      actionItems.push("在网关后台创建/确认 SIP 分机账号，并把账号密码写入客户端网关配置。");
+      actionItems.push("UC100 实测档案需要 SIP 分机作为路由来源，不能只配 SIP 中继名。");
+    } else if (!running && !amiReachable) {
+      status = "warn";
+      title = "设备已绑定，Asterisk 还未启动";
+      message = `语音网关地址已匹配到 ${gatewayAddress}，点击启动内置 Asterisk 后会自动注册 trunk。`;
+      actionItems.push("点击「启动内置Asterisk」。");
+    } else if (!amiReachable) {
+      status = "warn";
+      title = "Asterisk 启动中，等待 AMI";
+      message = "Asterisk 进程已启动，但本机 AMI 端口还没有通过健康检查。";
+      actionItems.push("等待 3-10 秒后刷新；若仍失败，查看客户端日志目录。");
+    } else if (!audioSocketReachable) {
+      status = "warn";
+      title = "线路已准备，实时语音桥未启动";
+      message = "电话可通过 Asterisk 发起，但接通后还不能进入 AI 实时听说。";
+      actionItems.push("启动后端实时 AudioSocket bridge，再做单号试拨。");
+    } else if (voiceGatewayDiscovery?.status === "updated") {
+      title = "已自动重绑新网络下的语音网关";
+      message = voiceGatewayDiscovery.message || `客户端已把语音网关更新为 ${gatewayAddress}。`;
+      actionItems.push(voiceGatewayDiscovery.reload?.message || "已重写 Asterisk 和后端环境配置。");
+      actionItems.push("现在做单号试拨，用蜂窝侧接通和 AudioSocket 事件确认真实通话。");
+    } else {
+      actionItems.push("点击「预检线路」，确认 AMI、Trunk、单号试拨开关全部通过。");
+      actionItems.push("先做单号试拨，页面必须显示蜂窝侧确认和媒体链路确认后，才允许进入批量。");
+    }
+
+    return {
+      status,
+      title,
+      message,
+      gatewayAddress,
+      previousGatewayAddress:
+        voiceGatewayDiscovery?.previousHost && voiceGatewayDiscovery?.previousSipPort
+          ? `${voiceGatewayDiscovery.previousHost}:${voiceGatewayDiscovery.previousSipPort}`
+          : "",
+      discoveryStatus: voiceGatewayDiscovery?.status || "unknown",
+      discoverySource: voiceGatewayDiscovery?.source || "",
+      actionItems,
+    };
   }
 
   nextStep({ runtime, running, amiReachable, audioSocketReachable, layout }) {
