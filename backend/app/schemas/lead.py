@@ -14,9 +14,12 @@ class LeadCreate(BaseModel):
     contact_title: Annotated[str | None, Field(alias="contactTitle")] = None
     wechat_id: Annotated[str | None, Field(alias="wechatId")] = None
     platform_homepage_url: Annotated[str | None, Field(alias="platformHomepageUrl")] = None
+    source_poi_id: Annotated[str | None, Field(alias="sourcePoiId")] = None
     province: str | None = None
     district: str | None = None
     address: str | None = None
+    longitude: str | None = None
+    latitude: str | None = None
     source: str = "手动录入"
     intent_score: Annotated[int, Field(ge=0, le=100, alias="intentScore")] = 60
     status: str = "待外呼"
@@ -39,9 +42,12 @@ class LeadRead(BaseModel):
     contact_title: Annotated[str | None, Field(alias="contactTitle")]
     wechat_id: Annotated[str | None, Field(alias="wechatId")]
     platform_homepage_url: Annotated[str | None, Field(alias="platformHomepageUrl")]
+    source_poi_id: Annotated[str | None, Field(alias="sourcePoiId")]
     province: str | None
     district: str | None
     address: str | None
+    longitude: str | None
+    latitude: str | None
     source: str
     intent_score: Annotated[int, Field(alias="intentScore")]
     status: str

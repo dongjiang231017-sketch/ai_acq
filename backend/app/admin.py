@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.security import hash_password, verify_password
 from app.db.session import SessionLocal, engine
 from app.models.audit import AuditLog
+from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
 from app.models.user import AdminUser, RegistrationRequest, Role, User, UserRole
@@ -24,6 +25,12 @@ from app.services.registration import (
     RegistrationReviewError,
     approve_registration_request,
     reject_registration_request,
+)
+from app.services.platform_browser import (
+    BrowserSessionError,
+    clear_platform_browser_session,
+    open_platform_login_window,
+    validate_platform_browser_session,
 )
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
@@ -66,6 +73,12 @@ def _localized_file_input(self: FileInputWidget, field, **kwargs) -> Markup:
 
 
 FileInputWidget.__call__ = _localized_file_input
+
+
+def _format_user(user: User | None) -> str:
+    if user is None:
+        return "-"
+    return user.display_name or user.username or "-"
 
 
 class AdminAuth(AuthenticationBackend):
@@ -142,11 +155,12 @@ class MerchantLeadAdmin(ModelView, model=MerchantLead):
         MerchantLead.category,
         MerchantLead.contact_name,
         MerchantLead.phone,
-        MerchantLead.owner_user_id,
+        MerchantLead.owner_user,
         MerchantLead.intent_score,
         MerchantLead.status,
         MerchantLead.follow_up_status,
         MerchantLead.source,
+        MerchantLead.source_poi_id,
         MerchantLead.created_at,
         MerchantLead.updated_at,
     ]
@@ -157,6 +171,7 @@ class MerchantLeadAdmin(ModelView, model=MerchantLead):
         MerchantLead.city,
         MerchantLead.address,
         MerchantLead.platform_homepage_url,
+        MerchantLead.source_poi_id,
     ]
     column_sortable_list = [
         MerchantLead.created_at,
@@ -176,21 +191,385 @@ class MerchantLeadAdmin(ModelView, model=MerchantLead):
         MerchantLead.contact_title: "联系人职务",
         MerchantLead.wechat_id: "微信号",
         MerchantLead.platform_homepage_url: "平台主页",
+        MerchantLead.source_poi_id: "来源编号",
         MerchantLead.province: "省份",
         MerchantLead.district: "区县",
         MerchantLead.address: "地址",
+        MerchantLead.longitude: "经度",
+        MerchantLead.latitude: "纬度",
         MerchantLead.source: "来源",
         MerchantLead.intent_score: "意向分",
         MerchantLead.status: "状态",
         MerchantLead.follow_up_status: "跟进状态",
         MerchantLead.remark: "备注",
         MerchantLead.owner_user_id: "负责人",
+        MerchantLead.owner_user: "负责人",
         MerchantLead.created_by_user_id: "创建人",
+        MerchantLead.created_by_user: "创建人",
         MerchantLead.last_contact_at: "最近联系时间",
         MerchantLead.next_follow_up_at: "下次跟进时间",
         MerchantLead.created_at: "创建时间",
         MerchantLead.updated_at: "更新时间",
     }
+    column_formatters = {
+        MerchantLead.owner_user: lambda model, _: _format_user(model.owner_user),
+        MerchantLead.created_by_user: lambda model, _: _format_user(model.created_by_user),
+    }
+    column_formatters_detail = column_formatters
+
+
+class LeadProviderConfigAdmin(ModelView, model=LeadProviderConfig):
+    name = "接口配置"
+    name_plural = "采集接口配置"
+    icon = "fa-solid fa-key"
+
+    column_list = [
+        LeadProviderConfig.name,
+        LeadProviderConfig.provider,
+        LeadProviderConfig.enabled,
+        LeadProviderConfig.daily_limit,
+        LeadProviderConfig.qps_limit,
+        LeadProviderConfig.updated_at,
+    ]
+    column_searchable_list = [LeadProviderConfig.name, LeadProviderConfig.provider, LeadProviderConfig.remark]
+    column_sortable_list = [LeadProviderConfig.updated_at, LeadProviderConfig.provider]
+    column_default_sort = [(LeadProviderConfig.updated_at, True)]
+    column_details_exclude_list = [LeadProviderConfig.api_key, LeadProviderConfig.secret_key]
+    form_overrides = {
+        "api_key": PasswordField,
+        "secret_key": PasswordField,
+    }
+    form_widget_args = {
+        "api_key": {
+            "autocomplete": "new-password",
+            "placeholder": "编辑时留空表示不修改",
+        },
+        "secret_key": {
+            "autocomplete": "new-password",
+            "placeholder": "没有则留空；编辑时留空表示不修改",
+        },
+    }
+    form_args = {
+        "api_key": {
+            "label": "访问密钥",
+            "description": "地图平台填写访问密钥；平台公开页面采集来源可留空。",
+            "validators": [Optional()],
+        },
+        "secret_key": {
+            "label": "签名密钥",
+            "description": "百度如果启用签名校验可填写；其他来源没有则留空。",
+            "validators": [Optional()],
+        },
+    }
+    column_labels = {
+        LeadProviderConfig.provider: "平台编码",
+        LeadProviderConfig.name: "平台名称",
+        LeadProviderConfig.api_key: "访问密钥",
+        LeadProviderConfig.secret_key: "签名密钥",
+        LeadProviderConfig.service_url: "接口地址",
+        LeadProviderConfig.enabled: "启用",
+        LeadProviderConfig.daily_limit: "日限额",
+        LeadProviderConfig.qps_limit: "每秒限额",
+        LeadProviderConfig.remark: "备注",
+        LeadProviderConfig.created_at: "创建时间",
+        LeadProviderConfig.updated_at: "更新时间",
+    }
+
+    async def on_model_change(self, data: dict, model: LeadProviderConfig, is_created: bool, request: Request) -> None:
+        if not is_created:
+            if not data.get("api_key"):
+                data["api_key"] = model.api_key
+            if not data.get("secret_key"):
+                data["secret_key"] = model.secret_key
+
+
+class PlatformBrowserSessionAdmin(ModelView, model=PlatformBrowserSession):
+    name = "浏览器登录态"
+    name_plural = "平台浏览器登录态"
+    icon = "fa-solid fa-desktop"
+
+    can_create = False
+    can_delete = False
+    can_edit = False
+
+    column_list = [
+        PlatformBrowserSession.name,
+        PlatformBrowserSession.provider,
+        PlatformBrowserSession.status,
+        PlatformBrowserSession.login_process_id,
+        PlatformBrowserSession.last_login_started_at,
+        PlatformBrowserSession.last_login_finished_at,
+        PlatformBrowserSession.last_validated_at,
+        PlatformBrowserSession.updated_at,
+    ]
+    column_searchable_list = [
+        PlatformBrowserSession.name,
+        PlatformBrowserSession.provider,
+        PlatformBrowserSession.status,
+        PlatformBrowserSession.last_error,
+        PlatformBrowserSession.note,
+    ]
+    column_sortable_list = [
+        PlatformBrowserSession.updated_at,
+        PlatformBrowserSession.last_validated_at,
+        PlatformBrowserSession.provider,
+    ]
+    column_default_sort = [(PlatformBrowserSession.updated_at, True)]
+    column_labels = {
+        PlatformBrowserSession.provider: "平台编码",
+        PlatformBrowserSession.name: "平台名称",
+        PlatformBrowserSession.login_url: "登录入口",
+        PlatformBrowserSession.home_url: "首页地址",
+        PlatformBrowserSession.profile_dir: "本地配置目录",
+        PlatformBrowserSession.status: "状态",
+        PlatformBrowserSession.login_process_id: "登录进程 PID",
+        PlatformBrowserSession.last_login_started_at: "最近打开窗口",
+        PlatformBrowserSession.last_login_finished_at: "最近关闭窗口",
+        PlatformBrowserSession.last_validated_at: "最近校验时间",
+        PlatformBrowserSession.last_error: "最近错误",
+        PlatformBrowserSession.note: "说明",
+        PlatformBrowserSession.created_at: "创建时间",
+        PlatformBrowserSession.updated_at: "更新时间",
+    }
+
+    def _action_redirect(self, request: Request) -> RedirectResponse:
+        return RedirectResponse(request.url_for("admin:list", identity=self.identity), status_code=302)
+
+    def _selected_ids(self, request: Request) -> list[str]:
+        return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+
+    @action(
+        name="open-login",
+        label="打开登录窗口",
+        confirmation_message="确认打开选中平台的登录窗口？请在弹出的浏览器里手动登录，登录后直接关闭窗口。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def open_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要登录的平台")
+            return self._action_redirect(request)
+
+        opened: list[str] = []
+        errors: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    errors.append(f"未找到记录：{session_id}")
+                    continue
+                try:
+                    open_platform_login_window(db, session.provider)
+                    opened.append(session.name)
+                except BrowserSessionError as exc:
+                    errors.append(str(exc))
+
+        if opened:
+            Flash.success(request, "已打开登录窗口：" + "；".join(opened))
+        if errors:
+            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+    @action(
+        name="validate-session",
+        label="校验登录态",
+        confirmation_message="确认校验选中平台的本地登录态？",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def validate_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要校验的平台")
+            return self._action_redirect(request)
+
+        results: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    continue
+                validated = validate_platform_browser_session(db, session.provider)
+                message = validated.name + "：" + validated.status
+                if validated.last_error:
+                    message += f"（{validated.last_error}）"
+                results.append(message)
+
+        if results:
+            Flash.success(request, "；".join(results))
+        return self._action_redirect(request)
+
+    @action(
+        name="clear-session",
+        label="清空登录态",
+        confirmation_message="确认删除选中平台的本地登录态目录？下次使用前需要重新登录。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def clear_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要清空的平台")
+            return self._action_redirect(request)
+
+        cleared: list[str] = []
+        errors: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    errors.append(f"未找到记录：{session_id}")
+                    continue
+                try:
+                    clear_platform_browser_session(db, session.provider)
+                    cleared.append(session.name)
+                except BrowserSessionError as exc:
+                    errors.append(str(exc))
+
+        if cleared:
+            Flash.success(request, "已清空登录态：" + "；".join(cleared))
+        if errors:
+            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+
+class LeadCollectionTaskAdmin(ModelView, model=LeadCollectionTask):
+    name = "采集任务"
+    name_plural = "采集任务"
+    icon = "fa-solid fa-magnifying-glass-location"
+
+    column_list = [
+        LeadCollectionTask.name,
+        LeadCollectionTask.provider,
+        LeadCollectionTask.cities,
+        LeadCollectionTask.categories,
+        LeadCollectionTask.keywords,
+        LeadCollectionTask.target_per_keyword,
+        LeadCollectionTask.status,
+        LeadCollectionTask.last_run_status,
+        LeadCollectionTask.owner_user,
+        LeadCollectionTask.created_at,
+    ]
+    column_searchable_list = [LeadCollectionTask.name, LeadCollectionTask.provider, LeadCollectionTask.status]
+    column_sortable_list = [LeadCollectionTask.created_at, LeadCollectionTask.updated_at]
+    column_default_sort = [(LeadCollectionTask.created_at, True)]
+    column_labels = {
+        LeadCollectionTask.name: "任务名称",
+        LeadCollectionTask.provider: "数据源",
+        LeadCollectionTask.cities: "城市",
+        LeadCollectionTask.categories: "品类",
+        LeadCollectionTask.keywords: "关键词",
+        LeadCollectionTask.target_per_keyword: "每组目标数",
+        LeadCollectionTask.status: "状态",
+        LeadCollectionTask.last_run_status: "最近运行",
+        LeadCollectionTask.remark: "备注",
+        LeadCollectionTask.owner_user_id: "所属用户",
+        LeadCollectionTask.owner_user: "所属用户",
+        LeadCollectionTask.created_by_user_id: "创建人",
+        LeadCollectionTask.created_by_user: "创建人",
+        LeadCollectionTask.created_at: "创建时间",
+        LeadCollectionTask.updated_at: "更新时间",
+    }
+    column_formatters = {
+        LeadCollectionTask.owner_user: lambda model, _: _format_user(model.owner_user),
+        LeadCollectionTask.created_by_user: lambda model, _: _format_user(model.created_by_user),
+    }
+    column_formatters_detail = column_formatters
+
+
+class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
+    name = "采集运行"
+    name_plural = "采集运行"
+    icon = "fa-solid fa-rotate"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        LeadCollectionRun.task_id,
+        LeadCollectionRun.provider,
+        LeadCollectionRun.status,
+        LeadCollectionRun.requested_count,
+        LeadCollectionRun.fetched_count,
+        LeadCollectionRun.inserted_count,
+        LeadCollectionRun.duplicate_count,
+        LeadCollectionRun.failed_count,
+        LeadCollectionRun.started_at,
+        LeadCollectionRun.finished_at,
+    ]
+    column_searchable_list = [LeadCollectionRun.provider, LeadCollectionRun.status, LeadCollectionRun.error_message]
+    column_sortable_list = [LeadCollectionRun.started_at, LeadCollectionRun.finished_at]
+    column_default_sort = [(LeadCollectionRun.started_at, True)]
+    column_labels = {
+        LeadCollectionRun.task_id: "任务",
+        LeadCollectionRun.provider: "数据源",
+        LeadCollectionRun.status: "状态",
+        LeadCollectionRun.requested_count: "计划请求",
+        LeadCollectionRun.fetched_count: "抓取数量",
+        LeadCollectionRun.inserted_count: "入库数量",
+        LeadCollectionRun.duplicate_count: "重复数量",
+        LeadCollectionRun.failed_count: "失败数量",
+        LeadCollectionRun.error_message: "错误信息",
+        LeadCollectionRun.started_at: "开始时间",
+        LeadCollectionRun.finished_at: "结束时间",
+    }
+
+
+class RawLeadRecordAdmin(ModelView, model=RawLeadRecord):
+    name = "原始线索"
+    name_plural = "原始线索"
+    icon = "fa-solid fa-database"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        RawLeadRecord.name,
+        RawLeadRecord.owner_user,
+        RawLeadRecord.provider,
+        RawLeadRecord.source_poi_id,
+        RawLeadRecord.city,
+        RawLeadRecord.district,
+        RawLeadRecord.category,
+        RawLeadRecord.phone,
+        RawLeadRecord.import_status,
+        RawLeadRecord.created_at,
+    ]
+    column_searchable_list = [
+        RawLeadRecord.name,
+        RawLeadRecord.source_poi_id,
+        RawLeadRecord.source_url,
+        RawLeadRecord.city,
+        RawLeadRecord.district,
+        RawLeadRecord.phone,
+        RawLeadRecord.address,
+    ]
+    column_sortable_list = [RawLeadRecord.created_at, RawLeadRecord.city]
+    column_default_sort = [(RawLeadRecord.created_at, True)]
+    column_labels = {
+        RawLeadRecord.task_id: "任务",
+        RawLeadRecord.run_id: "运行",
+        RawLeadRecord.lead_id: "正式线索",
+        RawLeadRecord.owner_user_id: "所属用户",
+        RawLeadRecord.owner_user: "所属用户",
+        RawLeadRecord.provider: "数据源",
+        RawLeadRecord.source_poi_id: "来源编号",
+        RawLeadRecord.name: "商户名称",
+        RawLeadRecord.city: "城市",
+        RawLeadRecord.district: "区县",
+        RawLeadRecord.category: "品类",
+        RawLeadRecord.phone: "电话",
+        RawLeadRecord.address: "地址",
+        RawLeadRecord.source_url: "来源页面",
+        RawLeadRecord.longitude: "经度",
+        RawLeadRecord.latitude: "纬度",
+        RawLeadRecord.import_status: "入库状态",
+        RawLeadRecord.raw_payload: "原始数据",
+        RawLeadRecord.created_at: "创建时间",
+    }
+    column_formatters = {
+        RawLeadRecord.owner_user: lambda model, _: _format_user(model.owner_user),
+    }
+    column_formatters_detail = column_formatters
 
 
 class OutreachTaskAdmin(ModelView, model=OutreachTask):
@@ -529,6 +908,11 @@ def setup_admin(app: FastAPI) -> None:
         authentication_backend=authentication_backend,
     )
     admin.add_view(MerchantLeadAdmin)
+    admin.add_view(LeadProviderConfigAdmin)
+    admin.add_view(PlatformBrowserSessionAdmin)
+    admin.add_view(LeadCollectionTaskAdmin)
+    admin.add_view(LeadCollectionRunAdmin)
+    admin.add_view(RawLeadRecordAdmin)
     admin.add_view(OutreachTaskAdmin)
     admin.add_view(AdminUserAdmin)
     admin.add_view(UserAdmin)

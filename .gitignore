@@ -19,6 +19,7 @@ __pycache__/
 htmlcov/
 backend/.venv/
 backend/local.db
+backend/.runtime/
 
 # Node / frontend
 frontend/node_modules/

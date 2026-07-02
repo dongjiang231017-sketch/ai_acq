@@ -7,3 +7,4 @@ python-dotenv==1.1.1
 sqladmin==0.27.2
 alembic==1.18.5
 itsdangerous==2.2.0
+playwright==1.61.0

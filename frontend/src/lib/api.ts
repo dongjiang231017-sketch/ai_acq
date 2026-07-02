@@ -24,6 +24,22 @@ async function readResponseError(response: Response): Promise<string> {
   }
 }
 
+function readStoredAccessToken(): string | null {
+  try {
+    const auth = JSON.parse(window.localStorage.getItem("ai_acq_client_auth") || "null") as {
+      accessToken?: string;
+    } | null;
+    return auth?.accessToken || null;
+  } catch {
+    return null;
+  }
+}
+
+function authHeaders(): HeadersInit {
+  const token = readStoredAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export type ModuleSummary = {
   key: string;
   name: string;
@@ -43,9 +59,12 @@ export type Lead = {
   contactTitle?: string | null;
   wechatId?: string | null;
   platformHomepageUrl?: string | null;
+  sourcePoiId?: string | null;
   province?: string | null;
   district?: string | null;
   address?: string | null;
+  longitude?: string | null;
+  latitude?: string | null;
   source: string;
   intentScore: number;
   status: string;
@@ -68,12 +87,66 @@ export type OutreachTask = {
   scheduledAt?: string | null;
 };
 
+export type LeadCollectionTask = {
+  id: string;
+  name: string;
+  provider: string;
+  cities: string[];
+  categories: string[];
+  keywords: string[];
+  targetPerKeyword: number;
+  status: string;
+  lastRunStatus?: string | null;
+  remark?: string | null;
+  ownerUserId?: string | null;
+  createdByUserId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LeadCollectionRun = {
+  id: string;
+  taskId: string;
+  provider: string;
+  status: string;
+  requestedCount: number;
+  fetchedCount: number;
+  insertedCount: number;
+  duplicateCount: number;
+  failedCount: number;
+  errorMessage?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+};
+
+export type RawLeadRecord = {
+  id: string;
+  taskId: string;
+  runId: string;
+  leadId?: string | null;
+  ownerUserId?: string | null;
+  provider: string;
+  sourcePoiId: string;
+  name: string;
+  city?: string | null;
+  district?: string | null;
+  category?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  sourceUrl?: string | null;
+  longitude?: string | null;
+  latitude?: string | null;
+  importStatus: string;
+  createdAt: string;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       headers: {
         "Content-Type": "application/json",
+        ...authHeaders(),
         ...options?.headers,
       },
       ...options,
@@ -89,10 +162,27 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+type LeadListParams = {
+  source?: string;
+  platform?: string;
+  city?: string;
+  category?: string;
+  status?: string;
+};
+
+function buildQuery(params: Record<string, string | undefined>): string {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) query.set(key, value);
+  });
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
+
 export const api = {
   health: () => request<{ status: string; service: string }>("/health"),
   modules: () => request<ModuleSummary[]>("/modules"),
-  leads: () => request<Lead[]>("/leads"),
+  leads: (params: LeadListParams = {}) => request<Lead[]>(`/leads${buildQuery(params)}`),
   createLead: (lead: Omit<Lead, "id" | "intentScore" | "status">) =>
     request<Lead>("/leads", {
       method: "POST",
@@ -104,4 +194,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(task),
     }),
+  collectionTasks: () => request<LeadCollectionTask[]>("/collections/tasks"),
+  createCollectionTask: (
+    task: Pick<LeadCollectionTask, "name" | "provider" | "cities" | "categories" | "keywords" | "targetPerKeyword"> & {
+      remark?: string | null;
+    },
+  ) =>
+    request<LeadCollectionTask>("/collections/tasks", {
+      method: "POST",
+      body: JSON.stringify(task),
+    }),
+  runCollectionTask: (taskId: string) =>
+    request<LeadCollectionRun>(`/collections/tasks/${taskId}/run`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  collectionRuns: () => request<LeadCollectionRun[]>("/collections/runs"),
+  rawLeadRecords: () => request<RawLeadRecord[]>("/collections/raw-records"),
 };

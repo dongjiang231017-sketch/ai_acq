@@ -56,6 +56,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python -m playwright install chromium
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
@@ -93,6 +94,29 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123456
 ADMIN_SECRET_KEY=ai-acq-qian-local-admin-session-key-20260628
 ```
+
+线索采集接口密钥在 SQLAdmin 的「采集接口配置」里维护。系统已预置：
+
+- 高德地图：`amap`
+- 百度地图：`baidu`
+- 腾讯位置服务：`tencent`
+
+第一版自动采集已接入高德地图和百度地图点位搜索。申请到地图服务密钥后，在「采集接口配置」里编辑对应平台，填写「访问密钥」并启用，然后到客户工作台「线索采集」创建任务并点击「开始采集」。腾讯位置服务配置先保留在后台，前台暂时隐藏，等配额确认后再开放。
+
+美团/闪购第一版改为本机浏览器登录态采集，入口在 SQLAdmin 的「平台浏览器登录态」：
+
+1. 先点「打开登录窗口」。
+2. 在弹出的本机浏览器里手动登录对应平台账号。
+3. 登录完成后直接关闭窗口。
+4. 回到后台点「校验登录态」，状态变成「可用」后，再去前台运行采集任务。
+
+当前这套浏览器采集是本机运行模式，登录态保存在：
+
+```text
+backend/.runtime/browser-profiles/
+```
+
+这里只保存本机浏览器配置目录，不要提交到 Git。
 
 如果 `8000` 被占用，可以换成：
 

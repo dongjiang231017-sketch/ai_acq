@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     admin_secret_key: str = "change-me"
     auth_secret_key: str = "change-me-auth"
     access_token_expire_seconds: int = 60 * 60 * 24 * 7
+    amap_web_key: str | None = None
+    collection_request_timeout_seconds: int = 8
+    collection_http_user_agent: str = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    )
+    browser_profile_root: str = ".runtime/browser-profiles"
+    browser_default_timeout_seconds: int = 40
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
