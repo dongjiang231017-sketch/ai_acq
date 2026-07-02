@@ -84,6 +84,21 @@ AI_ACQ_ASTERISK_LOCAL_NET=172.16.0.0/12
 
 `AI_ACQ_ASTERISK_ADVERTISED_HOST` 只在 Asterisk 运行在容器或网关看不到真实回连地址时需要；原生本机 Asterisk 通常可以留空。
 
+### 换网络后的自动匹配
+
+桌面客户端每次刷新 sidecar 状态或启动内置 Asterisk 时，会先检查当前 `voiceGatewayHost:sipPort` 是否可达。如果旧地址不可达，客户端会扫描当前电脑所在局域网，优先识别 UC100/语音网关后台页面，也会检查 SIP 端口；发现新地址后会自动更新 sidecar state，重写 `pjsip.conf` 和 `backend-asterisk.env`。如果 Asterisk 已经运行，会尝试热重载 `pjsip reload` 和 `dialplan reload`。
+
+可选调参：
+
+```bash
+AI_ACQ_VOICE_GATEWAY_AUTO_DISCOVERY=true
+AI_ACQ_VOICE_GATEWAY_HTTP_PORT=80
+AI_ACQ_VOICE_GATEWAY_DISCOVERY_TIMEOUT_MS=420
+AI_ACQ_VOICE_GATEWAY_DISCOVERY_CONCURRENCY=48
+```
+
+需要完全固定现场地址时可设 `AI_ACQ_VOICE_GATEWAY_AUTO_DISCOVERY=false`。
+
 ## 安全开关
 
 内置 Asterisk 启动不等于允许真实外呼。真实拨号仍受后端开关保护：

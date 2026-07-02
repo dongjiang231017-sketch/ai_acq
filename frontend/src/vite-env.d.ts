@@ -85,6 +85,20 @@ type AiAcqDesktopAsteriskStatus = {
   audioSocketHost: string;
   audioSocketPort: number;
   audioSocketReachable: boolean;
+  voiceGatewayDiscovery?: {
+    status: "current" | "updated" | "not_found" | "disabled" | string;
+    host?: string;
+    sipPort?: number;
+    previousHost?: string;
+    previousSipPort?: number;
+    source?: string;
+    message?: string;
+    reload?: {
+      attempted: boolean;
+      ok: boolean;
+      message: string;
+    };
+  };
   configDir: string;
   stateDir: string;
   backendEnvPath: string;

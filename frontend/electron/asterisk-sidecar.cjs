@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const http = require("http");
 const net = require("net");
 const os = require("os");
 const path = require("path");
@@ -21,6 +22,10 @@ const DEFAULTS = {
   maxChannels: 1,
   audioSocketHost: "127.0.0.1",
   audioSocketPort: 9019,
+  gatewayDiscoveryEnabled: true,
+  gatewayDiscoveryHttpPort: 80,
+  gatewayDiscoveryTimeoutMs: 420,
+  gatewayDiscoveryConcurrency: 48,
 };
 
 function createAsteriskSidecar(options) {
@@ -37,10 +42,11 @@ class AsteriskSidecar {
   async status() {
     const layout = this.ensureLayout();
     const runtime = this.resolveRuntime();
+    const voiceGatewayDiscovery = await this.reconcileVoiceGateway(layout, runtime);
     const running = this.isManagedRunning();
     const amiReachable = await isTcpOpen("127.0.0.1", layout.state.amiPort, 350);
     const audioSocketReachable = await isTcpOpen(layout.state.audioSocketHost, layout.state.audioSocketPort, 350);
-    const checks = this.buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable });
+    const checks = this.buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable, voiceGatewayDiscovery });
     return {
       deliveryMode: "client-sidecar",
       runtimeMode: runtime.mode,
@@ -67,6 +73,7 @@ class AsteriskSidecar {
       audioSocketHost: layout.state.audioSocketHost,
       audioSocketPort: layout.state.audioSocketPort,
       audioSocketReachable,
+      voiceGatewayDiscovery,
       configDir: layout.configDir,
       stateDir: layout.stateDir,
       backendEnvPath: layout.backendEnvPath,
@@ -80,6 +87,7 @@ class AsteriskSidecar {
   async start() {
     const layout = this.ensureLayout();
     const runtime = this.resolveRuntime();
+    await this.reconcileVoiceGateway(layout, runtime);
     if (!runtime.found) {
       return this.status();
     }
@@ -179,6 +187,10 @@ class AsteriskSidecar {
       maxChannels: Number(process.env.AI_ACQ_VOICE_GATEWAY_MAX_CHANNELS || process.env.AI_ACQ_ASTERISK_MAX_CHANNELS || DEFAULTS.maxChannels),
       audioSocketHost: process.env.AI_ACQ_AUDIOSOCKET_HOST || DEFAULTS.audioSocketHost,
       audioSocketPort: Number(process.env.AI_ACQ_AUDIOSOCKET_PORT || DEFAULTS.audioSocketPort),
+      gatewayDiscoveryEnabled: process.env.AI_ACQ_VOICE_GATEWAY_AUTO_DISCOVERY !== "false",
+      gatewayDiscoveryHttpPort: Number(process.env.AI_ACQ_VOICE_GATEWAY_HTTP_PORT || DEFAULTS.gatewayDiscoveryHttpPort),
+      gatewayDiscoveryTimeoutMs: Number(process.env.AI_ACQ_VOICE_GATEWAY_DISCOVERY_TIMEOUT_MS || DEFAULTS.gatewayDiscoveryTimeoutMs),
+      gatewayDiscoveryConcurrency: Number(process.env.AI_ACQ_VOICE_GATEWAY_DISCOVERY_CONCURRENCY || DEFAULTS.gatewayDiscoveryConcurrency),
       audioSocketUuid: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       ...(existing || {}),
@@ -221,8 +233,122 @@ class AsteriskSidecar {
     }
     if (process.env.AI_ACQ_AUDIOSOCKET_HOST) state.audioSocketHost = process.env.AI_ACQ_AUDIOSOCKET_HOST;
     if (process.env.AI_ACQ_AUDIOSOCKET_PORT) state.audioSocketPort = Number(process.env.AI_ACQ_AUDIOSOCKET_PORT);
+    if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_VOICE_GATEWAY_AUTO_DISCOVERY")) {
+      state.gatewayDiscoveryEnabled = process.env.AI_ACQ_VOICE_GATEWAY_AUTO_DISCOVERY !== "false";
+    }
+    if (process.env.AI_ACQ_VOICE_GATEWAY_HTTP_PORT) state.gatewayDiscoveryHttpPort = Number(process.env.AI_ACQ_VOICE_GATEWAY_HTTP_PORT);
+    if (process.env.AI_ACQ_VOICE_GATEWAY_DISCOVERY_TIMEOUT_MS) state.gatewayDiscoveryTimeoutMs = Number(process.env.AI_ACQ_VOICE_GATEWAY_DISCOVERY_TIMEOUT_MS);
+    if (process.env.AI_ACQ_VOICE_GATEWAY_DISCOVERY_CONCURRENCY) {
+      state.gatewayDiscoveryConcurrency = Number(process.env.AI_ACQ_VOICE_GATEWAY_DISCOVERY_CONCURRENCY);
+    }
     fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
     return state;
+  }
+
+  async reconcileVoiceGateway(layout, runtime) {
+    const { state } = layout;
+    if (state.gatewayDiscoveryEnabled === false) {
+      return {
+        status: "disabled",
+        host: state.voiceGatewayHost,
+        sipPort: state.voiceGatewaySipPort,
+        message: "语音网关自动匹配已关闭。",
+      };
+    }
+
+    const timeoutMs = positiveNumber(state.gatewayDiscoveryTimeoutMs, DEFAULTS.gatewayDiscoveryTimeoutMs);
+    const currentHost = state.voiceGatewayHost;
+    const sipPort = positiveNumber(state.voiceGatewaySipPort, DEFAULTS.voiceGatewaySipPort);
+    const httpPort = positiveNumber(state.gatewayDiscoveryHttpPort, DEFAULTS.gatewayDiscoveryHttpPort);
+    if (currentHost) {
+      const currentReachable =
+        (await isTcpOpen(currentHost, sipPort, Math.min(timeoutMs, 500))) ||
+        (await isKnownVoiceGatewayHttp(currentHost, httpPort, Math.min(timeoutMs, 500)));
+      if (currentReachable) {
+        return {
+          status: "current",
+          host: currentHost,
+          sipPort,
+          message: `当前语音网关 ${currentHost}:${sipPort} 可达，无需重新匹配。`,
+        };
+      }
+    }
+
+    const discovery = await discoverVoiceGateway({
+      currentHost,
+      sipPort,
+      httpPort,
+      timeoutMs,
+      concurrency: positiveNumber(state.gatewayDiscoveryConcurrency, DEFAULTS.gatewayDiscoveryConcurrency),
+    });
+    if (!discovery) {
+      return {
+        status: "not_found",
+        host: currentHost,
+        sipPort,
+        message: currentHost
+          ? `原语音网关 ${currentHost}:${sipPort} 不可达，当前局域网未发现可自动匹配的语音网关。`
+          : "当前局域网未发现可自动匹配的语音网关。",
+      };
+    }
+
+    if (discovery.host === currentHost && discovery.sipPort === sipPort) {
+      return {
+        status: "current",
+        host: discovery.host,
+        sipPort: discovery.sipPort,
+        source: discovery.source,
+        message: `当前语音网关 ${discovery.host}:${discovery.sipPort} 已重新确认可达。`,
+      };
+    }
+
+    const previousHost = currentHost;
+    const previousSipPort = sipPort;
+    state.voiceGatewayHost = discovery.host;
+    state.voiceGatewaySipPort = discovery.sipPort;
+    state.uc100Host = discovery.host;
+    state.uc100SipPort = discovery.sipPort;
+    state.voiceGatewayDiscoveredAt = new Date().toISOString();
+    state.voiceGatewayDiscoverySource = discovery.source;
+    state.voiceGatewayPreviousHost = previousHost || "";
+    state.voiceGatewayPreviousSipPort = previousSipPort;
+    fs.writeFileSync(layout.statePath, JSON.stringify(state, null, 2));
+    this.writeConfigs(layout);
+
+    const reload = this.reloadAsterisk(runtime, layout);
+    return {
+      status: "updated",
+      host: discovery.host,
+      sipPort: discovery.sipPort,
+      previousHost,
+      previousSipPort,
+      source: discovery.source,
+      reload,
+      message: `已自动匹配语音网关：${previousHost || "未配置"} -> ${discovery.host}:${discovery.sipPort}。`,
+    };
+  }
+
+  reloadAsterisk(runtime, layout) {
+    if (!runtime.found) {
+      return { attempted: false, ok: false, message: "Asterisk 未运行，已重写配置，启动时会使用新网关地址。" };
+    }
+    const commands = ["pjsip reload", "dialplan reload"];
+    const results = commands.map((command) =>
+      spawnSync(runtime.path, ["-C", layout.asteriskConfPath, "-rx", command], {
+        cwd: layout.baseDir,
+        encoding: "utf8",
+        timeout: 3000,
+      }),
+    );
+    const failed = results.find((result) => result.status !== 0);
+    if (failed) {
+      return {
+        attempted: true,
+        ok: false,
+        message: String(failed.stderr || failed.stdout || "Asterisk 热重载失败").trim(),
+      };
+    }
+    return { attempted: true, ok: true, message: "Asterisk 已热重载语音网关配置。" };
   }
 
   writeConfigs(paths) {
@@ -421,7 +547,7 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
     return Boolean(this.managedProcess && this.managedProcess.exitCode === null && !this.managedProcess.killed);
   }
 
-  buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable }) {
+  buildChecks({ layout, runtime, running, amiReachable, audioSocketReachable, voiceGatewayDiscovery }) {
     return [
       {
         key: "runtime",
@@ -450,8 +576,19 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
       {
         key: "voice_gateway_target",
         label: "语音网关目标",
-        status: "warn",
+        status: voiceGatewayDiscovery?.status === "not_found" ? "fail" : "pass",
         detail: `${layout.state.voiceGatewayLabel} · ${layout.state.voiceGatewayHost}:${layout.state.voiceGatewaySipPort}，当前配置 ${layout.state.maxChannels} 路。`,
+      },
+      {
+        key: "voice_gateway_discovery",
+        label: "自动匹配",
+        status:
+          voiceGatewayDiscovery?.status === "updated" || voiceGatewayDiscovery?.status === "current"
+            ? "pass"
+            : voiceGatewayDiscovery?.status === "disabled"
+              ? "warn"
+              : "fail",
+        detail: voiceGatewayDiscovery?.message || "等待语音网关自动匹配。",
       },
       {
         key: "audio_socket",
@@ -523,6 +660,101 @@ function isTcpOpen(host, port, timeoutMs) {
     socket.once("error", () => finish(false));
     socket.connect(port, host);
   });
+}
+
+async function discoverVoiceGateway({ currentHost, sipPort, httpPort, timeoutMs, concurrency }) {
+  const hosts = gatewayCandidateHosts(currentHost);
+  const checks = hosts.map((host) => async () => {
+    const [httpSignature, sipOpen] = await Promise.all([
+      readVoiceGatewayHttpSignature(host, httpPort, timeoutMs),
+      isTcpOpen(host, sipPort, timeoutMs),
+    ]);
+    if (!httpSignature.matched && !sipOpen) return null;
+    if (httpSignature.matched) {
+      return { host, sipPort, source: httpSignature.title ? `http:${httpSignature.title}` : "http:voice-gateway" };
+    }
+    return { host, sipPort, source: `sip:${sipPort}` };
+  });
+  const result = await runLimited(checks, Math.max(4, Math.min(positiveNumber(concurrency, DEFAULTS.gatewayDiscoveryConcurrency), 96)));
+  return result.find(Boolean) || null;
+}
+
+function gatewayCandidateHosts(currentHost) {
+  const hosts = new Set();
+  if (currentHost) hosts.add(currentHost);
+  for (const network of localIpv4Networks()) {
+    for (let host = 1; host <= 254; host += 1) hosts.add(`${network}.${host}`);
+  }
+  return [...hosts];
+}
+
+function localIpv4Networks() {
+  const networks = new Set();
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses || []) {
+      if (address.family !== "IPv4" || address.internal) continue;
+      const parts = String(address.address || "").split(".");
+      if (parts.length !== 4) continue;
+      if (parts[0] === "127" || parts[0] === "169") continue;
+      networks.add(parts.slice(0, 3).join("."));
+    }
+  }
+  return [...networks];
+}
+
+async function isKnownVoiceGatewayHttp(host, port, timeoutMs) {
+  const signature = await readVoiceGatewayHttpSignature(host, port, timeoutMs);
+  return signature.matched;
+}
+
+function readVoiceGatewayHttpSignature(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const request = http.get({ host, port, path: "/", timeout: timeoutMs }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        if (body.length < 65536) body += chunk;
+      });
+      response.on("end", () => {
+        const title = titleFromHtml(body);
+        const server = String(response.headers.server || "");
+        resolve({
+          matched: isVoiceGatewaySignature(`${title}\n${server}\n${body.slice(0, 2048)}`),
+          title,
+        });
+      });
+    });
+    request.setTimeout(timeoutMs, () => request.destroy());
+    request.on("error", () => resolve({ matched: false, title: "" }));
+  });
+}
+
+function isVoiceGatewaySignature(text) {
+  return /UC100|UC100-ZYH|Dinstar|鼎信|语音网关|VoLTE/i.test(text);
+}
+
+function titleFromHtml(html) {
+  const match = String(html || "").match(/<title[^>]*>([^<]+)<\/title>/i);
+  return match ? match[1].trim() : "";
+}
+
+async function runLimited(tasks, limit) {
+  const results = new Array(tasks.length);
+  let index = 0;
+  async function worker() {
+    while (index < tasks.length) {
+      const taskIndex = index;
+      index += 1;
+      results[taskIndex] = await tasks[taskIndex]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
+  return results;
+}
+
+function positiveNumber(value, fallback) {
+  const next = Number(value);
+  return Number.isFinite(next) && next > 0 ? next : fallback;
 }
 
 function sleep(ms) {
