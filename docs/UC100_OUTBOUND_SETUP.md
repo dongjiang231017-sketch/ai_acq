@@ -1,6 +1,6 @@
 # UC100 实体电话卡外呼接入准备
 
-这份文档用于 UC100 到货前后的开发联调和客户交付。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器、云端 Asterisk 注册验收面板，以及设备未识卡前可用的实时语音管线模拟接口。
+这份文档用于 UC100 或其他 SIP/VoLTE/GSM 语音网关到货前后的开发联调和客户交付。UC100 只是当前实测档案，不是产品交付的唯一设备。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器、云端 Asterisk 注册验收面板，以及设备未识卡前可用的实时语音管线模拟接口。
 
 ## 交付标准
 
@@ -8,7 +8,7 @@
 
 ```text
 实体 SIM 卡
-  -> UC100
+  -> 现场语音网关（UC100 或其他 SIP/VoLTE/GSM 网关）
   -> SIP REGISTER 到云端 Asterisk
   -> FastAPI / Redis worker / 实时媒体桥
   -> ASR / 意图路由 / LLM / TTS
@@ -19,18 +19,18 @@
 
 1. 线路是否通畅。
 2. 新设备是否被客户端发现。
-3. 交付人员需要把 UC100 注册到哪个云端 SIP 目标。
+3. 交付人员需要把现场语音网关注册到哪个云端 SIP 目标。
 
 正式交付顺序必须是：
 
 1. 交付人员在云服务器确认 Asterisk/AMI 正常。
 2. 云安全组和上游网络放通 `UDP 5060` 和 `UDP 10000-20000`。
-3. 交付人员在 UC100 后台配置 SIP Server/Registrar、账号和密码，让 UC100 主动注册到云端。
+3. 交付人员在现场语音网关后台配置 SIP Server/Registrar、账号和密码，让设备主动注册到云端。
 4. 后端 `/api/outbound/telephony/health` 显示 `trunkReachable=true`，客户端显示 `线路通畅`。
 5. 只开启 `ASTERISK_LIVE_CALL_ENABLED=true` 做单号试拨。
 6. 单号试拨、媒体链路、AI 首句和实时监听都通过后，才考虑开启批量外呼。
 
-如果 `pjsip show contacts` 没有 UC100 contact，或者服务器抓不到 `UDP 5060` 入站包，不允许宣称外呼交付完成，也不应该启动真实拨号任务。
+如果 `pjsip show contacts` 没有现场语音网关 contact，或者服务器抓不到 `UDP 5060` 入站包，不允许宣称外呼交付完成，也不应该启动真实拨号任务。
 
 ## 当前可先做
 
@@ -44,11 +44,11 @@
 8. 在 AI 外呼系统的「实时语音管线」面板创建模拟通话，验证 ASR、意图路由、LLM、TTS 分块和打断状态机。
 9. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
 
-## 开发架构
+## 开发备选架构
 
 ```text
 实体 SIM 卡
-  -> UC100
+  -> 现场语音网关
   -> SIP trunk
   -> 客户端内置 Asterisk sidecar
   -> FastAPI / Redis worker / 实时媒体桥
@@ -319,19 +319,19 @@ curl -X POST http://localhost:8000/api/outbound/telephony/test-call \
   -d '{"phone":"你的测试手机号"}'
 ```
 
-## UC100 到货后的检查顺序
+## 现场语音网关到货后的检查顺序
 
 1. 插 SIM 卡并确认能正常注册运营商网络。
-2. 确认客户电脑和 UC100 在同一现场网络，并记录 UC100 WAN 地址。
-3. 打开桌面客户端，在 AI 外呼系统的「真实线路接入」面板检测/启动内置 Asterisk。
-4. 确认客户端已生成 `backend-asterisk.env`，后端读取该文件后再切 `TELEPHONY_GATEWAY_MODE=asterisk`。
-5. 按 `docs/UC100_ASTERISK_SNIPPETS.md` 检查 sidecar 的 UC100 SIP/PJSIP trunk。
+2. 确认云安全组/上游网络已放通 `UDP 5060` 和 `UDP 10000-20000`。
+3. 在现场语音网关后台配置 SIP Server/Registrar、账号、密码和注册周期，让设备主动注册到云端 Asterisk。
+4. 在云服务器运行 `tcpdump -nni any udp port 5060`，确认能看到设备 REGISTER 包。
+5. 运行 `asterisk -rx "pjsip show contacts"`，确认能看到对应 trunk 的 contact。
 6. 确认通话状态、挂断原因、录音或音频流是否可用。
 7. 运行 `python -m app.tools.uc100_preflight --phone 你的测试手机号`，先让 AMI/trunk/Channel 检查通过。
 8. 再把 `TELEPHONY_GATEWAY_MODE` 从 `simulator` 切到 `asterisk`。
 9. 打开 `ASTERISK_LIVE_CALL_ENABLED=true`，在 AI 外呼系统里做单号试拨。
-10. 在 UC100 后台同时确认 `当前呼叫` 或 `话单` 有 VoLTE 蜂窝外呼记录；只有 SIP `ringing` 不算手机真实响铃。
-11. 如果前端显示 `404 Not Found / NO_ROUTE_DESTINATION`，先修 UC100 的 SIP 到 VoLTE 外呼路由、号码匹配规则和线路选择。
+10. 在语音网关后台同时确认 `当前呼叫` 或 `话单` 有 VoLTE/GSM 蜂窝外呼记录；只有 SIP `ringing` 不算手机真实响铃。
+11. 如果前端显示 `404 Not Found / NO_ROUTE_DESTINATION`，先修语音网关的 SIP 到 VoLTE/GSM 外呼路由、号码匹配规则和线路选择。
 12. 单号试拨稳定后，再评估是否打开 `ASTERISK_BULK_CALL_ENABLED=true`。
 
 ## 现在还没做完的硬件相关实现

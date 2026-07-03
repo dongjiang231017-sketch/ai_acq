@@ -1356,7 +1356,7 @@ function telephonyReadinessLabel(health: TelephonyHealth, preflight?: TelephonyP
   if (preflight?.readyForDeviceTest) return "设备可联调";
   if (health.readyForTestCall && health.liveCallEnabled) return "可单号试拨";
   if (health.readyForTestCall) return "线路已就绪";
-  if (health.trunkReachable === false) return "UC100未注册";
+  if (health.trunkReachable === false) return "语音网关未注册";
   if (health.amiReachable && health.authenticated) return "AMI 已连接";
   return "待配置";
 }
@@ -1399,7 +1399,7 @@ function routeHealthSummary(health: TelephonyHealth, preflight: TelephonyPreflig
   const isPartial = Boolean(health.amiReachable || health.authenticated || preflight.readyForDeviceTest);
   const status = isReady || isLinked ? "pass" : isPartial ? "warn" : "fail";
   const trunkMissing = health.trunkReachable === false;
-  const title = status === "pass" ? "线路通畅" : trunkMissing ? "UC100未注册" : status === "warn" ? "线路待联通" : "线路不可用";
+  const title = status === "pass" ? "线路通畅" : trunkMissing ? "语音网关未注册" : status === "warn" ? "线路待联通" : "线路不可用";
   const detail =
     status === "pass"
       ? "后台线路检测通过，可以按配置执行外呼任务。"
@@ -6211,9 +6211,9 @@ function App() {
                 <div className="device-onboarding-header">
                   <div>
                     <span>现场设备对接</span>
-                    <strong>{telephonyHealth.trunkReachable ? "UC100已注册到云端" : "UC100等待注册到云端"}</strong>
+                    <strong>{telephonyHealth.trunkReachable ? "语音网关已注册到云端" : "语音网关等待注册到云端"}</strong>
                     <small>
-                      交付人员把 UC100 注册到云端后，客户前端只做状态验收；未注册前不会进入真实拨号。
+                      交付人员把现场语音网关注册到云端后，客户前端只做状态验收；未注册前不会进入真实拨号。
                     </small>
                   </div>
                   <div className="device-onboarding-actions">
@@ -6241,7 +6241,7 @@ function App() {
                   <div>
                     <span>云端注册目标</span>
                     <strong>{serverRegistrationTarget}</strong>
-                    <small>交付人员在 UC100 后台把 SIP Server / Registrar 指向这个地址。</small>
+                    <small>交付人员在语音网关后台把 SIP Server / Registrar 指向这个地址。</small>
                   </div>
                   <div>
                     <span>SIP账号</span>
@@ -6252,7 +6252,7 @@ function App() {
                 <div className="device-onboarding-steps">
                   <span>1. 设备通电、插 SIM 卡并接入客户网络。</span>
                   <span>2. 客户端点击自动检测，确认现场设备可被发现。</span>
-                  <span>3. 交付人员在设备后台填写云端注册目标和 SIP 账号。</span>
+                  <span>3. 交付人员在语音网关后台填写云端注册目标和 SIP 账号。</span>
                   <span>4. 云端收到注册后，本页自动变为线路通畅，再进入单号试拨。</span>
                 </div>
               </div>
