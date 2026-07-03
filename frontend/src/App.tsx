@@ -60,6 +60,7 @@ import {
   RecallRule,
   ReportExport,
   ReportOverview,
+  RealtimeLiveEvent,
   RealtimeLiveEvents,
   RealtimePipeline,
   RealtimeSession,
@@ -468,6 +469,21 @@ type MonitorMessage = {
   text: string;
 };
 
+type MonitorCall = {
+  id: string;
+  merchantName: string;
+  phone?: string | null;
+  aiSeat: string;
+  durationSeconds: number;
+  intentLevel: string;
+  currentNode: string;
+  outcome: string;
+  statusLabel: string;
+  latestAt: string;
+  messages: MonitorMessage[];
+  record?: CallRecord | null;
+};
+
 function scriptDraftFrom(script?: CallScript | null): CallScriptDraft {
   return {
     name: script?.name ?? "视频号团购商家邀约话术",
@@ -521,6 +537,91 @@ function transcriptToMonitorMessages(record?: CallRecord | null): MonitorMessage
       text: record.outcome ? `${record.outcome}，等待实时转写同步。` : "等待实时通话开始。",
     },
   ];
+}
+
+function realtimeEventToMonitorMessage(event: RealtimeLiveEvent): MonitorMessage | null {
+  if (event.type === "call_connected") return { speaker: "system", label: "接通", text: "电话已接通，正在进入实时媒体桥。" };
+  if (event.type === "remote_speech_started") return { speaker: "customer", label: "客户", text: "检测到客户开始说话。" };
+  if (event.type === "human_speech_confirmed") return { speaker: "customer", label: "客户", text: event.text || "已确认真人客户语音。" };
+  if (event.type === "asr_final") return { speaker: "customer", label: "客户", text: event.text || "客户语音已识别。" };
+  if (event.type === "llm_reply") return { speaker: "ai", label: "AI", text: event.reply || event.text || "AI 已生成回复。" };
+  if (event.type === "tts_start") return { speaker: "system", label: "播放", text: "AI 语音开始播放。" };
+  if (event.type === "tts_done") return { speaker: "system", label: "播放", text: "AI 语音播放完成，继续监听客户。" };
+  if (event.type === "barge_recovery_ready") return { speaker: "system", label: "打断", text: event.detail || "客户插话，AI 已停止播报并恢复监听。" };
+  if (event.type === "omni_input_buffer_event") return { speaker: "system", label: "语音缓冲", text: event.detail || "客户语音缓冲已更新。" };
+  if (event.type === "remote_audio_sample") {
+    const rms = Number(event.raw?.rms ?? 0);
+    const threshold = Number(event.raw?.threshold ?? 0);
+    if (rms < Math.max(120, Math.floor(threshold * 0.35))) return null;
+    return { speaker: "system", label: "收音", text: `检测到对端音频，RMS ${rms} / 阈值 ${threshold}。` };
+  }
+  if (event.type === "call_error") return { speaker: "system", label: "异常", text: event.detail || "通话媒体桥异常。" };
+  if (event.type === "call_disconnected") return { speaker: "system", label: "结束", text: "电话已结束。" };
+  return null;
+}
+
+function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone?: string): MonitorCall[] {
+  const grouped = new Map<string, RealtimeLiveEvent[]>();
+  events.forEach((event) => {
+    if (!event.callId) return;
+    const list = grouped.get(event.callId) ?? [];
+    list.push(event);
+    grouped.set(event.callId, list);
+  });
+  return Array.from(grouped.entries())
+    .map(([callId, list]) => {
+      const sorted = [...list].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+      const start = sorted.find((event) => event.type === "call_connected")?.at ?? sorted[0]?.at;
+      const end = [...sorted].reverse().find((event) => event.type === "call_disconnected" || event.type === "call_error")?.at;
+      const latest = sorted[sorted.length - 1]?.at;
+      const durationSeconds =
+        start && (end || latest)
+          ? Math.max(0, Math.floor((new Date(end || latest).getTime() - new Date(start).getTime()) / 1000))
+          : 0;
+      const disconnected = sorted.some((event) => event.type === "call_disconnected");
+      const error = [...sorted].reverse().find((event) => event.type === "call_error");
+      const asrCount = sorted.filter((event) => event.type === "asr_final").length;
+      const replyCount = sorted.filter((event) => event.type === "llm_reply").length;
+      const messages = sorted
+        .map(realtimeEventToMonitorMessage)
+        .filter((message): message is MonitorMessage => Boolean(message))
+        .slice(-24);
+      if (messages.length === 0) {
+        messages.push({ speaker: "system", label: "监听", text: "真实通话已接入，等待客户语音事件。" });
+      }
+      return {
+        id: callId,
+        merchantName: "单号真实试拨",
+        phone: fallbackPhone || null,
+        aiSeat: "AI实时坐席",
+        durationSeconds,
+        intentLevel: asrCount > 0 ? "B" : "待识别",
+        currentNode: asrCount > 0 ? "客户已开口" : replyCount > 0 ? "AI首句已播" : "媒体桥接入",
+        outcome: error?.detail || (disconnected ? "电话已结束" : "通话中"),
+        statusLabel: error ? "异常" : disconnected ? "结束" : "监听",
+        latestAt: latest || start || "",
+        messages,
+        record: null,
+      };
+    })
+    .sort((a, b) => new Date(b.latestAt || 0).getTime() - new Date(a.latestAt || 0).getTime());
+}
+
+function callRecordToMonitorCall(record: CallRecord): MonitorCall {
+  return {
+    id: record.id,
+    merchantName: record.merchantName,
+    phone: record.phone,
+    aiSeat: record.aiSeat,
+    durationSeconds: record.durationSeconds,
+    intentLevel: record.intentLevel,
+    currentNode: record.currentNode,
+    outcome: record.outcome,
+    statusLabel: record.needHandoff ? "接管" : record.recallAt ? "重拨" : "监听",
+    latestAt: record.createdAt,
+    messages: transcriptToMonitorMessages(record),
+    record,
+  };
 }
 
 const fallbackDmOverview: DmOverview = {
@@ -1818,9 +1919,18 @@ function App() {
     [callableLeadIds, selectedLeadIds],
   );
   const allCallableSelected = callableLeadIds.length > 0 && selectedCallableLeadIds.length === callableLeadIds.length;
-  const selectedLiveCall =
-    liveCalls.find((record) => record.id === selectedLiveCallId) ?? liveCalls[0] ?? callRecords[0] ?? null;
-  const selectedLiveCallMessages = useMemo(() => transcriptToMonitorMessages(selectedLiveCall), [selectedLiveCall]);
+  const realtimeMonitorCalls = useMemo(
+    () => realtimeEventsToMonitorCalls(realtimeLiveEvents.events, telephonyTestForm.phone.trim()),
+    [realtimeLiveEvents.events, telephonyTestForm.phone],
+  );
+  const recordMonitorCalls = useMemo(
+    () => (liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6)).map(callRecordToMonitorCall),
+    [callRecords, liveCalls],
+  );
+  const monitorCalls = realtimeMonitorCalls.length > 0 ? realtimeMonitorCalls : recordMonitorCalls;
+  const selectedMonitorCall = monitorCalls.find((record) => record.id === selectedLiveCallId) ?? monitorCalls[0] ?? null;
+  const selectedLiveCall = selectedMonitorCall?.record ?? null;
+  const selectedLiveCallMessages = selectedMonitorCall?.messages ?? [];
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
   const dmSupportedAccounts = useMemo(() => dmAccounts.filter(isSupportedDmAccount), [dmAccounts]);
   const dmLoginAccounts = useMemo(() => dmAccounts.filter(isLoginCapableAccount), [dmAccounts]);
@@ -2094,10 +2204,10 @@ function App() {
   }, [activeRule?.id]);
 
   useEffect(() => {
-    if (selectedLiveCallId && liveCalls.some((record) => record.id === selectedLiveCallId)) return;
-    const nextRecord = liveCalls[0] ?? callRecords[0];
+    if (selectedLiveCallId && monitorCalls.some((record) => record.id === selectedLiveCallId)) return;
+    const nextRecord = monitorCalls[0];
     if (nextRecord) setSelectedLiveCallId(nextRecord.id);
-  }, [callRecords, liveCalls, selectedLiveCallId]);
+  }, [monitorCalls, selectedLiveCallId]);
 
   useEffect(() => {
     setIsDesktopClient(Boolean(window.aiAcqDesktop?.isDesktopClient));
@@ -2114,12 +2224,12 @@ function App() {
   }, [activeModule, activeOutboundTab]);
 
   useEffect(() => {
-    if (activeModule !== "outbound" || activeOutboundTab !== "实时监听" || !isTestingTelephony) return;
+    if (activeModule !== "outbound" || activeOutboundTab !== "实时监听") return;
     const timer = window.setInterval(() => {
       void refreshRealtimeLiveEvents(false);
-    }, 1000);
+    }, 1500);
     return () => window.clearInterval(timer);
-  }, [activeModule, activeOutboundTab, isTestingTelephony]);
+  }, [activeModule, activeOutboundTab]);
 
   useEffect(() => {
     if (activeModule !== "dm" || activeDmTab !== "评论截流") return;
@@ -2662,6 +2772,7 @@ function App() {
     setTelephonyTestResult(null);
     setTelephonyLineRecovery(null);
     setTelephonyMessage("正在提交单号试拨请求...");
+    setActiveOutboundTab("实时监听");
     await refreshRealtimeLiveEvents(false);
     try {
       const result = await api.createTelephonyTestCall({
@@ -6139,8 +6250,6 @@ function App() {
           ? "后台正在处理线路联通，完成后客户工作台会自动显示可用状态。"
           : "线路暂未接通，请等待服务人员在后台完成接入。";
     const routeCheckedAt = new Date(telephonyPreflight.checkedAt).toLocaleString("zh-CN", { hour12: false });
-    const monitorCalls = liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6);
-
     return (
       <>
         <section className="outbound-tabs" aria-label="外呼模块页面">
@@ -6627,12 +6736,12 @@ function App() {
                   {monitorCalls.length === 0 && <span className="empty-state">暂无实时通话，创建外呼任务后点击启动。</span>}
                   {monitorCalls.map((record) => (
                     <button
-                      className={record.id === selectedLiveCall?.id ? "is-active" : ""}
+                      className={record.id === selectedMonitorCall?.id ? "is-active" : ""}
                       key={record.id}
                       onClick={() => setSelectedLiveCallId(record.id)}
                       type="button"
                     >
-                      <span>{record.needHandoff ? "接管" : record.recallAt ? "重拨" : "监听"}</span>
+                      <span>{record.statusLabel}</span>
                       <strong>{record.merchantName}</strong>
                       <small>
                         {record.phone ?? "无电话"} · {formatDuration(record.durationSeconds)} · {record.currentNode}
@@ -6643,17 +6752,18 @@ function App() {
                 <div className="monitor-chat-panel">
                   <div className="monitor-chat-header">
                     <div>
-                      <span>{selectedLiveCall?.aiSeat ?? "AI坐席"}</span>
-                      <strong>{selectedLiveCall?.merchantName ?? "选择客户查看监听"}</strong>
-                      <small>{selectedLiveCall?.outcome ?? "等待通话"}</small>
+                      <span>{selectedMonitorCall?.aiSeat ?? "AI坐席"}</span>
+                      <strong>{selectedMonitorCall?.merchantName ?? "选择客户查看监听"}</strong>
+                      <small>{selectedMonitorCall?.outcome ?? "等待通话"}</small>
                     </div>
-                    {selectedLiveCall && (
-                      <span className={`intent-pill intent-${selectedLiveCall.intentLevel.toLowerCase()}`}>
-                        {selectedLiveCall.intentLevel}
+                    {selectedMonitorCall && (
+                      <span className={`intent-pill intent-${selectedMonitorCall.intentLevel.toLowerCase()}`}>
+                        {selectedMonitorCall.intentLevel}
                       </span>
                     )}
                   </div>
                   <div className="monitor-chat-stream">
+                    {selectedLiveCallMessages.length === 0 && <div className="empty-state compact">等待真实通话事件同步。</div>}
                     {selectedLiveCallMessages.map((message, index) => (
                       <div className={`monitor-message is-${message.speaker}`} key={`${message.label}-${index}`}>
                         <span>{message.label}</span>

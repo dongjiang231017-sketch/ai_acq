@@ -50,6 +50,7 @@ AUDIO_SOCKET_KIND_ERROR = 0xFF
 PCM_FRAME_BYTES = 320
 PCM_FRAME_SECONDS = 0.02
 AUDIOSOCKET_IDLE_KEEPALIVE_GAP_SECONDS = PCM_FRAME_SECONDS * 2
+REMOTE_AUDIO_SAMPLE_INTERVAL_SECONDS = 1.0
 OMNI_LOCAL_BARGE_MIN_SENT_BYTES = PCM_FRAME_BYTES * 12
 OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.35
@@ -344,6 +345,8 @@ class AudioSocketCallSession:
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
+        self._last_remote_audio_sample_at = 0.0
+        self._remote_audio_sample_peak = 0
         self._last_outbound_audio_at = 0.0
         self._startup_keepalive_active = threading.Event()
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
@@ -474,6 +477,7 @@ class AudioSocketCallSession:
             self._audio_capture.write_inbound(payload)
         rms = _pcm_rms(payload)
         now = time.monotonic()
+        self._emit_remote_audio_sample(rms, now)
         self._handle_answer_audio(rms, now)
         if rms >= self.config.barge_rms_threshold:
             self.customer_activity_event.set()
@@ -496,6 +500,22 @@ class AudioSocketCallSession:
         self._loud_frames = 0
         if self._recognition:
             self._recognition.send_audio_frame(payload)
+
+    def _emit_remote_audio_sample(self, rms: int, now: float) -> None:
+        self._remote_audio_sample_peak = max(self._remote_audio_sample_peak, rms)
+        if now - self._last_remote_audio_sample_at < REMOTE_AUDIO_SAMPLE_INTERVAL_SECONDS:
+            return
+        self._last_remote_audio_sample_at = now
+        peak = self._remote_audio_sample_peak
+        self._remote_audio_sample_peak = rms
+        self.logger.emit(
+            "remote_audio_sample",
+            callId=self.call_id,
+            rms=rms,
+            peakRms=peak,
+            threshold=self.config.barge_rms_threshold,
+            active=peak >= max(120, int(self.config.barge_rms_threshold * 0.35)),
+        )
 
     def _handle_answer_audio(self, rms: int, now: float) -> None:
         answer_type = self._answer_classifier.on_audio_frame(rms, now)
@@ -1368,6 +1388,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._audio_capture.write_inbound(payload)
         rms = _pcm_rms(payload)
         now = time.monotonic()
+        self._emit_remote_audio_sample(rms, now)
         self._handle_answer_audio(rms, now)
         if rms >= self.config.barge_rms_threshold:
             self.customer_activity_event.set()
