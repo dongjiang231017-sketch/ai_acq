@@ -6253,7 +6253,7 @@ function App() {
                   <span>1. 设备通电、插 SIM 卡并接入客户网络。</span>
                   <span>2. 客户端点击自动检测，确认现场设备可被发现。</span>
                   <span>3. 交付人员在语音网关后台填写云端注册目标和 SIP 账号。</span>
-                  <span>4. 云端收到注册后，本页自动变为线路通畅，再进入单号试拨。</span>
+                  <span>4. 云端收到注册后，本页显示云端中继已注册，再进入单号真实验收。</span>
                 </div>
               </div>
               {telephonyConfig.asteriskDeploymentMode === "server" ? (
