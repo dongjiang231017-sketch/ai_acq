@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
+
+from app.schemas.common import ApiModel as BaseModel
 
 
 TaskChannel = Literal["collector", "call", "dm"]
@@ -54,6 +56,10 @@ class CallScriptCreate(BaseModel):
     is_active: Annotated[bool, Field(alias="isActive")] = True
 
 
+class CallScriptUpdate(CallScriptCreate):
+    pass
+
+
 class CallScriptRead(CallScriptCreate):
     id: str
     created_at: Annotated[datetime, Field(alias="createdAt")]
@@ -94,6 +100,16 @@ class RecallRuleRead(BaseModel):
     enabled: bool
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class RecallRuleUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    no_answer_interval_minutes: Annotated[int, Field(ge=1, le=10080, alias="noAnswerIntervalMinutes")]
+    busy_interval_minutes: Annotated[int, Field(ge=1, le=10080, alias="busyIntervalMinutes")]
+    max_attempts: Annotated[int, Field(ge=1, le=20, alias="maxAttempts")]
+    quiet_start: Annotated[str, Field(alias="quietStart")]
+    quiet_end: Annotated[str, Field(alias="quietEnd")]
+    enabled: bool
 
 
 class OutboundOverview(BaseModel):

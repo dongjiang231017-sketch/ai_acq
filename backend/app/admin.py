@@ -1,12 +1,22 @@
+from datetime import datetime
+from pathlib import Path
 from secrets import compare_digest
 
 from fastapi import FastAPI, Request
-from sqladmin import Admin, ModelView
+from sqlalchemy import func, select
+from sqladmin import Admin, Flash, ModelView, action
 from sqladmin.authentication import AuthenticationBackend
+from sqladmin.forms import ModelConverter
+from sqladmin.widgets import BooleanInputWidget
 from starlette.responses import RedirectResponse
+from wtforms import PasswordField
+from wtforms.validators import InputRequired, Optional
 
 from app.core.config import settings
-from app.db.session import engine
+from app.core.security import hash_password, verify_password
+from app.db.session import SessionLocal, engine
+from app.models.audit import AuditLog
+from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
 from app.models.growth import (
     FollowUpWorkOrder,
     IntentCustomer,
@@ -20,6 +30,7 @@ from app.models.growth import (
     VoiceTrainingJob,
     VoiceUsageRecord,
 )
+from app.models.user import AdminUser, RegistrationRequest, Role, User, UserRole
 from app.models.lead import MerchantLead
 from app.models.operations import ReportExport, SystemAuditLog, SystemSetting
 from app.models.task import (
@@ -36,25 +47,95 @@ from app.models.task import (
     RecallRule,
     SocialComment,
 )
+from app.services.platform_browser import (
+    BrowserSessionError,
+    clear_platform_browser_session,
+    open_platform_login_window,
+    validate_platform_browser_session,
+)
+from app.services.registration import (
+    RegistrationReviewError,
+    approve_registration_request,
+    reject_registration_request,
+)
+
+
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+
+if not hasattr(BooleanInputWidget, "validation_attrs"):
+    BooleanInputWidget.validation_attrs = ["required", "disabled"]
+
+
+class PasswordOptionalModelConverter(ModelConverter):
+    def _prepare_column(self, prop, form_include_pk: bool, kwargs: dict):
+        kwargs = super()._prepare_column(prop=prop, form_include_pk=form_include_pk, kwargs=kwargs)
+        if kwargs is not None and prop.key == "password_hash":
+            kwargs["validators"] = [
+                validator for validator in kwargs["validators"] if not isinstance(validator, InputRequired)
+            ]
+        return kwargs
 
 
 class AdminAuth(AuthenticationBackend):
     async def login(self, request: Request) -> bool:
         form = await request.form()
-        username = str(form.get("username", ""))
+        username = str(form.get("username", "")).strip()
         password = str(form.get("password", ""))
 
-        is_valid = compare_digest(username, settings.admin_username) and compare_digest(password, settings.admin_password)
-        if is_valid:
-            request.session.update({"admin_user": username})
-        return is_valid
+        with SessionLocal() as db:
+            admin_user = db.scalar(select(AdminUser).where(AdminUser.username == username))
+            admin_count = db.scalar(select(func.count(AdminUser.id))) or 0
+
+            if (
+                admin_user is None
+                and admin_count == 0
+                and compare_digest(username, settings.admin_username)
+                and compare_digest(password, settings.admin_password)
+            ):
+                admin_user = AdminUser(
+                    username=username,
+                    display_name="系统管理员",
+                    password_hash=hash_password(password),
+                    status="启用",
+                    is_superuser=True,
+                )
+                db.add(admin_user)
+                db.commit()
+                db.refresh(admin_user)
+
+            if admin_user is None or admin_user.status != "启用":
+                return False
+            if not verify_password(password, admin_user.password_hash):
+                return False
+
+            admin_user.last_login_at = datetime.utcnow()
+            db.commit()
+            request.session.update(
+                {
+                    "admin_user_id": admin_user.id,
+                    "admin_user": admin_user.username,
+                },
+            )
+            return True
 
     async def logout(self, request: Request) -> RedirectResponse:
         request.session.clear()
         return RedirectResponse(request.url_for("admin:login"), status_code=302)
 
     async def authenticate(self, request: Request) -> bool:
-        return request.session.get("admin_user") == settings.admin_username
+        admin_user_id = request.session.get("admin_user_id")
+        admin_username = request.session.get("admin_user")
+        if not admin_user_id and not admin_username:
+            return False
+
+        with SessionLocal() as db:
+            statement = select(AdminUser)
+            if admin_user_id:
+                statement = statement.where(AdminUser.id == admin_user_id)
+            else:
+                statement = statement.where(AdminUser.username == admin_username)
+            admin_user = db.scalar(statement)
+            return bool(admin_user and admin_user.status == "启用")
 
 
 class MerchantLeadAdmin(ModelView, model=MerchantLead):
@@ -91,6 +172,555 @@ class MerchantLeadAdmin(ModelView, model=MerchantLead):
         MerchantLead.status: "状态",
         MerchantLead.created_at: "创建时间",
     }
+
+
+class UserAdmin(ModelView, model=User):
+    name = "用户"
+    name_plural = "用户管理"
+    icon = "fa-solid fa-user"
+
+    column_list = [
+        User.username,
+        User.display_name,
+        User.email,
+        User.phone,
+        User.status,
+        User.is_superuser,
+        User.last_login_at,
+        User.created_at,
+    ]
+    column_searchable_list = [User.username, User.display_name, User.phone, User.email]
+    column_sortable_list = [User.created_at, User.last_login_at, User.username]
+    column_default_sort = [(User.created_at, True)]
+    column_details_exclude_list = [User.password_hash]
+    form_converter = PasswordOptionalModelConverter
+    form_overrides = {"password_hash": PasswordField}
+    form_widget_args = {
+        "password_hash": {
+            "autocomplete": "new-password",
+            "placeholder": "编辑时留空表示不修改密码",
+            "required": False,
+        },
+    }
+    form_args = {
+        "password_hash": {
+            "label": "登录密码",
+            "description": "新增用户必须填写；编辑用户时留空表示不修改密码。",
+            "validators": [Optional()],
+        },
+    }
+    column_labels = {
+        User.username: "登录名",
+        User.display_name: "姓名",
+        User.email: "邮箱",
+        User.phone: "手机号",
+        User.password_hash: "登录密码",
+        User.status: "状态",
+        User.is_superuser: "超级管理员",
+        User.last_login_at: "最近登录",
+        User.created_at: "创建时间",
+        User.updated_at: "更新时间",
+    }
+
+    async def on_model_change(self, data: dict, model: User, is_created: bool, request: Request) -> None:
+        raw_password = str(data.get("password_hash") or "")
+        if raw_password:
+            data["password_hash"] = hash_password(raw_password)
+            return
+
+        if is_created:
+            raise ValueError("请填写用户登录密码")
+
+        data["password_hash"] = model.password_hash
+
+
+class AdminUserAdmin(ModelView, model=AdminUser):
+    name = "后台成员"
+    name_plural = "后台成员"
+    icon = "fa-solid fa-user-lock"
+
+    column_list = [
+        AdminUser.username,
+        AdminUser.display_name,
+        AdminUser.email,
+        AdminUser.phone,
+        AdminUser.status,
+        AdminUser.is_superuser,
+        AdminUser.last_login_at,
+        AdminUser.created_at,
+    ]
+    column_searchable_list = [AdminUser.username, AdminUser.display_name, AdminUser.email, AdminUser.phone]
+    column_sortable_list = [AdminUser.created_at, AdminUser.last_login_at, AdminUser.username]
+    column_default_sort = [(AdminUser.created_at, True)]
+    column_details_exclude_list = [AdminUser.password_hash]
+    form_converter = PasswordOptionalModelConverter
+    form_overrides = {"password_hash": PasswordField}
+    form_widget_args = {
+        "password_hash": {
+            "autocomplete": "new-password",
+            "placeholder": "编辑时留空表示不修改密码",
+            "required": False,
+        },
+    }
+    form_args = {
+        "password_hash": {
+            "label": "登录密码",
+            "description": "新增成员必须填写；编辑成员时留空表示不修改密码。",
+            "validators": [Optional()],
+        },
+    }
+    column_labels = {
+        AdminUser.username: "登录名",
+        AdminUser.display_name: "姓名",
+        AdminUser.email: "邮箱",
+        AdminUser.phone: "手机号",
+        AdminUser.password_hash: "登录密码",
+        AdminUser.status: "状态",
+        AdminUser.is_superuser: "超级管理员",
+        AdminUser.last_login_at: "最近登录",
+        AdminUser.created_at: "创建时间",
+        AdminUser.updated_at: "更新时间",
+    }
+
+    async def on_model_change(self, data: dict, model: AdminUser, is_created: bool, request: Request) -> None:
+        raw_password = str(data.get("password_hash") or "")
+        if raw_password:
+            data["password_hash"] = hash_password(raw_password)
+            return
+
+        if is_created:
+            raise ValueError("请填写后台成员登录密码")
+
+        data["password_hash"] = model.password_hash
+
+
+class RoleAdmin(ModelView, model=Role):
+    name = "角色"
+    name_plural = "角色管理"
+    icon = "fa-solid fa-users-gear"
+
+    column_list = [Role.code, Role.name, Role.description, Role.is_system, Role.created_at]
+    column_searchable_list = [Role.code, Role.name, Role.description]
+    column_sortable_list = [Role.created_at, Role.code, Role.name]
+    column_default_sort = [(Role.created_at, True)]
+    column_labels = {
+        Role.code: "角色编码",
+        Role.name: "角色名称",
+        Role.description: "说明",
+        Role.is_system: "系统角色",
+        Role.created_at: "创建时间",
+        Role.updated_at: "更新时间",
+    }
+
+
+class UserRoleAdmin(ModelView, model=UserRole):
+    name = "用户角色"
+    name_plural = "用户角色分配"
+    icon = "fa-solid fa-user-shield"
+
+    column_list = [UserRole.user_id, UserRole.role_id, UserRole.created_at]
+    column_sortable_list = [UserRole.created_at]
+    column_default_sort = [(UserRole.created_at, True)]
+    column_labels = {
+        UserRole.user_id: "用户",
+        UserRole.role_id: "角色",
+        UserRole.created_at: "创建时间",
+    }
+
+
+class RegistrationRequestAdmin(ModelView, model=RegistrationRequest):
+    name = "注册申请"
+    name_plural = "注册申请"
+    icon = "fa-solid fa-user-plus"
+
+    column_list = [
+        RegistrationRequest.company_name,
+        RegistrationRequest.project_name,
+        RegistrationRequest.contact_name,
+        RegistrationRequest.contact_phone,
+        RegistrationRequest.contact_email,
+        RegistrationRequest.desired_username,
+        RegistrationRequest.status,
+        RegistrationRequest.created_at,
+    ]
+    column_searchable_list = [
+        RegistrationRequest.company_name,
+        RegistrationRequest.project_name,
+        RegistrationRequest.contact_name,
+        RegistrationRequest.contact_phone,
+        RegistrationRequest.contact_email,
+        RegistrationRequest.desired_username,
+    ]
+    column_sortable_list = [RegistrationRequest.created_at, RegistrationRequest.updated_at, RegistrationRequest.status]
+    column_default_sort = [(RegistrationRequest.created_at, True)]
+    column_labels = {
+        RegistrationRequest.project_name: "客户/项目",
+        RegistrationRequest.company_name: "公司名称",
+        RegistrationRequest.contact_name: "联系人",
+        RegistrationRequest.contact_phone: "联系人手机号",
+        RegistrationRequest.contact_email: "联系人邮箱",
+        RegistrationRequest.desired_username: "期望登录名",
+        RegistrationRequest.note: "备注",
+        RegistrationRequest.status: "状态",
+        RegistrationRequest.reviewer_user_id: "审核人",
+        RegistrationRequest.reviewed_at: "审核时间",
+        RegistrationRequest.created_at: "创建时间",
+        RegistrationRequest.updated_at: "更新时间",
+    }
+
+    def _action_redirect(self, request: Request) -> RedirectResponse:
+        return RedirectResponse(request.url_for("admin:list", identity=self.identity), status_code=302)
+
+    def _selected_ids(self, request: Request) -> list[str]:
+        return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+
+    @action(
+        name="reject",
+        label="驳回申请",
+        confirmation_message="确认驳回选中的注册申请？",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def reject_requests(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要驳回的注册申请")
+            return self._action_redirect(request)
+
+        actor_username = request.session.get("admin_user")
+        rejected_count = 0
+        errors: list[str] = []
+        for request_id in selected_ids:
+            with SessionLocal() as db:
+                try:
+                    reject_registration_request(db, request_id, actor_username)
+                    rejected_count += 1
+                except RegistrationReviewError as exc:
+                    errors.append(str(exc))
+
+        if rejected_count:
+            Flash.success(request, f"已驳回 {rejected_count} 条注册申请")
+        if errors:
+            Flash.error(request, "部分申请处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+    @action(
+        name="approve",
+        label="审核通过",
+        confirmation_message="确认通过选中的注册申请并自动创建客户账号？",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def approve_requests(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要审核的注册申请")
+            return self._action_redirect(request)
+
+        actor_username = request.session.get("admin_user")
+        approved_accounts: list[str] = []
+        errors: list[str] = []
+        for request_id in selected_ids:
+            with SessionLocal() as db:
+                try:
+                    account = approve_registration_request(db, request_id, actor_username)
+                    approved_accounts.append(f"{account.username}（初始密码：{account.initial_password}）")
+                except RegistrationReviewError as exc:
+                    errors.append(str(exc))
+
+        if approved_accounts:
+            Flash.success(request, "已通过申请并创建客户账号：" + "；".join(approved_accounts))
+        if errors:
+            Flash.error(request, "部分申请处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+
+class LeadProviderConfigAdmin(ModelView, model=LeadProviderConfig):
+    name = "接口配置"
+    name_plural = "采集接口配置"
+    icon = "fa-solid fa-key"
+
+    column_list = [
+        LeadProviderConfig.name,
+        LeadProviderConfig.provider,
+        LeadProviderConfig.enabled,
+        LeadProviderConfig.daily_limit,
+        LeadProviderConfig.qps_limit,
+        LeadProviderConfig.updated_at,
+    ]
+    column_searchable_list = [LeadProviderConfig.name, LeadProviderConfig.provider, LeadProviderConfig.remark]
+    column_sortable_list = [LeadProviderConfig.updated_at, LeadProviderConfig.provider]
+    column_default_sort = [(LeadProviderConfig.updated_at, True)]
+    column_details_exclude_list = [LeadProviderConfig.api_key, LeadProviderConfig.secret_key]
+    form_overrides = {
+        "api_key": PasswordField,
+        "secret_key": PasswordField,
+    }
+    form_widget_args = {
+        "api_key": {
+            "autocomplete": "new-password",
+            "placeholder": "编辑时留空表示不修改",
+        },
+        "secret_key": {
+            "autocomplete": "new-password",
+            "placeholder": "没有则留空；编辑时留空表示不修改",
+        },
+    }
+    form_args = {
+        "api_key": {
+            "label": "访问密钥",
+            "description": "地图平台填写访问密钥；平台公开页面采集来源可留空。",
+            "validators": [Optional()],
+        },
+        "secret_key": {
+            "label": "签名密钥",
+            "description": "百度如果启用签名校验可填写；其他来源没有则留空。",
+            "validators": [Optional()],
+        },
+    }
+    column_labels = {
+        LeadProviderConfig.provider: "平台编码",
+        LeadProviderConfig.name: "平台名称",
+        LeadProviderConfig.api_key: "访问密钥",
+        LeadProviderConfig.secret_key: "签名密钥",
+        LeadProviderConfig.service_url: "接口地址",
+        LeadProviderConfig.enabled: "启用",
+        LeadProviderConfig.daily_limit: "日限额",
+        LeadProviderConfig.qps_limit: "QPS",
+        LeadProviderConfig.remark: "备注",
+        LeadProviderConfig.created_at: "创建时间",
+        LeadProviderConfig.updated_at: "更新时间",
+    }
+
+    async def on_model_change(
+        self,
+        data: dict,
+        model: LeadProviderConfig,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        if not is_created:
+            if not data.get("api_key"):
+                data["api_key"] = model.api_key
+            if not data.get("secret_key"):
+                data["secret_key"] = model.secret_key
+
+
+class LeadCollectionTaskAdmin(ModelView, model=LeadCollectionTask):
+    name = "采集任务"
+    name_plural = "采集任务"
+    icon = "fa-solid fa-magnifying-glass-location"
+
+    column_list = [
+        LeadCollectionTask.name,
+        LeadCollectionTask.provider,
+        LeadCollectionTask.cities,
+        LeadCollectionTask.categories,
+        LeadCollectionTask.keywords,
+        LeadCollectionTask.target_per_keyword,
+        LeadCollectionTask.status,
+        LeadCollectionTask.last_run_status,
+        LeadCollectionTask.created_at,
+    ]
+    column_searchable_list = [LeadCollectionTask.name, LeadCollectionTask.provider, LeadCollectionTask.status]
+    column_sortable_list = [LeadCollectionTask.created_at, LeadCollectionTask.updated_at]
+    column_default_sort = [(LeadCollectionTask.created_at, True)]
+
+
+class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
+    name = "采集运行"
+    name_plural = "采集运行"
+    icon = "fa-solid fa-rotate"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        LeadCollectionRun.task_id,
+        LeadCollectionRun.provider,
+        LeadCollectionRun.status,
+        LeadCollectionRun.requested_count,
+        LeadCollectionRun.fetched_count,
+        LeadCollectionRun.inserted_count,
+        LeadCollectionRun.duplicate_count,
+        LeadCollectionRun.failed_count,
+        LeadCollectionRun.started_at,
+        LeadCollectionRun.finished_at,
+    ]
+    column_searchable_list = [LeadCollectionRun.provider, LeadCollectionRun.status, LeadCollectionRun.error_message]
+    column_sortable_list = [LeadCollectionRun.started_at, LeadCollectionRun.finished_at]
+    column_default_sort = [(LeadCollectionRun.started_at, True)]
+
+
+class RawLeadRecordAdmin(ModelView, model=RawLeadRecord):
+    name = "原始线索"
+    name_plural = "原始采集线索"
+    icon = "fa-solid fa-database"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        RawLeadRecord.name,
+        RawLeadRecord.provider,
+        RawLeadRecord.source_poi_id,
+        RawLeadRecord.city,
+        RawLeadRecord.category,
+        RawLeadRecord.phone,
+        RawLeadRecord.import_status,
+        RawLeadRecord.created_at,
+    ]
+    column_searchable_list = [RawLeadRecord.name, RawLeadRecord.source_poi_id, RawLeadRecord.city, RawLeadRecord.phone]
+    column_sortable_list = [RawLeadRecord.created_at, RawLeadRecord.city]
+    column_default_sort = [(RawLeadRecord.created_at, True)]
+
+
+class PlatformBrowserSessionAdmin(ModelView, model=PlatformBrowserSession):
+    name = "浏览器登录态"
+    name_plural = "平台浏览器登录态"
+    icon = "fa-solid fa-desktop"
+
+    can_create = False
+    can_delete = False
+    can_edit = False
+    column_list = [
+        PlatformBrowserSession.name,
+        PlatformBrowserSession.provider,
+        PlatformBrowserSession.status,
+        PlatformBrowserSession.login_process_id,
+        PlatformBrowserSession.last_login_started_at,
+        PlatformBrowserSession.last_login_finished_at,
+        PlatformBrowserSession.last_validated_at,
+        PlatformBrowserSession.updated_at,
+    ]
+    column_searchable_list = [
+        PlatformBrowserSession.name,
+        PlatformBrowserSession.provider,
+        PlatformBrowserSession.status,
+        PlatformBrowserSession.last_error,
+        PlatformBrowserSession.note,
+    ]
+    column_sortable_list = [
+        PlatformBrowserSession.updated_at,
+        PlatformBrowserSession.last_validated_at,
+        PlatformBrowserSession.provider,
+    ]
+    column_default_sort = [(PlatformBrowserSession.updated_at, True)]
+    column_labels = {
+        PlatformBrowserSession.provider: "平台编码",
+        PlatformBrowserSession.name: "平台名称",
+        PlatformBrowserSession.login_url: "登录入口",
+        PlatformBrowserSession.home_url: "首页地址",
+        PlatformBrowserSession.profile_dir: "本地配置目录",
+        PlatformBrowserSession.status: "状态",
+        PlatformBrowserSession.login_process_id: "登录进程 PID",
+        PlatformBrowserSession.last_login_started_at: "最近打开窗口",
+        PlatformBrowserSession.last_login_finished_at: "最近关闭窗口",
+        PlatformBrowserSession.last_validated_at: "最近校验时间",
+        PlatformBrowserSession.last_error: "最近错误",
+        PlatformBrowserSession.note: "说明",
+        PlatformBrowserSession.created_at: "创建时间",
+        PlatformBrowserSession.updated_at: "更新时间",
+    }
+
+    def _action_redirect(self, request: Request) -> RedirectResponse:
+        return RedirectResponse(request.url_for("admin:list", identity=self.identity), status_code=302)
+
+    def _selected_ids(self, request: Request) -> list[str]:
+        return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+
+    @action(
+        name="open-login",
+        label="打开登录窗口",
+        confirmation_message="确认打开选中平台的登录窗口？请在弹出的浏览器里手动登录，登录后直接关闭窗口。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def open_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要登录的平台")
+            return self._action_redirect(request)
+
+        opened: list[str] = []
+        errors: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    errors.append(f"未找到记录：{session_id}")
+                    continue
+                try:
+                    open_platform_login_window(db, session.provider)
+                    opened.append(session.name)
+                except BrowserSessionError as exc:
+                    errors.append(str(exc))
+
+        if opened:
+            Flash.success(request, "已打开登录窗口：" + "；".join(opened))
+        if errors:
+            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+    @action(
+        name="validate-session",
+        label="校验登录态",
+        confirmation_message="确认校验选中平台的本地登录态？",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def validate_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要校验的平台")
+            return self._action_redirect(request)
+
+        results: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    continue
+                validated = validate_platform_browser_session(db, session.provider)
+                message = validated.name + "：" + validated.status
+                if validated.last_error:
+                    message += f"（{validated.last_error}）"
+                results.append(message)
+
+        if results:
+            Flash.success(request, "；".join(results))
+        return self._action_redirect(request)
+
+    @action(
+        name="clear-session",
+        label="清空登录态",
+        confirmation_message="确认删除选中平台的本地登录态目录？下次使用前需要重新登录。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def clear_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要清空的平台")
+            return self._action_redirect(request)
+
+        cleared: list[str] = []
+        errors: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    errors.append(f"未找到记录：{session_id}")
+                    continue
+                try:
+                    clear_platform_browser_session(db, session.provider)
+                    cleared.append(session.name)
+                except BrowserSessionError as exc:
+                    errors.append(str(exc))
+
+        if cleared:
+            Flash.success(request, "已清空登录态：" + "；".join(cleared))
+        if errors:
+            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
 
 
 class OutreachTaskAdmin(ModelView, model=OutreachTask):
@@ -904,6 +1534,44 @@ class SystemAuditLogAdmin(ModelView, model=SystemAuditLog):
     }
 
 
+class AuditLogAdmin(ModelView, model=AuditLog):
+    name = "客户审计"
+    name_plural = "客户审计日志"
+    icon = "fa-solid fa-shield-halved"
+
+    can_create = False
+    can_edit = False
+    can_delete = False
+    column_list = [
+        AuditLog.action,
+        AuditLog.resource_type,
+        AuditLog.resource_id,
+        AuditLog.actor_username,
+        AuditLog.ip_address,
+        AuditLog.created_at,
+    ]
+    column_searchable_list = [
+        AuditLog.action,
+        AuditLog.resource_type,
+        AuditLog.resource_id,
+        AuditLog.actor_username,
+        AuditLog.summary,
+    ]
+    column_sortable_list = [AuditLog.created_at, AuditLog.action, AuditLog.resource_type]
+    column_default_sort = [(AuditLog.created_at, True)]
+    column_labels = {
+        AuditLog.actor_user_id: "操作用户",
+        AuditLog.actor_username: "操作账号",
+        AuditLog.action: "操作",
+        AuditLog.resource_type: "资源类型",
+        AuditLog.resource_id: "资源 ID",
+        AuditLog.ip_address: "IP 地址",
+        AuditLog.user_agent: "浏览器标识",
+        AuditLog.summary: "摘要",
+        AuditLog.created_at: "创建时间",
+    }
+
+
 def setup_admin(app: FastAPI) -> None:
     authentication_backend = AdminAuth(secret_key=settings.admin_secret_key, same_site="lax")
     admin = Admin(
@@ -911,8 +1579,20 @@ def setup_admin(app: FastAPI) -> None:
         engine=engine,
         title="AI获客管理后台",
         base_url="/admin",
+        templates_dir=str(TEMPLATES_DIR),
         authentication_backend=authentication_backend,
     )
+    admin.add_view(AdminUserAdmin)
+    admin.add_view(UserAdmin)
+    admin.add_view(RoleAdmin)
+    admin.add_view(UserRoleAdmin)
+    admin.add_view(RegistrationRequestAdmin)
+    admin.add_view(AuditLogAdmin)
+    admin.add_view(LeadProviderConfigAdmin)
+    admin.add_view(LeadCollectionTaskAdmin)
+    admin.add_view(LeadCollectionRunAdmin)
+    admin.add_view(RawLeadRecordAdmin)
+    admin.add_view(PlatformBrowserSessionAdmin)
     admin.add_view(MerchantLeadAdmin)
     admin.add_view(OutreachTaskAdmin)
     admin.add_view(CallScriptAdmin)

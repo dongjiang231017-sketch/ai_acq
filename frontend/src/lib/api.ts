@@ -12,13 +12,75 @@ function resolveApiBaseUrl() {
   return `${origin.replace(/\/$/, "")}/ai-acq-api/api`;
 }
 
-const API_BASE_URL = resolveApiBaseUrl();
+export const API_BASE_URL = resolveApiBaseUrl();
 
 export function apiAssetUrl(path: string) {
   if (!path) return "";
   if (/^https?:\/\//.test(path)) return path;
   const base = API_BASE_URL.replace(/\/api\/?$/, "");
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+const AUTH_STORAGE_KEY = "ai_acq_client_auth";
+
+export type AuthUser = {
+  id: string;
+  username: string;
+  displayName: string;
+  email?: string | null;
+  phone?: string | null;
+  status: string;
+  roles: string[];
+  lastLoginAt?: string | null;
+  createdAt: string;
+};
+
+export type LoginResponse = {
+  accessToken: string;
+  tokenType: string;
+  expiresIn: number;
+  user: AuthUser;
+};
+
+export type RegistrationRequestCreate = {
+  projectName: string;
+  companyName: string;
+  contactName?: string | null;
+  contactPhone: string;
+  contactEmail?: string | null;
+  desiredUsername?: string | null;
+  note?: string | null;
+};
+
+export type RegistrationRequestRead = RegistrationRequestCreate & {
+  id: string;
+  status: string;
+  createdAt: string;
+};
+
+export function readStoredAuth(): LoginResponse | null {
+  try {
+    return JSON.parse(window.localStorage.getItem(AUTH_STORAGE_KEY) || "null") as LoginResponse | null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeAuth(auth: LoginResponse) {
+  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth));
+}
+
+export function clearStoredAuth() {
+  window.localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function readStoredAccessToken(): string | null {
+  return readStoredAuth()?.accessToken || null;
+}
+
+function authHeaders(): HeadersInit {
+  const token = readStoredAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export type ModuleSummary = {
@@ -37,10 +99,80 @@ export type Lead = {
   category: string;
   phone?: string | null;
   contactName?: string | null;
+  contactTitle?: string | null;
+  wechatId?: string | null;
   platformUrl?: string | null;
+  platformHomepageUrl?: string | null;
+  sourcePoiId?: string | null;
+  province?: string | null;
+  district?: string | null;
+  address?: string | null;
+  longitude?: string | null;
+  latitude?: string | null;
   source: string;
   intentScore: number;
   status: string;
+  followUpStatus?: string;
+  remark?: string | null;
+  ownerUserId?: string | null;
+  createdByUserId?: string | null;
+  lastContactAt?: string | null;
+  nextFollowUpAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type LeadCollectionTask = {
+  id: string;
+  name: string;
+  provider: string;
+  cities: string[];
+  categories: string[];
+  keywords: string[];
+  targetPerKeyword: number;
+  status: string;
+  lastRunStatus?: string | null;
+  remark?: string | null;
+  ownerUserId?: string | null;
+  createdByUserId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LeadCollectionRun = {
+  id: string;
+  taskId: string;
+  provider: string;
+  status: string;
+  requestedCount: number;
+  fetchedCount: number;
+  insertedCount: number;
+  duplicateCount: number;
+  failedCount: number;
+  errorMessage?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+};
+
+export type RawLeadRecord = {
+  id: string;
+  taskId: string;
+  runId: string;
+  leadId?: string | null;
+  ownerUserId?: string | null;
+  provider: string;
+  sourcePoiId: string;
+  name: string;
+  city?: string | null;
+  district?: string | null;
+  category?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  sourceUrl?: string | null;
+  longitude?: string | null;
+  latitude?: string | null;
+  importStatus: string;
+  createdAt: string;
 };
 
 export type OutreachTask = {
@@ -991,6 +1123,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
+      ...authHeaders(),
       ...options?.headers,
     },
     ...options,
@@ -1014,15 +1147,60 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+type LeadListParams = {
+  source?: string;
+  platform?: string;
+  city?: string;
+  category?: string;
+  status?: string;
+};
+
+function buildQuery(params: Record<string, string | undefined>): string {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) query.set(key, value);
+  });
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
+
 export const api = {
   health: () => request<{ status: string; service: string }>("/health"),
+  login: (payload: { identifier: string; password: string }) =>
+    request<LoginResponse>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  me: () => request<AuthUser>("/auth/me"),
+  createRegistrationRequest: (payload: RegistrationRequestCreate) =>
+    request<RegistrationRequestRead>("/auth/registration-requests", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   modules: () => request<ModuleSummary[]>("/modules"),
-  leads: () => request<Lead[]>("/leads"),
+  leads: (params: LeadListParams = {}) => request<Lead[]>(`/leads${buildQuery(params)}`),
   createLead: (lead: Omit<Lead, "id" | "intentScore" | "status">) =>
     request<Lead>("/leads", {
       method: "POST",
       body: JSON.stringify(lead),
     }),
+  collectionTasks: () => request<LeadCollectionTask[]>("/collections/tasks"),
+  createCollectionTask: (
+    task: Pick<LeadCollectionTask, "name" | "provider" | "cities" | "categories" | "keywords" | "targetPerKeyword"> & {
+      remark?: string | null;
+    },
+  ) =>
+    request<LeadCollectionTask>("/collections/tasks", {
+      method: "POST",
+      body: JSON.stringify(task),
+    }),
+  runCollectionTask: (taskId: string) =>
+    request<LeadCollectionRun>(`/collections/tasks/${taskId}/run`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  collectionRuns: () => request<LeadCollectionRun[]>("/collections/runs"),
+  rawLeadRecords: () => request<RawLeadRecord[]>("/collections/raw-records"),
   tasks: () => request<OutreachTask[]>("/tasks"),
   createTask: (task: Pick<OutreachTask, "name" | "channel" | "targetCount" | "scheduledAt">) =>
     request<OutreachTask>("/tasks", {
@@ -1049,7 +1227,22 @@ export const api = {
   callRecords: () => request<CallRecord[]>("/outbound/records"),
   liveCalls: () => request<CallRecord[]>("/outbound/live"),
   callScripts: () => request<CallScript[]>("/outbound/scripts"),
+  createCallScript: (script: Omit<CallScript, "id" | "createdAt">) =>
+    request<CallScript>("/outbound/scripts", {
+      method: "POST",
+      body: JSON.stringify(script),
+    }),
+  updateCallScript: (scriptId: string, script: Omit<CallScript, "id" | "createdAt">) =>
+    request<CallScript>(`/outbound/scripts/${scriptId}`, {
+      method: "PATCH",
+      body: JSON.stringify(script),
+    }),
   recallRules: () => request<RecallRule[]>("/outbound/recall-rules"),
+  updateRecallRule: (ruleId: string, rule: Omit<RecallRule, "id">) =>
+    request<RecallRule>(`/outbound/recall-rules/${ruleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(rule),
+    }),
   telephonyConfig: () => request<TelephonyConfig>("/outbound/telephony/config"),
   telephonyHealth: () => request<TelephonyHealth>("/outbound/telephony/health"),
   telephonyPreflight: (phone?: string) => {

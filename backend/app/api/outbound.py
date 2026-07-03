@@ -13,9 +13,11 @@ from app.schemas.task import (
     CallRecordRead,
     CallScriptCreate,
     CallScriptRead,
+    CallScriptUpdate,
     OutboundOverview,
     OutboundTaskCreate,
     RecallRuleRead,
+    RecallRuleUpdate,
     RealtimeLiveEventsRead,
     RealtimePipelineRead,
     RealtimeSessionCreate,
@@ -384,8 +386,28 @@ def list_call_scripts(db: Session = Depends(get_db)) -> list[CallScript]:
 
 @router.post("/scripts", response_model=CallScriptRead)
 def create_call_script(payload: CallScriptCreate, db: Session = Depends(get_db)) -> CallScript:
+    if payload.is_active:
+        for active_script in db.scalars(select(CallScript).where(CallScript.is_active.is_(True))).all():
+            active_script.is_active = False
     script = CallScript(**payload.model_dump(by_alias=False))
     db.add(script)
+    db.commit()
+    db.refresh(script)
+    return script
+
+
+@router.patch("/scripts/{script_id}", response_model=CallScriptRead)
+def update_call_script(script_id: str, payload: CallScriptUpdate, db: Session = Depends(get_db)) -> CallScript:
+    script = db.get(CallScript, script_id)
+    if script is None:
+        raise HTTPException(status_code=404, detail="话术不存在")
+    if payload.is_active:
+        for active_script in db.scalars(
+            select(CallScript).where(CallScript.is_active.is_(True), CallScript.id != script_id)
+        ).all():
+            active_script.is_active = False
+    for field, value in payload.model_dump(by_alias=False).items():
+        setattr(script, field, value)
     db.commit()
     db.refresh(script)
     return script
@@ -401,3 +423,15 @@ def list_recall_rules(db: Session = Depends(get_db)) -> list[RecallRule]:
     db.commit()
     db.refresh(rule)
     return [rule]
+
+
+@router.patch("/recall-rules/{rule_id}", response_model=RecallRuleRead)
+def update_recall_rule(rule_id: str, payload: RecallRuleUpdate, db: Session = Depends(get_db)) -> RecallRule:
+    rule = db.get(RecallRule, rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="重拨规则不存在")
+    for field, value in payload.model_dump(by_alias=False).items():
+        setattr(rule, field, value)
+    db.commit()
+    db.refresh(rule)
+    return rule

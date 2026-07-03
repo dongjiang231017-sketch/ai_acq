@@ -1,11 +1,40 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 
 from app.admin import setup_admin
 from app.api.router import api_router
 from app.api.system_settings import _seed_settings
 from app.core.config import settings
+from app.core.correlation import EXPOSED_CORRELATION_HEADERS, install_correlation_middleware
+from app.core.errors import setup_exception_handlers
+from app.core.security import hash_password
 from app.db.session import SessionLocal
+from app.models.user import User
+from app.services.platform_browser import ensure_platform_browser_sessions
+
+
+def _seed_initial_client_user() -> None:
+    username = settings.initial_client_username.strip()
+    password = settings.initial_client_password
+    if not username or not password:
+        return
+
+    with SessionLocal() as db:
+        existing = db.scalar(select(User).where(User.username == username))
+        if existing is not None:
+            return
+        user = User(
+            username=username,
+            display_name=settings.initial_client_display_name.strip() or username,
+            email=settings.initial_client_email.strip() or None,
+            phone=settings.initial_client_phone.strip() or None,
+            password_hash=hash_password(password),
+            status="启用",
+            is_superuser=False,
+        )
+        db.add(user)
+        db.commit()
 
 
 def create_app() -> FastAPI:
@@ -18,15 +47,21 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=EXPOSED_CORRELATION_HEADERS,
     )
+    install_correlation_middleware(app)
 
     app.include_router(api_router, prefix=settings.api_prefix)
+    setup_exception_handlers(app)
     setup_admin(app)
 
     @app.on_event("startup")
     def seed_runtime_settings() -> None:
+        _seed_initial_client_user()
         with SessionLocal() as db:
             _seed_settings(db)
+            ensure_platform_browser_sessions(db)
+            db.commit()
 
     return app
 

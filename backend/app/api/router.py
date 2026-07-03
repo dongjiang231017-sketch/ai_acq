@@ -1,9 +1,26 @@
 from fastapi import APIRouter
 
-from app.api import comment_intercepts, direct_messages, health, intent, leads, learning, modules, outbound, reports, system_settings, tasks, voice
+from app.api import (
+    auth,
+    collections,
+    comment_intercepts,
+    direct_messages,
+    health,
+    intent,
+    leads,
+    learning,
+    modules,
+    outbound,
+    reports,
+    system_settings,
+    tasks,
+    voice,
+)
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
+api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(collections.router, prefix="/collections", tags=["collections"])
 api_router.include_router(modules.router, prefix="/modules", tags=["modules"])
 api_router.include_router(leads.router, prefix="/leads", tags=["leads"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])

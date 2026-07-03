@@ -33,6 +33,128 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 18px;
+  background:
+    linear-gradient(90deg, rgba(232, 242, 255, 0.92), rgba(246, 250, 255, 0.74)),
+    url("/assets/local-business-bg.png") center / cover no-repeat,
+    #eef6ff;
+}
+
+.auth-panel {
+  width: min(520px, 100%);
+  border: 1px solid #d9e7f6;
+  border-radius: 18px;
+  padding: 28px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 24px 70px rgba(45, 85, 138, 0.18);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.auth-brand strong,
+.auth-brand small {
+  display: block;
+}
+
+.auth-brand strong {
+  color: #1f2d45;
+  font-size: 17px;
+}
+
+.auth-brand small {
+  margin-top: 3px;
+  color: #74839a;
+  font-weight: 700;
+}
+
+.auth-heading {
+  margin-bottom: 20px;
+}
+
+.auth-heading p {
+  margin: 0 0 6px;
+  color: #2473f6;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.auth-heading h1 {
+  margin: 0;
+  color: #162238;
+  font-size: 28px;
+  line-height: 1.18;
+  letter-spacing: 0;
+}
+
+.auth-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.auth-form label {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  color: #53647e;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.auth-form input {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid #d7e4f3;
+  border-radius: 12px;
+  padding: 0 13px;
+  color: #18243a;
+  background: #fff;
+  outline: none;
+}
+
+.auth-form input:focus {
+  border-color: #2473f6;
+  box-shadow: 0 0 0 3px rgba(36, 115, 246, 0.12);
+}
+
+.auth-form > button,
+.auth-form label:first-child:nth-last-of-type(2),
+.auth-form label:nth-child(2):last-of-type {
+  grid-column: 1 / -1;
+}
+
+.auth-message {
+  margin: 14px 0 0;
+  border: 1px solid #cfe0f7;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #f3f8ff;
+  color: #2c5ea8;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.auth-switch {
+  margin-top: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #6f7f96;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -1078,6 +1200,253 @@ button:disabled {
   gap: 6px;
 }
 
+.line-health-panel > .asterisk-sidecar-strip,
+.line-health-panel > .customer-delivery-card,
+.line-health-panel > .asterisk-sidecar-checks,
+.line-health-panel > .line-health-grid,
+.line-health-panel > .line-preflight,
+.line-health-panel > .cellular-diagnostic,
+.line-health-panel > .cellular-recovery-result {
+  display: none;
+}
+
+.route-status-card {
+  border: 1px solid #dce7f5;
+  border-left: 5px solid #b77a00;
+  border-radius: 14px;
+  background: #fffaf0;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.route-status-card.is-pass {
+  border-left-color: #0c9f6f;
+  background: #f5fff9;
+}
+
+.route-status-card.is-fail {
+  border-left-color: #d64545;
+  background: #fff8f8;
+}
+
+.route-status-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.route-status-main strong {
+  display: block;
+  color: #26364d;
+  font-size: 24px;
+  font-weight: 950;
+  line-height: 1.2;
+}
+
+.route-status-main small {
+  display: block;
+  margin-top: 5px;
+  color: #5c6f89;
+  font-size: 13px;
+  font-weight: 820;
+  line-height: 1.5;
+}
+
+.route-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.route-status-grid div {
+  border: 1px solid rgba(140, 159, 184, 0.26);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.78);
+  padding: 12px;
+}
+
+.route-status-grid span {
+  display: block;
+  color: #728098;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.route-status-grid strong {
+  display: block;
+  margin-top: 6px;
+  color: #20304a;
+  font-size: 17px;
+  font-weight: 950;
+  overflow-wrap: anywhere;
+}
+
+.realtime-monitor-layout {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.78fr) minmax(0, 1.5fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.monitor-call-list {
+  border: 1px solid #dfe9f6;
+  border-radius: 14px;
+  background: #f8fbff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.monitor-call-list button {
+  min-height: 92px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: #fff;
+  color: #25344c;
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+  display: grid;
+  gap: 5px;
+}
+
+.monitor-call-list button.is-active {
+  border-color: #2473f6;
+  box-shadow: 0 0 0 3px rgba(36, 115, 246, 0.12);
+}
+
+.monitor-call-list span {
+  color: #2473f6;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.monitor-call-list strong,
+.monitor-call-list small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.monitor-call-list strong {
+  font-size: 16px;
+  font-weight: 950;
+}
+
+.monitor-call-list small {
+  color: #6e7e96;
+  font-weight: 820;
+  line-height: 1.45;
+}
+
+.monitor-chat-panel {
+  min-height: 360px;
+  border: 1px solid #dfe9f6;
+  border-radius: 14px;
+  background: #fbfdff;
+  display: grid;
+  grid-template-rows: auto minmax(220px, 1fr) auto;
+  overflow: hidden;
+}
+
+.monitor-chat-header {
+  border-bottom: 1px solid #e5edf7;
+  padding: 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.monitor-chat-header span,
+.monitor-chat-header small {
+  display: block;
+  color: #728098;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.monitor-chat-header strong {
+  display: block;
+  margin: 3px 0;
+  color: #20304a;
+  font-size: 19px;
+  font-weight: 950;
+}
+
+.monitor-chat-stream {
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+}
+
+.monitor-message {
+  max-width: 82%;
+  border-radius: 14px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 5px;
+}
+
+.monitor-message span {
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.monitor-message p {
+  margin: 0;
+  color: inherit;
+  font-weight: 820;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.monitor-message.is-ai {
+  justify-self: start;
+  background: #eef5ff;
+  color: #203a64;
+}
+
+.monitor-message.is-customer {
+  justify-self: end;
+  background: #eafaf3;
+  color: #174b38;
+}
+
+.monitor-message.is-system {
+  justify-self: center;
+  background: #f2f5fa;
+  color: #5f6f86;
+}
+
+.monitor-ai-next {
+  border-top: 1px solid #e5edf7;
+  background: #fff;
+  padding: 14px;
+}
+
+.monitor-ai-next span {
+  color: #728098;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.monitor-ai-next strong {
+  display: block;
+  margin-top: 4px;
+  color: #20304a;
+  font-weight: 950;
+}
+
+.monitor-ai-next p {
+  margin: 6px 0 0;
+  color: #52637b;
+  font-weight: 820;
+  line-height: 1.55;
+}
+
 .cellular-diagnostic,
 .cellular-recovery-result {
   border: 1px solid #dce7f5;
@@ -1272,6 +1641,49 @@ button:disabled {
   margin-top: 0;
   border-top: 0;
   padding-top: 0;
+}
+
+.script-editor,
+.rule-editor-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.script-editor-grid,
+.rule-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.script-editor-grid label,
+.rule-editor-grid label {
+  display: grid;
+  gap: 7px;
+  color: #64758e;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.rule-editor-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.script-editor-grid textarea {
+  min-height: 150px;
+}
+
+.script-active-toggle {
+  min-height: 43px;
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #dfe9f6;
+  border-radius: 11px;
+  background: #f8fbff;
+  color: #25344c !important;
+  padding: 0 12px;
 }
 
 .flow-node-grid,
@@ -3344,6 +3756,14 @@ button:disabled {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .route-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .realtime-monitor-layout {
+    grid-template-columns: 1fr;
+  }
+
   .asterisk-sidecar-strip {
     grid-template-columns: 1fr;
   }
@@ -3390,6 +3810,8 @@ button:disabled {
 
   .flow-node-grid,
   .rule-detail-grid,
+  .script-editor-grid,
+  .rule-editor-grid,
   .record-grid,
   .dm-inbox-grid,
   .intercept-summary,
@@ -3489,7 +3911,11 @@ button:disabled {
   .customer-delivery-meta,
   .asterisk-sidecar-checks,
   .line-health-grid,
+  .route-status-grid,
   .line-preflight-steps,
+  .realtime-monitor-layout,
+  .script-editor-grid,
+  .rule-editor-grid,
   .intercept-summary,
   .realtime-pipeline-summary,
   .realtime-pipeline-steps,

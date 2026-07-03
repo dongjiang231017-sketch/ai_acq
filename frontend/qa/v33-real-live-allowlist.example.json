@@ -1,0 +1,16 @@
+{
+  "recipients": [
+    {
+      "authorized": true,
+      "channels": ["call", "dm"],
+      "name": "请替换为已授权真实商家名称",
+      "city": "南昌",
+      "category": "本地生活",
+      "contactName": "请替换为联系人称呼",
+      "phone": "REPLACE_WITH_AUTHORIZED_REAL_PHONE",
+      "platform": "抖音",
+      "platformUrl": "REPLACE_WITH_REAL_MERCHANT_PROFILE_URL",
+      "dmMessage": "请替换为本次允许发送给该客户的真实私信内容"
+    }
+  ]
+}

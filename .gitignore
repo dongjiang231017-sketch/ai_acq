@@ -19,6 +19,7 @@ __pycache__/
 htmlcov/
 backend/.venv/
 backend/local.db
+backend/.runtime/
 .voice_samples/
 backend/.voice_samples/
 .voice_outputs/

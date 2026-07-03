@@ -128,7 +128,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 "Trunk 可达",
                 "fail",
                 health.trunk_status,
-                "检查鼎信 8T 是否已注册到服务器 Asterisk、PJSIP endpoint 名称和公网 SIP/RTP 防火墙。"
+                f"检查{profile.label}是否已注册到服务器 Asterisk、PJSIP endpoint 名称和公网 SIP/RTP 防火墙。"
                 if deployment_mode == "server"
                 else "检查语音网关 SIP 注册、PJSIP endpoint 名称和现场网络。",
             )

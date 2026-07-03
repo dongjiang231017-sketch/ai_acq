@@ -25,6 +25,7 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  AuthUser,
   CallRecord,
   CallScript,
   ChannelReport,
@@ -50,9 +51,12 @@ import {
   IntentEvent,
   IntentOverview,
   Lead,
+  LeadCollectionRun,
+  LeadCollectionTask,
   ModuleSummary,
   OutboundOverview,
   OutreachTask,
+  RawLeadRecord,
   RecallRule,
   ReportExport,
   ReportOverview,
@@ -78,8 +82,12 @@ import {
   VoiceUsageRecord,
   SettingsOverview,
   SystemSetting,
+  API_BASE_URL,
   api,
   apiAssetUrl,
+  clearStoredAuth,
+  readStoredAuth,
+  storeAuth,
 } from "./lib/api";
 
 const icons = [BarChart3, Search, Database, PhoneCall, MessageSquareText, Users, Headphones, ClipboardList, Settings];
@@ -146,6 +154,10 @@ const fallbackLeads: Lead[] = [
   },
 ];
 
+const fallbackCollectionTasks: LeadCollectionTask[] = [];
+const fallbackCollectionRuns: LeadCollectionRun[] = [];
+const fallbackRawLeadRecords: RawLeadRecord[] = [];
+
 const fallbackTasks: OutreachTask[] = [
   {
     id: "task_1",
@@ -192,22 +204,22 @@ const fallbackOverview: OutboundOverview = {
 };
 
 const fallbackVoiceGatewayProfile: VoiceGatewayProfile = {
-  key: "dinstar_8t_server",
-  label: "鼎信 8T 多卡网关（服务器 Asterisk）",
-  vendor: "Dinstar/鼎信",
-  model: "8T GSM/LTE VoIP Gateway",
-  category: "multi_sim_lte_gateway",
+  key: "uc100_sip_volte",
+  label: "语音网关（UC100 测试档案）",
+  vendor: "ZHY",
+  model: "UC100",
+  category: "sip_volte_gateway",
   transport: "sip_udp_server_registered",
   host: "",
   sipPort: 5060,
-  trunkName: "dinstar8t",
-  maxChannels: 8,
-  lineType: "multi_sim_cellular",
+  trunkName: "uc100",
+  maxChannels: 1,
+  lineType: "sim_volte",
   adminUrl: "",
   discoveryMode: "gateway_registers_to_server",
   tested: false,
-  capabilities: ["sip_registration_to_server", "multi_sim", "8_channel_pool", "asterisk_audiosocket"],
-  notes: ["交付默认让鼎信 8T 主动注册到服务器 Asterisk，客户电脑不需要内置 Asterisk。"],
+  capabilities: ["sip_registration_to_server", "single_sim", "asterisk_audiosocket"],
+  notes: ["让 UC100 主动注册到云端 Asterisk；客户电脑不需要本机 Asterisk。"],
 };
 
 const fallbackTelephonyConfig: TelephonyConfig = {
@@ -220,8 +232,8 @@ const fallbackTelephonyConfig: TelephonyConfig = {
   asteriskHost: "127.0.0.1",
   asteriskAmiPort: 5038,
   asteriskUsernameConfigured: false,
-  asteriskTrunkName: "dinstar8t",
-  asteriskMaxChannels: 8,
+  asteriskTrunkName: "uc100",
+  asteriskMaxChannels: 1,
   asteriskLiveCallEnabled: false,
   asteriskBulkCallEnabled: false,
 };
@@ -447,6 +459,69 @@ const fallbackRules: RecallRule[] = [
     enabled: true,
   },
 ];
+
+type CallScriptDraft = Omit<CallScript, "id" | "createdAt">;
+type RecallRuleDraft = Omit<RecallRule, "id">;
+type MonitorMessage = {
+  speaker: "ai" | "customer" | "system";
+  label: string;
+  text: string;
+};
+
+function scriptDraftFrom(script?: CallScript | null): CallScriptDraft {
+  return {
+    name: script?.name ?? "视频号团购商家邀约话术",
+    opening: script?.opening ?? "",
+    qualification: script?.qualification ?? "",
+    objection: script?.objection ?? "",
+    closing: script?.closing ?? "",
+    isActive: script?.isActive ?? true,
+  };
+}
+
+function persistedScriptId(script?: CallScript | null) {
+  if (!script?.id || script.id.startsWith("script_")) return null;
+  return script.id;
+}
+
+function recallRuleDraftFrom(rule?: RecallRule | null): RecallRuleDraft {
+  return {
+    name: rule?.name ?? "默认重拨规则",
+    noAnswerIntervalMinutes: rule?.noAnswerIntervalMinutes ?? 240,
+    busyIntervalMinutes: rule?.busyIntervalMinutes ?? 120,
+    maxAttempts: rule?.maxAttempts ?? 3,
+    quietStart: rule?.quietStart ?? "21:00",
+    quietEnd: rule?.quietEnd ?? "09:00",
+    enabled: rule?.enabled ?? true,
+  };
+}
+
+function transcriptToMonitorMessages(record?: CallRecord | null): MonitorMessage[] {
+  if (!record) return [];
+  const lines = record.transcript
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const messages = lines.map((line, index) => {
+    const customerMatch = /^(客户|商家|用户|Customer|User)[:：]\s*(.+)$/i.exec(line);
+    if (customerMatch) return { speaker: "customer" as const, label: "客户", text: customerMatch[2] };
+    const aiMatch = /^(AI|坐席|系统|Agent)[:：]\s*(.+)$/i.exec(line);
+    if (aiMatch) return { speaker: "ai" as const, label: "AI", text: aiMatch[2] };
+    return {
+      speaker: index % 2 === 0 ? ("ai" as const) : ("customer" as const),
+      label: index % 2 === 0 ? "AI" : "客户",
+      text: line,
+    };
+  });
+  if (messages.length > 0) return messages;
+  return [
+    {
+      speaker: "system",
+      label: "监听",
+      text: record.outcome ? `${record.outcome}，等待实时转写同步。` : "等待实时通话开始。",
+    },
+  ];
+}
 
 const fallbackDmOverview: DmOverview = {
   accounts: 3,
@@ -1285,6 +1360,28 @@ function telephonyReadinessLabel(health: TelephonyHealth, preflight?: TelephonyP
   return "待配置";
 }
 
+function apiServerHostLabel() {
+  try {
+    const url = new URL(API_BASE_URL);
+    if (["127.0.0.1", "localhost", "0.0.0.0"].includes(url.hostname)) return "服务器公网IP";
+    return url.hostname;
+  } catch {
+    return "服务器公网IP";
+  }
+}
+
+function serverSipRegistrationTarget(config: TelephonyConfig) {
+  const sipPort = config.voiceGatewayProfile.sipPort || 5060;
+  return `${apiServerHostLabel()}:${sipPort}`;
+}
+
+function serverAmiDisplay(config: TelephonyConfig) {
+  const host = config.asteriskHost || "127.0.0.1";
+  const port = config.asteriskAmiPort || 5038;
+  if (["127.0.0.1", "localhost", "0.0.0.0"].includes(host)) return `后端本机:${port}`;
+  return `${host}:${port}`;
+}
+
 function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHealth) {
   if (config.gatewayMode !== "asterisk") return "当前仍为模拟线路";
   if (!health.configured) return "请先配置 AMI 账号和密码";
@@ -1293,6 +1390,22 @@ function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHeal
   if (health.trunkReachable === false) return health.trunkStatus;
   if (!health.liveCallEnabled) return "单号试拨开关未开启";
   return health.trunkStatus || "语音网关线路待测试";
+}
+
+function routeHealthSummary(health: TelephonyHealth, preflight: TelephonyPreflight) {
+  const isReady = preflight.readyForSingleNumberTest || preflight.readyForBulkTasks || health.readyForTestCall;
+  const isLinked = Boolean(health.authenticated && health.trunkReachable);
+  const isPartial = Boolean(health.amiReachable || health.authenticated || preflight.readyForDeviceTest);
+  const status = isReady || isLinked ? "pass" : isPartial ? "warn" : "fail";
+  const title = status === "pass" ? "线路通畅" : status === "warn" ? "线路待联通" : "线路不可用";
+  const detail =
+    status === "pass"
+      ? "后台线路检测通过，可以按配置执行外呼任务。"
+      : status === "warn"
+        ? "后台正在接入线路，完成后会自动更新状态。"
+        : "后台线路未接入，请等待管理员处理。";
+  const action = status === "pass" ? "可以创建任务" : status === "warn" ? "后台验收中" : "等待后台接入";
+  return { status, title, detail, action };
 }
 
 function asteriskSidecarStatusText(status?: AiAcqDesktopAsteriskStatus | null) {
@@ -1416,8 +1529,26 @@ function formatDuration(seconds: number) {
 }
 
 function App() {
+  const [auth, setAuth] = useState(() => readStoredAuth());
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(auth?.user ?? null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authMessage, setAuthMessage] = useState("");
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
+  const [loginForm, setLoginForm] = useState({ identifier: "", password: "" });
+  const [registrationForm, setRegistrationForm] = useState({
+    projectName: "",
+    companyName: "",
+    contactName: "",
+    contactPhone: "",
+    contactEmail: "",
+    desiredUsername: "",
+    note: "",
+  });
   const [modules, setModules] = useState<ModuleSummary[]>(fallbackModules);
   const [leads, setLeads] = useState<Lead[]>(fallbackLeads);
+  const [collectionTasks, setCollectionTasks] = useState<LeadCollectionTask[]>(fallbackCollectionTasks);
+  const [collectionRuns, setCollectionRuns] = useState<LeadCollectionRun[]>(fallbackCollectionRuns);
+  const [rawLeadRecords, setRawLeadRecords] = useState<RawLeadRecord[]>(fallbackRawLeadRecords);
   const [tasks, setTasks] = useState<OutreachTask[]>(fallbackTasks);
   const [overview, setOverview] = useState<OutboundOverview>(fallbackOverview);
   const [telephonyConfig, setTelephonyConfig] = useState<TelephonyConfig>(fallbackTelephonyConfig);
@@ -1505,8 +1636,8 @@ function App() {
   const [settingDraft, setSettingDraft] = useState(fallbackSystemSettings[0]?.value ?? "");
   const [settingsMessage, setSettingsMessage] = useState("请选择左侧配置项，修改后点击保存设置。");
   const [isSavingSetting, setIsSavingSetting] = useState(false);
-  const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
-  const [selectedDmLeadIds, setSelectedDmLeadIds] = useState<string[]>(fallbackLeads.map((lead) => lead.id));
+  const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([]);
+  const [selectedDmLeadIds, setSelectedDmLeadIds] = useState<string[]>([]);
   const [leadForm, setLeadForm] = useState({
     name: "",
     platform: "视频号",
@@ -1517,6 +1648,18 @@ function App() {
     platformUrl: "",
     source: "手动录入",
   });
+  const [collectionForm, setCollectionForm] = useState({
+    name: "本地商家地图采集",
+    provider: "amap",
+    cities: "南昌",
+    categories: "餐饮",
+    keywords: "团购",
+    targetPerKeyword: 10,
+    remark: "",
+  });
+  const [collectionMessage, setCollectionMessage] = useState("地图采集密钥由服务端配置，客户端只发起任务和查看结果。");
+  const [isCreatingCollectionTask, setIsCreatingCollectionTask] = useState(false);
+  const [runningCollectionTaskId, setRunningCollectionTaskId] = useState<string | null>(null);
   const [taskForm, setTaskForm] = useState({
     name: "",
     channel: "call" as OutreachTask["channel"],
@@ -1528,6 +1671,15 @@ function App() {
     concurrency: 10,
     scheduledAt: "",
   });
+  const [outboundTaskMessage, setOutboundTaskMessage] = useState("选择线索后创建任务，再从任务列表启动。");
+  const [scriptDraft, setScriptDraft] = useState<CallScriptDraft>(() => scriptDraftFrom(fallbackScripts[0]));
+  const [scriptMessage, setScriptMessage] = useState("客户可直接改话术，保存后新外呼任务会使用当前启用话术。");
+  const [isSavingScript, setIsSavingScript] = useState(false);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [ruleDraft, setRuleDraft] = useState<RecallRuleDraft>(() => recallRuleDraftFrom(fallbackRules[0]));
+  const [ruleMessage, setRuleMessage] = useState("未接、忙线和静默时段由客户自行调整。");
+  const [isSavingRule, setIsSavingRule] = useState(false);
+  const [selectedLiveCallId, setSelectedLiveCallId] = useState(fallbackRecords[0]?.id ?? "");
   const [telephonyTestForm, setTelephonyTestForm] = useState({
     phone: "",
     callerId: "",
@@ -1639,6 +1791,15 @@ function App() {
   );
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
+  const callableLeadIds = useMemo(() => callableLeads.map((lead) => lead.id), [callableLeads]);
+  const selectedCallableLeadIds = useMemo(
+    () => selectedLeadIds.filter((leadId) => callableLeadIds.includes(leadId)),
+    [callableLeadIds, selectedLeadIds],
+  );
+  const allCallableSelected = callableLeadIds.length > 0 && selectedCallableLeadIds.length === callableLeadIds.length;
+  const selectedLiveCall =
+    liveCalls.find((record) => record.id === selectedLiveCallId) ?? liveCalls[0] ?? callRecords[0] ?? null;
+  const selectedLiveCallMessages = useMemo(() => transcriptToMonitorMessages(selectedLiveCall), [selectedLiveCall]);
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
   const dmSupportedAccounts = useMemo(() => dmAccounts.filter(isSupportedDmAccount), [dmAccounts]);
   const dmLoginAccounts = useMemo(() => dmAccounts.filter(isLoginCapableAccount), [dmAccounts]);
@@ -1904,6 +2065,20 @@ function App() {
   }, [clientSettings]);
 
   useEffect(() => {
+    setScriptDraft(scriptDraftFrom(activeScript));
+  }, [activeScript?.id]);
+
+  useEffect(() => {
+    setRuleDraft(recallRuleDraftFrom(activeRule));
+  }, [activeRule?.id]);
+
+  useEffect(() => {
+    if (selectedLiveCallId && liveCalls.some((record) => record.id === selectedLiveCallId)) return;
+    const nextRecord = liveCalls[0] ?? callRecords[0];
+    if (nextRecord) setSelectedLiveCallId(nextRecord.id);
+  }, [callRecords, liveCalls, selectedLiveCallId]);
+
+  useEffect(() => {
     setIsDesktopClient(Boolean(window.aiAcqDesktop?.isDesktopClient));
   }, []);
 
@@ -2046,6 +2221,9 @@ function App() {
       api.commentInterceptOverview(),
       api.commentInterceptSources(),
       api.socialComments(),
+      api.collectionTasks(),
+      api.collectionRuns(),
+      api.rawLeadRecords(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -2175,12 +2353,77 @@ function App() {
       setSocialComments(nextComments);
       setSelectedCommentIds((current) => current.filter((id) => nextComments.some((comment) => comment.id === id)));
     }
+    if (results[40].status === "fulfilled") setCollectionTasks(results[40].value);
+    if (results[41].status === "fulfilled") setCollectionRuns(results[41].value);
+    if (results[42].status === "fulfilled") setRawLeadRecords(results[42].value);
     setIsLoading(false);
   }
 
   useEffect(() => {
+    if (!auth?.accessToken) return;
+    setLeads([]);
+    setTasks([]);
+    setCollectionTasks([]);
+    setCollectionRuns([]);
+    setRawLeadRecords([]);
+    setSelectedLeadIds([]);
+    setSelectedDmLeadIds([]);
     void loadData();
-  }, []);
+  }, [auth?.accessToken]);
+
+  async function submitLogin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!loginForm.identifier.trim() || !loginForm.password) return;
+    setIsSubmittingAuth(true);
+    setAuthMessage("正在登录客户工作台...");
+    try {
+      const result = await api.login({
+        identifier: loginForm.identifier.trim(),
+        password: loginForm.password,
+      });
+      storeAuth(result);
+      setAuth(result);
+      setCurrentUser(result.user);
+      setAuthMessage("");
+      setLoginForm((current) => ({ ...current, password: "" }));
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "登录失败，请稍后再试。");
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  }
+
+  async function submitRegistrationRequest(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!registrationForm.companyName.trim() || !registrationForm.contactPhone.trim()) return;
+    setIsSubmittingAuth(true);
+    setAuthMessage("正在提交开通申请...");
+    try {
+      await api.createRegistrationRequest({
+        projectName: registrationForm.projectName.trim() || registrationForm.companyName.trim(),
+        companyName: registrationForm.companyName.trim(),
+        contactName: registrationForm.contactName.trim() || null,
+        contactPhone: registrationForm.contactPhone.trim(),
+        contactEmail: registrationForm.contactEmail.trim() || null,
+        desiredUsername: registrationForm.desiredUsername.trim() || null,
+        note: registrationForm.note.trim() || null,
+      });
+      setAuthMessage("申请已提交，管理员审核并开通账号后即可登录。");
+      setAuthMode("login");
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "提交失败，请稍后再试。");
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  }
+
+  function logout() {
+    clearStoredAuth();
+    setAuth(null);
+    setCurrentUser(null);
+    setApiStatus("未登录");
+    setAuthMessage("已退出登录。");
+  }
 
   async function submitLead(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2207,6 +2450,66 @@ function App() {
     });
   }
 
+  function splitCollectionItems(value: string) {
+    return value
+      .split(/[\n,，、;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  async function submitCollectionTask(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cities = splitCollectionItems(collectionForm.cities);
+    const categories = splitCollectionItems(collectionForm.categories);
+    const keywords = splitCollectionItems(collectionForm.keywords);
+    if (!collectionForm.name.trim() || cities.length === 0 || categories.length === 0) return;
+
+    setIsCreatingCollectionTask(true);
+    setCollectionMessage("正在创建采集任务...");
+    try {
+      const created = await api.createCollectionTask({
+        name: collectionForm.name.trim(),
+        provider: collectionForm.provider,
+        cities,
+        categories,
+        keywords,
+        targetPerKeyword: Number(collectionForm.targetPerKeyword) || 10,
+        remark: collectionForm.remark.trim() || null,
+      });
+      setCollectionTasks((current) => [created, ...current]);
+      setCollectionMessage("采集任务已创建，可以从前端点击运行。");
+    } catch (error) {
+      setCollectionMessage(error instanceof Error ? error.message : "采集任务创建失败。");
+    } finally {
+      setIsCreatingCollectionTask(false);
+    }
+  }
+
+  async function runCollectionTask(taskId: string) {
+    setRunningCollectionTaskId(taskId);
+    setCollectionMessage("正在通过服务端采集商家点位...");
+    try {
+      const run = await api.runCollectionTask(taskId);
+      const [taskData, runData, rawData, leadData] = await Promise.all([
+        api.collectionTasks(),
+        api.collectionRuns(),
+        api.rawLeadRecords(),
+        api.leads(),
+      ]);
+      setCollectionRuns([run, ...runData.filter((item) => item.id !== run.id)]);
+      setCollectionTasks(taskData);
+      setRawLeadRecords(rawData);
+      setLeads(leadData);
+      setCollectionMessage(
+        `采集完成：抓取 ${run.fetchedCount} 条，入库 ${run.insertedCount} 条，重复 ${run.duplicateCount} 条，失败 ${run.failedCount} 条。`,
+      );
+    } catch (error) {
+      setCollectionMessage(error instanceof Error ? error.message : "采集运行失败，请检查服务端数据源配置。");
+    } finally {
+      setRunningCollectionTaskId(null);
+    }
+  }
+
   async function submitTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!taskForm.name.trim()) return;
@@ -2222,35 +2525,52 @@ function App() {
 
   async function submitOutboundTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const leadIds = selectedLeadIds.length > 0 ? selectedLeadIds : callableLeads.slice(0, 20).map((lead) => lead.id);
-    if (!outboundForm.name.trim() || leadIds.length === 0) return;
+    const leadIds = selectedCallableLeadIds;
+    if (!outboundForm.name.trim()) {
+      setOutboundTaskMessage("请先填写任务名称。");
+      return;
+    }
+    if (leadIds.length === 0) {
+      setOutboundTaskMessage("请先选择要拨打的线索。");
+      return;
+    }
 
-    const created = await api.createOutboundTask({
-      name: outboundForm.name,
-      leadIds,
-      concurrency: Number(outboundForm.concurrency),
-      scriptId: activeScript?.id ?? null,
-      scheduledAt: outboundForm.scheduledAt || null,
-    });
-    setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
-    setActiveModule("outbound");
-    setActiveOutboundTab("任务列表");
+    try {
+      const created = await api.createOutboundTask({
+        name: outboundForm.name,
+        leadIds,
+        concurrency: Number(outboundForm.concurrency),
+        scriptId: persistedScriptId(activeScript),
+        scheduledAt: outboundForm.scheduledAt || null,
+      });
+      setTasks((current) => [created, ...current.filter((task) => task.id !== created.id)]);
+      setOutboundTaskMessage(`已创建「${created.name}」，共 ${leadIds.length} 条线索，可在右侧启动。`);
+      setActiveModule("outbound");
+      setActiveOutboundTab("任务列表");
+    } catch (error) {
+      setOutboundTaskMessage(error instanceof Error ? error.message : "外呼任务创建失败。");
+    }
   }
 
   async function startOutboundTask(taskId: string) {
-    const updated = await api.startOutboundTask(taskId);
-    setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)));
-    const [overviewData, recordData, liveData, leadData] = await Promise.all([
-      api.outboundOverview(),
-      api.callRecords(),
-      api.liveCalls(),
-      api.leads(),
-    ]);
-    setOverview(overviewData);
-    setCallRecords(recordData);
-    setLiveCalls(liveData);
-    setLeads(leadData);
-    setActiveOutboundTab("实时监听");
+    try {
+      const updated = await api.startOutboundTask(taskId);
+      setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)));
+      const [overviewData, recordData, liveData, leadData] = await Promise.all([
+        api.outboundOverview(),
+        api.callRecords(),
+        api.liveCalls(),
+        api.leads(),
+      ]);
+      setOverview(overviewData);
+      setCallRecords(recordData);
+      setLiveCalls(liveData);
+      setLeads(leadData);
+      setOutboundTaskMessage(`已启动「${updated.name}」，正在进入实时监听。`);
+      setActiveOutboundTab("实时监听");
+    } catch (error) {
+      setOutboundTaskMessage(error instanceof Error ? error.message : "外呼任务启动失败。");
+    }
   }
 
   async function refreshAsteriskSidecarStatus() {
@@ -3645,6 +3965,94 @@ function App() {
     setSelectedLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
     );
+  }
+
+  function toggleAllCallableLeads() {
+    setSelectedLeadIds((current) => {
+      const callableSet = new Set(callableLeadIds);
+      if (allCallableSelected) return current.filter((leadId) => !callableSet.has(leadId));
+      return Array.from(new Set([...current, ...callableLeadIds]));
+    });
+  }
+
+  function generateScriptDraft() {
+    setIsGeneratingScript(true);
+    const selectedLead = callableLeads.find((lead) => selectedCallableLeadIds.includes(lead.id)) ?? callableLeads[0] ?? leads[0];
+    const messages = transcriptToMonitorMessages(selectedLiveCall);
+    const latestCustomerReply = [...messages].reverse().find((message) => message.speaker === "customer")?.text;
+    const city = selectedLead?.city || "本地";
+    const category = selectedLead?.category || "本地生活";
+    const merchant = selectedLiveCall?.merchantName || selectedLead?.name || "商家";
+    setScriptDraft({
+      name: `${category}商家实时外呼话术`,
+      opening: `您好，我是视频号本地生活服务顾问，看到${merchant}在${city}${category}领域适合做团购获客，想快速确认是否方便聊两分钟。`,
+      qualification: `您现在更想提升到店客流、团购转化，还是先把线上曝光做起来？目前每月希望新增多少有效客户？`,
+      objection: latestCustomerReply
+        ? `刚刚客户反馈“${latestCustomerReply}”。先复述理解，再给一个低风险试跑方案，只问是否愿意看同城案例。`
+        : "如果客户担心成本或效果，先给同城案例和低风险试跑，不催促成交。",
+      closing: "如果方便，我把适合您品类的案例和基础方案发过去，后续由顾问按您的时间继续跟进。",
+      isActive: true,
+    });
+    window.setTimeout(() => setIsGeneratingScript(false), 220);
+    setScriptMessage("AI 已根据业务和当前客户回复生成一版话术，可继续手动调整。");
+  }
+
+  async function saveScriptDraft() {
+    if (!scriptDraft.name.trim() || !scriptDraft.opening.trim()) {
+      setScriptMessage("请至少填写话术名称和开场白。");
+      return;
+    }
+    setIsSavingScript(true);
+    try {
+      const payload = {
+        ...scriptDraft,
+        name: scriptDraft.name.trim(),
+        opening: scriptDraft.opening.trim(),
+        qualification: scriptDraft.qualification.trim(),
+        objection: scriptDraft.objection.trim(),
+        closing: scriptDraft.closing.trim(),
+      };
+      const activeScriptId = persistedScriptId(activeScript);
+      const saved = activeScriptId
+        ? await api.updateCallScript(activeScriptId, payload)
+        : await api.createCallScript(payload);
+      setScripts((current) => [
+        saved,
+        ...current
+          .filter((script) => script.id !== saved.id)
+          .map((script) => (saved.isActive ? { ...script, isActive: false } : script)),
+      ]);
+      setScriptDraft(scriptDraftFrom(saved));
+      setScriptMessage(`已保存「${saved.name}」。`);
+    } catch (error) {
+      setScriptMessage(error instanceof Error ? error.message : "话术保存失败。");
+    } finally {
+      setIsSavingScript(false);
+    }
+  }
+
+  async function saveRecallRuleDraft() {
+    if (!activeRule?.id) {
+      setRuleMessage("暂无可保存的重拨规则。");
+      return;
+    }
+    setIsSavingRule(true);
+    try {
+      const saved = await api.updateRecallRule(activeRule.id, {
+        ...ruleDraft,
+        name: ruleDraft.name.trim() || "默认重拨规则",
+        noAnswerIntervalMinutes: Number(ruleDraft.noAnswerIntervalMinutes) || 240,
+        busyIntervalMinutes: Number(ruleDraft.busyIntervalMinutes) || 120,
+        maxAttempts: Number(ruleDraft.maxAttempts) || 3,
+      });
+      setRecallRules((current) => [saved, ...current.filter((rule) => rule.id !== saved.id)]);
+      setRuleDraft(recallRuleDraftFrom(saved));
+      setRuleMessage(`已保存「${saved.name}」。`);
+    } catch (error) {
+      setRuleMessage(error instanceof Error ? error.message : "重拨规则保存失败。");
+    } finally {
+      setIsSavingRule(false);
+    }
   }
 
   function toggleDmLead(leadId: string) {
@@ -5218,6 +5626,116 @@ function App() {
     );
   }
 
+  function renderAuthGate() {
+    return (
+      <main className="auth-shell">
+        <section className="auth-panel">
+          <div className="auth-brand">
+            <span className="brand-mark">
+              <Sparkles size={20} />
+            </span>
+            <div>
+              <strong>商家AI获客</strong>
+              <small>客户工作台</small>
+            </div>
+          </div>
+          <div className="auth-heading">
+            <p>{authMode === "login" ? "客户账号登录" : "客户开通申请"}</p>
+            <h1>{authMode === "login" ? "登录进入获客工作台" : "申请开通客户账号"}</h1>
+          </div>
+          {authMode === "login" ? (
+            <form className="auth-form" onSubmit={submitLogin}>
+              <label>
+                登录账号
+                <input
+                  autoComplete="username"
+                  value={loginForm.identifier}
+                  onChange={(event) => setLoginForm({ ...loginForm, identifier: event.target.value })}
+                />
+              </label>
+              <label>
+                密码
+                <input
+                  autoComplete="current-password"
+                  type="password"
+                  value={loginForm.password}
+                  onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
+                />
+              </label>
+              <button className="primary-button" disabled={isSubmittingAuth} type="submit">
+                <KeyRound size={16} />
+                {isSubmittingAuth ? "登录中" : "登录"}
+              </button>
+            </form>
+          ) : (
+            <form className="auth-form" onSubmit={submitRegistrationRequest}>
+              <label>
+                公司名称
+                <input
+                  value={registrationForm.companyName}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, companyName: event.target.value })}
+                />
+              </label>
+              <label>
+                商户/项目
+                <input
+                  value={registrationForm.projectName}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, projectName: event.target.value })}
+                />
+              </label>
+              <label>
+                联系人
+                <input
+                  value={registrationForm.contactName}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, contactName: event.target.value })}
+                />
+              </label>
+              <label>
+                联系手机号
+                <input
+                  value={registrationForm.contactPhone}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, contactPhone: event.target.value })}
+                />
+              </label>
+              <label>
+                登录账号
+                <input
+                  value={registrationForm.desiredUsername}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, desiredUsername: event.target.value })}
+                />
+              </label>
+              <label>
+                联系邮箱
+                <input
+                  value={registrationForm.contactEmail}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, contactEmail: event.target.value })}
+                />
+              </label>
+              <button className="primary-button" disabled={isSubmittingAuth} type="submit">
+                <CheckCircle2 size={16} />
+                {isSubmittingAuth ? "提交中" : "提交申请"}
+              </button>
+            </form>
+          )}
+          {authMessage && <p className="auth-message">{authMessage}</p>}
+          <div className="auth-switch">
+            <span>{authMode === "login" ? "还没有客户账号？" : "已有账号？"}</span>
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setAuthMode(authMode === "login" ? "register" : "login");
+                setAuthMessage("");
+              }}
+              type="button"
+            >
+              {authMode === "login" ? "申请开通" : "返回登录"}
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   function renderDefaultWorkspace() {
     return (
       <>
@@ -5357,6 +5875,227 @@ function App() {
     );
   }
 
+  function renderCollectorWorkspace() {
+    const latestRun = collectionRuns[0];
+    const providerLabel = (provider: string) =>
+      provider === "amap"
+        ? "高德地图"
+        : provider === "baidu"
+          ? "百度地图"
+          : provider === "tencent"
+            ? "腾讯位置服务"
+            : provider === "public_web"
+              ? "公开网页"
+              : provider;
+
+    return (
+      <>
+        <section className="metrics">
+          <MetricCard label="采集任务" value={collectionTasks.length} detail="服务端执行" />
+          <MetricCard label="原始线索" value={rawLeadRecords.length} detail="含地图点位" tone="green" />
+          <MetricCard label="最近入库" value={latestRun?.insertedCount ?? 0} detail={latestRun?.status ?? "待运行"} tone="amber" />
+          <MetricCard label="可外呼线索" value={callableLeads.length} detail="有电话记录" tone="rose" />
+        </section>
+
+        <section className="content-grid">
+          <article className="panel">
+            <div className="panel-title">
+              <div>
+                <p>地图点位采集</p>
+                <h2>新建采集任务</h2>
+              </div>
+              <Search size={22} />
+            </div>
+            <form className="form-grid" onSubmit={submitCollectionTask}>
+              <label className="wide">
+                任务名称
+                <input
+                  value={collectionForm.name}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, name: event.target.value })}
+                />
+              </label>
+              <label>
+                数据源
+                <select
+                  value={collectionForm.provider}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, provider: event.target.value })}
+                >
+                  <option value="amap">高德地图</option>
+                  <option value="baidu">百度地图</option>
+                  <option value="tencent">腾讯位置服务</option>
+                  <option value="public_web">公开网页（无需 Key/登录）</option>
+                </select>
+              </label>
+              <label>
+                每组目标数
+                <input
+                  min={1}
+                  max={200}
+                  type="number"
+                  value={collectionForm.targetPerKeyword}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, targetPerKeyword: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                城市
+                <input
+                  placeholder="南昌，杭州"
+                  value={collectionForm.cities}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, cities: event.target.value })}
+                />
+              </label>
+              <label>
+                品类
+                <input
+                  placeholder="餐饮，美业"
+                  value={collectionForm.categories}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, categories: event.target.value })}
+                />
+              </label>
+              <label className="wide">
+                关键词
+                <input
+                  placeholder="团购，到店，附近商家"
+                  value={collectionForm.keywords}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, keywords: event.target.value })}
+                />
+              </label>
+              <button className="primary-button" disabled={isCreatingCollectionTask} type="submit">
+                <CheckCircle2 size={16} />
+                {isCreatingCollectionTask ? "创建中" : "创建采集任务"}
+              </button>
+            </form>
+            <p className="form-result">{collectionMessage}</p>
+          </article>
+
+          <article className="panel">
+            <div className="panel-title">
+              <div>
+                <p>采集任务</p>
+                <h2>运行队列</h2>
+              </div>
+              <ClipboardList size={22} />
+            </div>
+            <div className="task-list">
+              {collectionTasks.length === 0 && <div className="empty-state">暂无采集任务，先从左侧创建。</div>}
+              {collectionTasks.map((task) => (
+                <div className="task-row" key={task.id}>
+                  <span>{providerLabel(task.provider)}</span>
+                  <div>
+                    <strong>{task.name}</strong>
+                    <small>
+                      {task.cities.join("、")} · {task.categories.join("、")} · 每组 {task.targetPerKeyword}
+                    </small>
+                  </div>
+                  <em>{task.status}</em>
+                  <button
+                    className="row-action"
+                    disabled={runningCollectionTaskId === task.id}
+                    onClick={() => runCollectionTask(task.id)}
+                    type="button"
+                  >
+                    {runningCollectionTaskId === task.id ? "运行中" : "运行"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </article>
+        </section>
+
+        <section className="content-grid lower">
+          <article className="panel">
+            <div className="panel-title">
+              <div>
+                <p>采集运行</p>
+                <h2>最近结果</h2>
+              </div>
+              <Activity size={22} />
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>来源</th>
+                    <th>状态</th>
+                    <th>抓取</th>
+                    <th>入库</th>
+                    <th>重复</th>
+                    <th>失败</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {collectionRuns.length === 0 && (
+                    <tr>
+                      <td colSpan={6}>
+                        <span className="empty-state">暂无运行记录。</span>
+                      </td>
+                    </tr>
+                  )}
+                  {collectionRuns.map((run) => (
+                    <tr key={run.id}>
+                      <td>{providerLabel(run.provider)}</td>
+                      <td>{run.status}</td>
+                      <td>{run.fetchedCount}</td>
+                      <td>{run.insertedCount}</td>
+                      <td>{run.duplicateCount}</td>
+                      <td>{run.failedCount}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="panel-title">
+              <div>
+                <p>原始线索</p>
+                <h2>采集入库明细</h2>
+              </div>
+              <Database size={22} />
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>商家</th>
+                    <th>城市</th>
+                    <th>来源</th>
+                    <th>电话</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rawLeadRecords.length === 0 && (
+                    <tr>
+                      <td colSpan={5}>
+                        <span className="empty-state">暂无原始采集记录。</span>
+                      </td>
+                    </tr>
+                  )}
+                  {rawLeadRecords.slice(0, 80).map((record) => (
+                    <tr key={record.id}>
+                      <td>
+                        <strong>{record.name}</strong>
+                        <small>{record.category || "-"}</small>
+                      </td>
+                      <td>{record.city || "-"}</td>
+                      <td>{providerLabel(record.provider)}</td>
+                      <td>{record.phone || "-"}</td>
+                      <td>
+                        <span className="badge">{record.importStatus}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </>
+    );
+  }
+
   function renderOutboundWorkspace() {
     const showOverview = activeOutboundTab === "外呼总览";
     const showTasks = showOverview || activeOutboundTab === "任务列表";
@@ -5364,6 +6103,8 @@ function App() {
     const showRecords = showOverview || activeOutboundTab === "通话记录";
     const showRules = showOverview || activeOutboundTab === "重拨规则";
     const showRealtime = showOverview || activeOutboundTab === "实时监听";
+    const routeStatus = routeHealthSummary(telephonyHealth, telephonyPreflight);
+    const monitorCalls = liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6);
 
     return (
       <>
@@ -5392,13 +6133,28 @@ function App() {
             <article className="panel span-2 line-health-panel">
               <div className="panel-title">
                 <div>
-                  <p>{telephonyConfig.asteriskDeploymentMode === "server" ? "服务器Asterisk / 语音网关" : "客户端Asterisk / 语音网关"}</p>
-                  <h2>真实线路接入</h2>
+                  <p>Route Health</p>
+                  <h2>线路是否通畅</h2>
                 </div>
-                <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
-                  <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
-                  {isCheckingTelephony ? "预检中" : "预检线路"}
-                </button>
+              </div>
+              <div className={`route-status-card is-${routeStatus.status}`}>
+                <div className="route-status-main">
+                  <span className={`line-preflight-badge is-${routeStatus.status}`}>{routeStatus.status.toUpperCase()}</span>
+                  <div>
+                    <strong>{routeStatus.title}</strong>
+                    <small>{routeStatus.detail}</small>
+                  </div>
+                </div>
+                <div className="route-status-grid">
+                  <div>
+                    <span>线路状态</span>
+                    <strong>{telephonyReadinessLabel(telephonyHealth, telephonyPreflight)}</strong>
+                  </div>
+                  <div>
+                    <span>后台处理</span>
+                    <strong>{routeStatus.action}</strong>
+                  </div>
+                </div>
               </div>
               {telephonyConfig.asteriskDeploymentMode === "server" ? (
                 <div className={`asterisk-sidecar-strip is-${telephonyHealth.authenticated ? "pass" : telephonyHealth.amiReachable ? "warn" : "fail"}`}>
@@ -5408,17 +6164,17 @@ function App() {
                     </span>
                     <div>
                       <strong>服务器 Asterisk：{telephonyHealth.authenticated ? "AMI 已登录" : telephonyHealth.amiReachable ? "AMI 可达" : "待连接"}</strong>
-                      <small>交付默认由鼎信 8T 主动注册到云端 Asterisk；客户电脑不再依赖本机 Asterisk runtime。</small>
+                      <small>{telephonyConfig.voiceGatewayProfile.label} 主动注册到云端 Asterisk；客户电脑不再依赖本机 Asterisk runtime。</small>
                     </div>
                   </div>
                   <div className="asterisk-sidecar-meta">
                     <div>
-                      <span>服务器 AMI</span>
-                      <strong>{telephonyConfig.asteriskHost}:{telephonyConfig.asteriskAmiPort}</strong>
+                      <span>后端 AMI</span>
+                      <strong>{serverAmiDisplay(telephonyConfig)}</strong>
                     </div>
                     <div>
-                      <span>网关注册</span>
-                      <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}</strong>
+                      <span>SIP 注册</span>
+                      <strong>{serverSipRegistrationTarget(telephonyConfig)}</strong>
                     </div>
                     <div>
                       <span>交付设备</span>
@@ -5526,15 +6282,15 @@ function App() {
                   <strong>
                     {telephonyConfig.asteriskDeploymentMode === "server"
                       ? telephonyHealth.readyForTestCall
-                        ? "云端线路可单号试拨"
-                        : "等待网关注册到云端 Asterisk"
+                        ? "服务器线路已就绪"
+                        : "线路待现场联通"
                       : isDesktopClient
                       ? asteriskSidecarStatus?.customerDelivery?.title ?? "等待客户端检测语音网关"
                       : "网页预览不能作为客户现场运行方式"}
                   </strong>
                   <small>
                     {telephonyConfig.asteriskDeploymentMode === "server"
-                      ? "客户交付时只需要配置鼎信 8T 的 SIP Server/账号密码，让网关主动注册到服务器；客户端负责配置、监控和发起任务。"
+                      ? "语音网关、Asterisk 和媒体桥由交付人员预置；客户工作台只展示状态、预检和单号试拨验收。"
                       : isDesktopClient
                       ? asteriskSidecarStatus?.customerDelivery?.message ??
                         "桌面客户端会负责发现语音网关、生成 Asterisk 配置并输出后端环境。"
@@ -5543,12 +6299,12 @@ function App() {
                 </div>
                 <div className="customer-delivery-meta">
                   <div>
-                    <span>当前绑定</span>
+                    <span>{telephonyConfig.asteriskDeploymentMode === "server" ? "UC100 注册目标" : "当前绑定"}</span>
                     <strong>
-                      {asteriskSidecarStatus?.customerDelivery?.gatewayAddress ||
-                        (telephonyConfig.asteriskDeploymentMode === "server"
-                          ? `${telephonyConfig.asteriskHost}:${telephonyConfig.asteriskAmiPort}`
-                          : `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`)}
+                      {telephonyConfig.asteriskDeploymentMode === "server"
+                        ? serverSipRegistrationTarget(telephonyConfig)
+                        : asteriskSidecarStatus?.customerDelivery?.gatewayAddress ||
+                          `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
                     </strong>
                   </div>
                   <div>
@@ -5570,16 +6326,23 @@ function App() {
                     </strong>
                   </div>
                   <div>
-                    <span>上一地址</span>
-                    <strong>{telephonyConfig.asteriskDeploymentMode === "server" ? "不依赖客户网络地址" : asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}</strong>
+                    <span>{telephonyConfig.asteriskDeploymentMode === "server" ? "设备注册状态" : "上一地址"}</span>
+                    <strong>
+                      {telephonyConfig.asteriskDeploymentMode === "server"
+                        ? telephonyHealth.trunkReachable
+                          ? "已注册到云端"
+                          : "未收到注册"
+                        : asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}
+                    </strong>
                   </div>
                 </div>
                 <div className="customer-delivery-actions">
                   {(telephonyConfig.asteriskDeploymentMode === "server"
                     ? [
-                        "在服务器 Asterisk 创建鼎信 8T 注册账号和 PJSIP endpoint。",
-                        "在鼎信 8T 后台填写服务器 SIP 地址、账号和密码。",
-                        "前端预检显示 AMI、Trunk、AudioSocket 通过后再做单号试拨。",
+                        `在 ${telephonyConfig.voiceGatewayProfile.label} 后台把 SIP Server/Registrar 指向 ${serverSipRegistrationTarget(telephonyConfig)}。`,
+                        `SIP 用户名/鉴权账号使用 ${telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}；密码由交付人员在服务器端配置。`,
+                        "单号试拨必须确认蜂窝侧、媒体链路和 AI 首句。",
+                        "批量真实外呼保持关闭，直到单号验证稳定。",
                       ]
                     : isDesktopClient
                     ? asteriskSidecarStatus?.customerDelivery?.actionItems ?? ["刷新客户端线路状态，确认设备绑定和 Asterisk 运行状态。"]
@@ -5631,36 +6394,29 @@ function App() {
               <div className="line-preflight gateway-profile-strip">
                 <div className="line-preflight-header">
                   <div>
-                    <span>网关适配档案</span>
+                    <span>已绑定线路档案</span>
                     <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
                   </div>
-                  <small>{telephonyConfig.voiceGatewayProfile.tested ? "已实测档案" : "待现场验证档案"}</small>
+                  <small>{telephonyHealth.readyForTestCall ? "可单号试拨" : "待线路联通"}</small>
                 </div>
-                <p>
-                  {telephonyConfig.voiceGatewayProfile.vendor} {telephonyConfig.voiceGatewayProfile.model} ·{" "}
-                  {telephonyConfig.voiceGatewayProfile.lineType} · {telephonyConfig.voiceGatewayProfile.discoveryMode}
-                </p>
                 <div className="line-health-grid">
                   <div>
-                    <span>当前地址</span>
-                    <strong>
-                      {telephonyConfig.voiceGatewayProfile.host}:{telephonyConfig.voiceGatewayProfile.sipPort}
-                    </strong>
+                    <span>设备</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.model}</strong>
                   </div>
                   <div>
-                    <span>后台入口</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.adminUrl || "待发现"}</strong>
+                    <span>线路池</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
                   </div>
                   <div>
-                    <span>设备类型</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.category}</strong>
+                    <span>拨号</span>
+                    <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨开启" : "待验收开启"}</strong>
                   </div>
                   <div>
-                    <span>能力</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.capabilities.slice(0, 2).join(" / ") || "待配置"}</strong>
+                    <span>批量外呼</span>
+                    <strong>{telephonyConfig.asteriskBulkCallEnabled ? "已开启" : "关闭"}</strong>
                   </div>
                 </div>
-                {telephonyConfig.voiceGatewayProfile.notes[0] && <small>{telephonyConfig.voiceGatewayProfile.notes[0]}</small>}
               </div>
               <div className="line-preflight">
                 <div className="line-preflight-header">
@@ -5682,57 +6438,6 @@ function App() {
                       </div>
                     </div>
                   ))}
-                </div>
-              </div>
-              <div className="line-test-row">
-                <form className="line-test-form" onSubmit={submitTelephonyTestCall}>
-                  <label>
-                    测试号码
-                    <input
-                      placeholder="输入自己的手机号"
-                      value={telephonyTestForm.phone}
-                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, phone: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    主叫显示
-                    <input
-                      placeholder="默认 AI获客"
-                      value={telephonyTestForm.callerId}
-                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, callerId: event.target.value })}
-                    />
-                  </label>
-                  <button className="primary-button" disabled={isTestingTelephony || !telephonyTestForm.phone.trim()} type="submit">
-                    <PhoneCall size={16} />
-                    {isTestingTelephony ? "提交中" : "单号试拨"}
-                  </button>
-                </form>
-                <div className="line-test-result">
-                  <strong>{telephonyMessage}</strong>
-                  <span>{telephonyHealth.errors[0] ?? telephonyHealth.trunkStatus}</span>
-                  {telephonyTestResult && (
-                    <small>
-                      {telephonyTestResult.gatewayStatus} · {telephonyTestResult.actionId} · {telephonyTestResult.channel}
-                    </small>
-                  )}
-	                  {telephonyTestResult && (
-	                    <small>
-	                      验收层级：{telephonyVerificationStageText(telephonyTestResult)} · 蜂窝侧
-	                      {telephonyTestResult.cellularConfirmed ? "已确认" : "未确认"} · 媒体链路
-	                      {telephonyTestResult.mediaLoopConfirmed ? "已确认" : "未确认"}
-	                    </small>
-	                  )}
-	                  {telephonyTestResult && (
-	                    <small>
-	                      真人语音{telephonyTestResult.humanSpeechConfirmed ? "已确认" : "未确认"} · AI首句
-	                      {telephonyTestResult.aiSpeechConfirmed ? "已播出" : "未确认"} · 电话助理
-	                      {telephonyTestResult.callScreeningDetected ? "已检测" : "未检测"}
-	                    </small>
-	                  )}
-                  {telephonyTestResult && <small>{telephonyVerificationSummary(telephonyTestResult)}</small>}
-                  {telephonyTestResult && telephonyTestPayloadSummary(telephonyTestResult) && (
-                    <small>{telephonyTestPayloadSummary(telephonyTestResult)}</small>
-                  )}
                 </div>
               </div>
               {telephonyTestResult?.cellularDiagnostic && (
@@ -5778,78 +6483,62 @@ function App() {
               )}
             </article>
 
-            {renderRealtimePipelinePanel()}
-
-            <article className="panel span-2">
+            <article className="panel span-2 realtime-monitor-panel">
               <div className="panel-title">
                 <div>
-                  <p>Table</p>
-                  <h2>实时通话</h2>
+                  <p>Live Monitor</p>
+                  <h2>实时监听聊天</h2>
                 </div>
                 <button className="secondary-button" onClick={loadData} type="button">
                   <RefreshCw size={16} className={isLoading ? "spin" : ""} />
                   刷新
                 </button>
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>商家</th>
-                      <th>AI</th>
-                      <th>通话时长</th>
-                      <th>实时意向</th>
-                      <th>当前节点</th>
-                      <th>动作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {liveCalls.length === 0 && (
-                      <tr>
-                        <td colSpan={6}>
-                          <span className="empty-state">暂无实时通话，创建外呼任务后点击启动。</span>
-                        </td>
-                      </tr>
-                    )}
-                    {liveCalls.map((record) => (
-                      <tr key={record.id}>
-                        <td>
-                          <strong>{record.merchantName}</strong>
-                          <small>{record.phone ?? "无电话"}</small>
-                        </td>
-                        <td>{record.aiSeat}</td>
-                        <td>{formatDuration(record.durationSeconds)}</td>
-                        <td>
-                          <span className={`intent-pill intent-${record.intentLevel.toLowerCase()}`}>{record.intentLevel}</span>
-                        </td>
-                        <td>{record.currentNode}</td>
-                        <td>{record.needHandoff ? "接管" : record.recallAt ? "重拨" : "监听"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </article>
-
-            <article className="panel ops-card">
-              <div className="panel-title">
-                <div>
-                  <p>Ops Notes</p>
-                  <h2>流程和提示</h2>
+              <div className="realtime-monitor-layout">
+                <div className="monitor-call-list" aria-label="实时通话客户">
+                  {monitorCalls.length === 0 && <span className="empty-state">暂无实时通话，创建外呼任务后点击启动。</span>}
+                  {monitorCalls.map((record) => (
+                    <button
+                      className={record.id === selectedLiveCall?.id ? "is-active" : ""}
+                      key={record.id}
+                      onClick={() => setSelectedLiveCallId(record.id)}
+                      type="button"
+                    >
+                      <span>{record.needHandoff ? "接管" : record.recallAt ? "重拨" : "监听"}</span>
+                      <strong>{record.merchantName}</strong>
+                      <small>
+                        {record.phone ?? "无电话"} · {formatDuration(record.durationSeconds)} · {record.currentNode}
+                      </small>
+                    </button>
+                  ))}
                 </div>
-                <Zap size={22} />
-              </div>
-              <ol className="ops-steps">
-                <li>筛选对象</li>
-                <li>确认配置</li>
-                <li>执行动作</li>
-                <li>记录结果</li>
-                <li>进入下一步</li>
-              </ol>
-              <div className="notice-list">
-                <span>实时回复客户依赖低延迟模型和线路。</span>
-                <span>客户追问时要能人工无缝接管。</span>
-                <span>未接和忙线客户进入重拨规则。</span>
+                <div className="monitor-chat-panel">
+                  <div className="monitor-chat-header">
+                    <div>
+                      <span>{selectedLiveCall?.aiSeat ?? "AI坐席"}</span>
+                      <strong>{selectedLiveCall?.merchantName ?? "选择客户查看监听"}</strong>
+                      <small>{selectedLiveCall?.outcome ?? "等待通话"}</small>
+                    </div>
+                    {selectedLiveCall && (
+                      <span className={`intent-pill intent-${selectedLiveCall.intentLevel.toLowerCase()}`}>
+                        {selectedLiveCall.intentLevel}
+                      </span>
+                    )}
+                  </div>
+                  <div className="monitor-chat-stream">
+                    {selectedLiveCallMessages.map((message, index) => (
+                      <div className={`monitor-message is-${message.speaker}`} key={`${message.label}-${index}`}>
+                        <span>{message.label}</span>
+                        <p>{message.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="monitor-ai-next">
+                    <span>当前话术</span>
+                    <strong>{activeScript?.name ?? "未选择话术"}</strong>
+                    <p>{activeScript?.objection || activeScript?.qualification || "保存话术后会在这里显示实时应答依据。"}</p>
+                  </div>
+                </div>
               </div>
             </article>
           </section>
@@ -5874,7 +6563,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  并发坐席
+                  并发数量
                   <input
                     min={1}
                     max={50}
@@ -5884,14 +6573,14 @@ function App() {
                   />
                 </label>
                 <label>
-                  预约时间
+                  日期
                   <input
                     type="datetime-local"
                     value={outboundForm.scheduledAt}
                     onChange={(event) => setOutboundForm({ ...outboundForm, scheduledAt: event.target.value })}
                   />
                 </label>
-                <button className="primary-button" type="submit">
+                <button className="primary-button" disabled={selectedCallableLeadIds.length === 0} type="submit">
                   <Plus size={16} />
                   创建外呼任务
                 </button>
@@ -5899,11 +6588,18 @@ function App() {
 
               <div className="lead-picker">
                 <div className="section-caption">
-                  <strong>筛选外呼对象</strong>
-                  <small>{selectedLeadIds.length} 个已选</small>
+                  <div>
+                    <strong>选择外呼线索</strong>
+                    <small>{selectedCallableLeadIds.length}/{callableLeads.length} 个已选</small>
+                  </div>
+                  <button className="secondary-button" onClick={toggleAllCallableLeads} type="button">
+                    <CheckCircle2 size={16} />
+                    {allCallableSelected ? "清空" : "全选"}
+                  </button>
                 </div>
                 <LeadTable leads={callableLeads} selectable selectedLeadIds={selectedLeadIds} onToggleLead={toggleLead} />
               </div>
+              <p className="form-result">{outboundTaskMessage}</p>
             </article>
 
             <article className="panel">
@@ -5929,29 +6625,69 @@ function App() {
                 </div>
                 <Bot size={22} />
               </div>
-              <div className="script-card compact">
+              <div className="script-editor">
                 <div className="section-caption">
-                  <strong>{activeScript?.name ?? "暂无话术"}</strong>
-                  <small>{activeScript?.isActive ? "启用中" : "未启用"}</small>
+                  <div>
+                    <strong>{scriptDraft.name || "未命名话术"}</strong>
+                    <small>{scriptDraft.isActive ? "启用中" : "未启用"}</small>
+                  </div>
+                  <div className="button-row">
+                    <button className="secondary-button" disabled={isGeneratingScript} onClick={generateScriptDraft} type="button">
+                      <Sparkles size={16} />
+                      {isGeneratingScript ? "生成中" : "AI生成"}
+                    </button>
+                    <button className="primary-button" disabled={isSavingScript} onClick={() => void saveScriptDraft()} type="button">
+                      <CheckCircle2 size={16} />
+                      {isSavingScript ? "保存中" : "保存话术"}
+                    </button>
+                  </div>
                 </div>
-                <div className="flow-node-grid">
-                  <article>
-                    <span>开场白</span>
-                    <p>{activeScript?.opening}</p>
-                  </article>
-                  <article>
-                    <span>需求确认</span>
-                    <p>{activeScript?.qualification}</p>
-                  </article>
-                  <article>
-                    <span>异议处理</span>
-                    <p>{activeScript?.objection}</p>
-                  </article>
-                  <article>
-                    <span>收口动作</span>
-                    <p>{activeScript?.closing}</p>
-                  </article>
+                <div className="script-editor-grid">
+                  <label>
+                    话术名称
+                    <input
+                      value={scriptDraft.name}
+                      onChange={(event) => setScriptDraft({ ...scriptDraft, name: event.target.value })}
+                    />
+                  </label>
+                  <label className="script-active-toggle">
+                    <input
+                      checked={scriptDraft.isActive}
+                      onChange={(event) => setScriptDraft({ ...scriptDraft, isActive: event.target.checked })}
+                      type="checkbox"
+                    />
+                    启用这套话术
+                  </label>
+                  <label>
+                    开场白
+                    <textarea
+                      value={scriptDraft.opening}
+                      onChange={(event) => setScriptDraft({ ...scriptDraft, opening: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    需求确认
+                    <textarea
+                      value={scriptDraft.qualification}
+                      onChange={(event) => setScriptDraft({ ...scriptDraft, qualification: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    异议处理
+                    <textarea
+                      value={scriptDraft.objection}
+                      onChange={(event) => setScriptDraft({ ...scriptDraft, objection: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    收口动作
+                    <textarea
+                      value={scriptDraft.closing}
+                      onChange={(event) => setScriptDraft({ ...scriptDraft, closing: event.target.value })}
+                    />
+                  </label>
                 </div>
+                <p className="form-result">{scriptMessage}</p>
               </div>
             </article>
           </section>
@@ -5965,26 +6701,70 @@ function App() {
                   <p>Recall Rules</p>
                   <h2>重拨规则</h2>
                 </div>
-                <Clock3 size={22} />
+                <button className="primary-button" disabled={isSavingRule} onClick={() => void saveRecallRuleDraft()} type="button">
+                  <CheckCircle2 size={16} />
+                  {isSavingRule ? "保存中" : "保存规则"}
+                </button>
               </div>
-              <div className="rule-detail-grid">
-                <div>
-                  <strong>未接重拨</strong>
-                  <span>{activeRule?.noAnswerIntervalMinutes ?? 0} 分钟后再次拨打</span>
-                </div>
-                <div>
-                  <strong>忙线重拨</strong>
-                  <span>{activeRule?.busyIntervalMinutes ?? 0} 分钟后再次拨打</span>
-                </div>
-                <div>
-                  <strong>次数上限</strong>
-                  <span>最多 {activeRule?.maxAttempts ?? 0} 次</span>
-                </div>
-                <div>
-                  <strong>静默时段</strong>
-                  <span>{activeRule?.quietStart} - {activeRule?.quietEnd}</span>
-                </div>
+              <div className="rule-editor-grid">
+                <label className="wide">
+                  规则名称
+                  <input value={ruleDraft.name} onChange={(event) => setRuleDraft({ ...ruleDraft, name: event.target.value })} />
+                </label>
+                <label>
+                  未接后重拨
+                  <input
+                    min={1}
+                    type="number"
+                    value={ruleDraft.noAnswerIntervalMinutes}
+                    onChange={(event) => setRuleDraft({ ...ruleDraft, noAnswerIntervalMinutes: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  忙线后重拨
+                  <input
+                    min={1}
+                    type="number"
+                    value={ruleDraft.busyIntervalMinutes}
+                    onChange={(event) => setRuleDraft({ ...ruleDraft, busyIntervalMinutes: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  最大次数
+                  <input
+                    min={1}
+                    max={20}
+                    type="number"
+                    value={ruleDraft.maxAttempts}
+                    onChange={(event) => setRuleDraft({ ...ruleDraft, maxAttempts: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  静默开始
+                  <input
+                    type="time"
+                    value={ruleDraft.quietStart}
+                    onChange={(event) => setRuleDraft({ ...ruleDraft, quietStart: event.target.value })}
+                  />
+                </label>
+                <label>
+                  静默结束
+                  <input
+                    type="time"
+                    value={ruleDraft.quietEnd}
+                    onChange={(event) => setRuleDraft({ ...ruleDraft, quietEnd: event.target.value })}
+                  />
+                </label>
+                <label className="script-active-toggle">
+                  <input
+                    checked={ruleDraft.enabled}
+                    onChange={(event) => setRuleDraft({ ...ruleDraft, enabled: event.target.checked })}
+                    type="checkbox"
+                  />
+                  启用重拨
+                </label>
               </div>
+              <p className="form-result">{ruleMessage}</p>
             </article>
           </section>
         )}
@@ -7311,6 +8091,8 @@ function App() {
         ? "新增档案"
         : activeModule === "dm"
           ? "新建私信"
+          : activeModule === "collector"
+            ? "新建采集"
           : activeModule === "reports"
             ? "导出数据"
             : activeModule === "settings"
@@ -7320,6 +8102,10 @@ function App() {
   function runPrimaryAction() {
     if (activeModule === "dm") {
       setActiveDmTab("任务列表");
+      return;
+    }
+    if (activeModule === "collector") {
+      setCollectionMessage("在左侧填写城市、品类和关键词后创建采集任务。");
       return;
     }
     if (activeModule === "intent") {
@@ -7341,6 +8127,10 @@ function App() {
     }
     setActiveModule("outbound");
     setActiveOutboundTab("任务列表");
+  }
+
+  if (!auth?.accessToken) {
+    return renderAuthGate();
   }
 
   return (
@@ -7380,7 +8170,7 @@ function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p>当前租户：南昌本地生活招商 · {apiStatus}</p>
+            <p>当前商户：{currentUser?.displayName ?? auth.user.displayName} · {apiStatus}</p>
             <h1>{active?.name ?? "实时工作台"}</h1>
           </div>
           <div className="topbar-actions">
@@ -7390,6 +8180,9 @@ function App() {
             </label>
             <button className="secondary-button icon-only" onClick={loadData} type="button" title="刷新数据">
               <RefreshCw size={18} className={isLoading ? "spin" : ""} />
+            </button>
+            <button className="secondary-button" onClick={logout} type="button">
+              退出
             </button>
             <button
               className="primary-button"
@@ -7404,6 +8197,8 @@ function App() {
 
         {activeModule === "outbound" ? (
           renderOutboundWorkspace()
+        ) : activeModule === "collector" ? (
+          renderCollectorWorkspace()
         ) : activeModule === "dm" ? (
           renderDmWorkspace()
         ) : activeModule === "intent" ? (

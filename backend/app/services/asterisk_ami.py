@@ -538,6 +538,10 @@ def check_asterisk_health() -> AsteriskHealth:
                     response = client.command(command)
                     output = response.field_text("Output") or response.message
                     trunk_reachable, trunk_status = _trunk_status_from_output(output)
+                    if command.startswith("pjsip ") and trunk_status == "trunk 未注册或不可达":
+                        health["trunk_reachable"] = trunk_reachable
+                        health["trunk_status"] = trunk_status
+                        break
                     if trunk_reachable is not False:
                         health["trunk_reachable"] = trunk_reachable
                         health["trunk_status"] = trunk_status

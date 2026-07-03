@@ -103,6 +103,23 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "admin123456"
     admin_secret_key: str = "change-me"
+    auth_secret_key: str = "change-me-auth"
+    access_token_expire_seconds: int = 60 * 60 * 24 * 7
+    initial_client_username: str = ""
+    initial_client_password: str = ""
+    initial_client_display_name: str = "客户账号"
+    initial_client_phone: str = ""
+    initial_client_email: str = ""
+    amap_web_key: str | None = None
+    baidu_map_key: str | None = None
+    tencent_map_key: str | None = None
+    collection_request_timeout_seconds: int = 8
+    collection_http_user_agent: str = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    )
+    browser_profile_root: str = ".runtime/browser-profiles"
+    browser_default_timeout_seconds: int = 40
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
