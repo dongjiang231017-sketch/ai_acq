@@ -1353,9 +1353,9 @@ function formatSettingOption(setting: SystemSetting, option: string) {
 function telephonyReadinessLabel(health: TelephonyHealth, preflight?: TelephonyPreflight) {
   if (preflight?.readyForBulkTasks) return "可批量外呼";
   if (preflight?.readyForSingleNumberTest) return "可单号试拨";
-  if (preflight?.readyForDeviceTest) return "设备可联调";
+  if (preflight?.readyForDeviceTest) return "待单号验收";
   if (health.readyForTestCall && health.liveCallEnabled) return "可单号试拨";
-  if (health.readyForTestCall) return "线路已就绪";
+  if (health.readyForTestCall) return "待单号验收";
   if (health.trunkReachable === false) return "语音网关未注册";
   if (health.amiReachable && health.authenticated) return "AMI 已连接";
   return "待配置";
@@ -1399,16 +1399,16 @@ function routeHealthSummary(health: TelephonyHealth, preflight: TelephonyPreflig
   const isPartial = Boolean(health.amiReachable || health.authenticated || preflight.readyForDeviceTest);
   const status = isReady || isLinked ? "pass" : isPartial ? "warn" : "fail";
   const trunkMissing = health.trunkReachable === false;
-  const title = status === "pass" ? "线路通畅" : trunkMissing ? "语音网关未注册" : status === "warn" ? "线路待联通" : "线路不可用";
+  const title = status === "pass" ? "云端中继已注册" : trunkMissing ? "语音网关未注册" : status === "warn" ? "线路待联通" : "线路不可用";
   const detail =
     status === "pass"
-      ? "后台线路检测通过，可以按配置执行外呼任务。"
+      ? "Asterisk/语音网关 trunk 已注册；真实可用还必须通过单号试拨确认 SIM/运营商通道、手机接听和媒体链路。"
       : trunkMissing
         ? "服务器 Asterisk/AMI 正常，但公网 SIP 注册还没有到达服务器。"
       : status === "warn"
         ? "后台正在接入线路，完成后会自动更新状态。"
         : "后台线路未接入，请等待管理员处理。";
-  const action = status === "pass" ? "可以创建任务" : trunkMissing ? "等待设备注册" : status === "warn" ? "后台验收中" : "等待后台接入";
+  const action = status === "pass" ? "做单号验收" : trunkMissing ? "等待设备注册" : status === "warn" ? "后台验收中" : "等待后台接入";
   return { status, title, detail, action };
 }
 
@@ -6382,7 +6382,7 @@ function App() {
                   <strong>
                     {telephonyConfig.asteriskDeploymentMode === "server"
                       ? telephonyHealth.readyForTestCall
-                        ? "服务器线路已就绪"
+                        ? "云端中继已注册"
                         : "线路待现场联通"
                       : isDesktopClient
                       ? asteriskSidecarStatus?.customerDelivery?.title ?? "等待客户端检测语音网关"
@@ -6390,7 +6390,7 @@ function App() {
                   </strong>
                   <small>
                     {telephonyConfig.asteriskDeploymentMode === "server"
-                      ? "语音网关、Asterisk 和媒体桥由交付人员预置；客户工作台只展示状态、预检和单号试拨验收。"
+                      ? "语音网关、Asterisk 和媒体桥由交付人员预置；客户工作台只展示云端注册状态、预检和单号真实验收。"
                       : isDesktopClient
                       ? asteriskSidecarStatus?.customerDelivery?.message ??
                         "桌面客户端会负责发现语音网关、生成 Asterisk 配置并输出后端环境。"

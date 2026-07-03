@@ -593,7 +593,7 @@ def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
             "CHANUNAVAIL": "failed",
         }.get(dial_status.upper(), "ended")
     elif event_name in {"Hangup", "HangupRequest"}:
-        status = {"1": "failed", "3": "failed", "16": "hangup", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "hangup")
+        status = {"1": "failed", "3": "failed", "16": "cancelled", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "cancelled")
     elif event_name == "OriginateResponse":
         if response.lower() == "success":
             status = "dialing"
