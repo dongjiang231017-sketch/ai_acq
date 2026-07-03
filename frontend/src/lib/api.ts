@@ -1,4 +1,5 @@
-const DEFAULT_API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:8001/api`;
+const API_HOST = window.location.hostname === "localhost" ? "127.0.0.1" : window.location.hostname;
+const DEFAULT_API_BASE_URL = `${window.location.protocol}//${API_HOST}:8001/api`;
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL;
 
 function readApiError(data: unknown, status: number): string {

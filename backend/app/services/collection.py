@@ -68,7 +68,7 @@ PLATFORM_PROVIDER_METADATA = {
     "meituan": {
         "label": "美团团购",
         "search_terms": ("美团", "团购"),
-        "allowed_hosts": ("meituan.com",),
+        "allowed_hosts": ("dianping.com", "meituan.com"),
     },
     "shangou": {
         "label": "美团闪购",
@@ -78,7 +78,7 @@ PLATFORM_PROVIDER_METADATA = {
     "douyin": {
         "label": "抖音生活服务",
         "search_terms": ("抖音", "团购"),
-        "allowed_hosts": ("douyin.com",),
+        "allowed_hosts": ("douyin.com", "life.douyin.com"),
     },
 }
 BROWSER_PLATFORM_PROVIDERS = browser_managed_providers()
@@ -368,28 +368,39 @@ def _build_platform_search_queries(provider: str, city: str, category: str, keyw
         queries.append(" ".join(_clean_items([city, keyword, *meta["search_terms"]])))
     if category:
         queries.append(" ".join(_clean_items([city, category, *meta["search_terms"]])))
+    for host in meta["allowed_hosts"]:
+        queries.append(" ".join(_clean_items([city, category, keyword, *meta["search_terms"], f"site:{host}"])))
     return [query for query in queries if query]
 
 
 def _discover_platform_urls(provider: str, query: str, limit: int, search_base_url: str) -> list[str]:
     allowed_hosts = tuple(PLATFORM_PROVIDER_METADATA[provider]["allowed_hosts"])
-    search_url = f"{search_base_url}?{urlencode({'query': query})}"
-    html = _request_text(search_url)
-    pattern = re.compile(r"https?://[^\"'\s<>]+")
     urls: list[str] = []
-    for match in pattern.finditer(html):
-        candidate = unescape(match.group(0))
-        host = urlsplit(candidate).netloc.lower()
-        if not any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+    search_urls = [
+        f"https://cn.bing.com/search?{urlencode({'q': query})}",
+        f"https://www.bing.com/search?{urlencode({'q': query})}",
+    ]
+    if search_base_url and "bing.com" not in search_base_url:
+        search_param = "q" if "bing." in search_base_url else "query"
+        search_urls.append(f"{search_base_url}?{urlencode({search_param: query})}")
+
+    for search_url in search_urls:
+        try:
+            html = _request_text(search_url)
+        except Exception:
             continue
-        if any(token in candidate for token in ("jpg", "jpeg", "png", "gif", "webp", "mtptimg", "pic.sogou.com")):
-            continue
-        if candidate.endswith("..."):
-            continue
-        if candidate not in urls:
-            urls.append(candidate)
-        if len(urls) >= limit:
-            break
+        for candidate in _extract_href_candidates(html, search_url):
+            host = urlsplit(candidate).netloc.lower()
+            if not any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+                continue
+            if any(token in candidate for token in ("jpg", "jpeg", "png", "gif", "webp", "mtptimg", "pic.sogou.com")):
+                continue
+            if candidate.endswith("..."):
+                continue
+            if candidate not in urls:
+                urls.append(candidate)
+            if len(urls) >= limit:
+                return urls
     return urls
 
 
@@ -850,11 +861,14 @@ def _request_platform_pois(
     if provider not in PLATFORM_PROVIDERS:
         raise CollectionError(f"暂不支持的数据源：{provider}")
 
+    browser_error: str | None = None
     if provider in BROWSER_PLATFORM_PROVIDERS:
         try:
-            return collect_browser_platform_pois(db, provider, city, category, keyword, target_count)
+            browser_records = collect_browser_platform_pois(db, provider, city, category, keyword, target_count)
+            if browser_records:
+                return browser_records
         except BrowserSessionError as exc:
-            raise CollectionError(str(exc)) from exc
+            browser_error = str(exc)
 
     search_base_url = _read_provider_service_url(db, provider, "https://www.sogou.com/web")
     urls: list[str] = []
@@ -904,7 +918,11 @@ def _request_platform_pois(
         }
         records.append(_supplement_platform_poi_with_map(db, record, city, category))
 
-    return records[:target_count]
+    if records:
+        return records[:target_count]
+    if browser_error:
+        raise CollectionError(browser_error)
+    return []
 
 
 def _request_public_web_pois(

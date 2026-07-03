@@ -5,7 +5,7 @@ import sys
 from app.core.config import settings
 from app.services.platform_browser import (
     BROWSER_PLATFORM_METADATA,
-    MOBILE_USER_AGENT,
+    _launch_persistent_context,
     _profile_dir,
     mark_platform_login_finished,
     sync_playwright,
@@ -32,16 +32,7 @@ def main() -> int:
 
     try:
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=False,
-                user_agent=MOBILE_USER_AGENT,
-                viewport={"width": 430, "height": 932},
-                is_mobile=True,
-                has_touch=True,
-                locale="zh-CN",
-                timezone_id="Asia/Shanghai",
-            )
+            context = _launch_persistent_context(playwright, provider, profile_dir, headless=False)
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(meta["login_url"], wait_until="domcontentloaded", timeout=settings.browser_default_timeout_seconds * 1000)
             print(f"已打开 {meta['name']} 登录窗口。请手动完成登录，登录后直接关闭浏览器窗口即可。")

@@ -33,6 +33,7 @@ BROWSER_PLATFORM_METADATA: dict[str, dict[str, str]] = {
         "login_url": "https://m.dianping.com/",
         "home_url": "https://m.dianping.com/",
         "engine": "dianping_shop_search",
+        "viewport_mode": "mobile",
         "note": "第一版通过大众点评手机版搜索入口采集团购商家，需先登录点评/美团账号。",
     },
     "shangou": {
@@ -40,13 +41,26 @@ BROWSER_PLATFORM_METADATA: dict[str, dict[str, str]] = {
         "login_url": "https://i.meituan.com/mttouch/page/home",
         "home_url": "https://i.meituan.com/mttouch/page/home",
         "engine": "meituan_flash_sale",
-        "note": "已接入本地浏览器登录态管理，后续在此基础上适配闪购页选择器。",
+        "viewport_mode": "mobile",
+        "note": "第一版通过本机浏览器登录态进入美团闪购页搜索商家，再回填地图电话。",
+    },
+    "douyin": {
+        "name": "抖音生活服务登录态",
+        "login_url": "https://www.douyin.com/",
+        "home_url": "https://www.douyin.com/",
+        "engine": "douyin_life_service",
+        "viewport_mode": "desktop",
+        "note": "第一版通过抖音搜索页采集生活服务/团购商家，再回填地图电话。",
     },
 }
 
 MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 )
 ADDRESS_HINT_RE = re.compile(r"(路|街|道|广场|大厦|商场|中心|公寓|城|巷|里|号|店|楼|室)")
 DISTRICT_HINT_RE = re.compile(r"(区|县|市)")
@@ -121,16 +135,7 @@ def validate_platform_browser_session(db: Session, provider: str) -> PlatformBro
 
     try:
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=True,
-                user_agent=MOBILE_USER_AGENT,
-                viewport={"width": 390, "height": 844},
-                is_mobile=True,
-                has_touch=True,
-                locale="zh-CN",
-                timezone_id="Asia/Shanghai",
-            )
+            context = _launch_persistent_context(playwright, provider, profile_dir, headless=True)
             page = context.new_page()
             page.goto(session.home_url, wait_until="networkidle", timeout=settings.browser_default_timeout_seconds * 1000)
             _ensure_page_authenticated(page, session.provider)
@@ -193,7 +198,9 @@ def collect_browser_platform_pois(
     if provider == "meituan":
         return _collect_meituan_shop_pois(city, category, keyword, target_count)
     if provider == "shangou":
-        raise BrowserSessionError("美团闪购已接入登录态管理，下一步需要在登录后校验页面结构再补抓取规则。")
+        return _collect_shangou_shop_pois(city, category, keyword, target_count)
+    if provider == "douyin":
+        return _collect_douyin_shop_pois(city, category, keyword, target_count)
     raise BrowserSessionError(f"暂不支持的数据源：{provider}")
 
 
@@ -204,22 +211,67 @@ def _collect_meituan_shop_pois(city: str, category: str, keyword: str, target_co
 
     search_url = f"https://m.dianping.com/shoplist/1/search?from=m_search&keyword={quote(query)}"
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            str(_profile_dir("meituan")),
-            headless=True,
-            user_agent=MOBILE_USER_AGENT,
-            viewport={"width": 390, "height": 844},
-            is_mobile=True,
-            has_touch=True,
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-        )
+        context = _launch_persistent_context(playwright, "meituan", _profile_dir("meituan"), headless=True)
         page = context.new_page()
         page.goto(search_url, wait_until="domcontentloaded", timeout=settings.browser_default_timeout_seconds * 1000)
         page.wait_for_timeout(3000)
         _ensure_page_authenticated(page, "meituan")
         _scroll_page(page, rounds=3)
         records = _extract_dianping_shop_cards(page, city, category, keyword, target_count)
+        context.close()
+    return records
+
+
+def _collect_shangou_shop_pois(city: str, category: str, keyword: str, target_count: int) -> list[dict[str, Any]]:
+    query = " ".join(_clean_items([city, category, keyword]))
+    if not query:
+        raise BrowserSessionError("美团闪购采集关键词不能为空")
+
+    with sync_playwright() as playwright:
+        context = _launch_persistent_context(playwright, "shangou", _profile_dir("shangou"), headless=False)
+        page = context.new_page()
+        page.goto(BROWSER_PLATFORM_METADATA["shangou"]["home_url"], wait_until="domcontentloaded", timeout=settings.browser_default_timeout_seconds * 1000)
+        page.wait_for_timeout(3000)
+        _ensure_page_authenticated(page, "shangou")
+        _search_in_page(page, query, "shangou")
+        _scroll_page(page, rounds=4)
+        records = _extract_generic_shop_cards(
+            page,
+            provider="shangou",
+            city=city,
+            category=category,
+            keyword=keyword,
+            target_count=target_count,
+            href_patterns=("/deal/", "/product/", "/shop/", "/merchant/"),
+            host_tokens=("meituan.com",),
+        )
+        context.close()
+    return records
+
+
+def _collect_douyin_shop_pois(city: str, category: str, keyword: str, target_count: int) -> list[dict[str, Any]]:
+    query = " ".join(_clean_items([city, category, keyword]))
+    if not query:
+        raise BrowserSessionError("抖音生活服务采集关键词不能为空")
+
+    search_url = f"https://www.douyin.com/search/{quote(query)}?type=general"
+    with sync_playwright() as playwright:
+        context = _launch_persistent_context(playwright, "douyin", _profile_dir("douyin"), headless=False)
+        page = context.new_page()
+        page.goto(search_url, wait_until="domcontentloaded", timeout=settings.browser_default_timeout_seconds * 1000)
+        page.wait_for_timeout(4000)
+        _ensure_page_authenticated(page, "douyin")
+        _scroll_page(page, rounds=4)
+        records = _extract_generic_shop_cards(
+            page,
+            provider="douyin",
+            city=city,
+            category=category,
+            keyword=keyword,
+            target_count=target_count,
+            href_patterns=("/group/", "/poi/"),
+            host_tokens=("douyin.com",),
+        )
         context.close()
     return records
 
@@ -284,6 +336,43 @@ def _ensure_playwright_available() -> None:
         )
 
 
+def _launch_persistent_context(playwright: Any, provider: str, profile_dir: Path, headless: bool):
+    meta = BROWSER_PLATFORM_METADATA[provider]
+    viewport_mode = meta.get("viewport_mode", "mobile")
+    is_mobile = viewport_mode == "mobile"
+    launch_options: dict[str, Any] = {
+        "headless": headless,
+        "locale": "zh-CN",
+        "timezone_id": "Asia/Shanghai",
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+    if is_mobile:
+        launch_options.update(
+            {
+                "user_agent": MOBILE_USER_AGENT,
+                "viewport": {"width": 430, "height": 932},
+                "is_mobile": True,
+                "has_touch": True,
+            }
+        )
+    else:
+        launch_options.update(
+            {
+                "user_agent": DESKTOP_USER_AGENT,
+                "viewport": {"width": 1440, "height": 960},
+            }
+        )
+
+    context = playwright.chromium.launch_persistent_context(str(profile_dir), **launch_options)
+    context.add_init_script(
+        """
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = window.chrome || { runtime: {} };
+        """
+    )
+    return context
+
+
 def _get_session(db: Session, provider: str) -> PlatformBrowserSession:
     ensure_platform_browser_sessions(db)
     session = db.scalar(select(PlatformBrowserSession).where(PlatformBrowserSession.provider == provider))
@@ -297,15 +386,31 @@ def _ensure_page_authenticated(page: Page, provider: str) -> None:
     url = page.url
     body_text = page.locator("body").inner_text(timeout=5000)[:2000]
 
-    invalid_markers = (
-        "手机号快捷登录",
-        "发送验证码",
-        "身份核实",
-        "用最短线连接验证",
-    )
+    invalid_markers = {
+        "meituan": (
+            "手机号快捷登录",
+            "发送验证码",
+            "身份核实",
+            "用最短线连接验证",
+            "APP扫码，享七天免登录",
+        ),
+        "shangou": (
+            "手机号快捷登录",
+            "发送验证码",
+            "身份核实",
+            "用最短线连接验证",
+            "APP扫码，享七天免登录",
+        ),
+        "douyin": (
+            "验证码中间页",
+            "验证中心",
+            "手机验证码登录",
+            "请完成下列验证后继续",
+        ),
+    }.get(provider, ())
     if any(marker in title or marker in body_text for marker in invalid_markers):
         raise BrowserSessionError(f"{BROWSER_PLATFORM_METADATA[provider]['name']} 已退出登录或触发校验，请重新登录。")
-    if "verify.meituan.com" in url or "/mlogin/" in url:
+    if "verify.meituan.com" in url or "/mlogin/" in url or "captcha" in url.lower():
         raise BrowserSessionError(f"{BROWSER_PLATFORM_METADATA[provider]['name']} 已退出登录或触发校验，请重新登录。")
 
 
@@ -313,6 +418,42 @@ def _scroll_page(page: Page, rounds: int) -> None:
     for _ in range(rounds):
         page.mouse.wheel(0, 2400)
         page.wait_for_timeout(1200)
+
+
+def _search_in_page(page: Page, query: str, provider: str) -> None:
+    input_selectors = [
+        "input[type='search']",
+        "input[placeholder*='搜索']",
+        "input[placeholder*='商品']",
+        "input[placeholder*='商家']",
+        "textarea[placeholder*='搜索']",
+    ]
+    for selector in input_selectors:
+        locator = page.locator(selector)
+        try:
+            if locator.count() == 0:
+                continue
+            target = locator.first
+            target.click(timeout=2000)
+            target.fill(query, timeout=3000)
+            target.press("Enter", timeout=2000)
+            page.wait_for_timeout(3000)
+            return
+        except Exception:
+            continue
+    if provider == "shangou":
+        candidate_urls = [
+            f"https://i.meituan.com/awp/hfe/h5/search/search.html?keyword={quote(query)}",
+            f"https://i.meituan.com/awp/hfe/h5/search/global.html?keyword={quote(query)}",
+        ]
+        for url in candidate_urls:
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=settings.browser_default_timeout_seconds * 1000)
+                page.wait_for_timeout(3000)
+                return
+            except Exception:
+                continue
+    raise BrowserSessionError(f"{BROWSER_PLATFORM_METADATA[provider]['name']} 当前页面未找到可用搜索框，请先手动确认登录后再试。")
 
 
 def _pick_shop_name(lines: list[str]) -> str | None:
@@ -328,6 +469,71 @@ def _pick_shop_name(lines: list[str]) -> str | None:
             continue
         return line
     return None
+
+
+def _extract_generic_shop_cards(
+    page: Page,
+    provider: str,
+    city: str,
+    category: str,
+    keyword: str,
+    target_count: int,
+    href_patterns: tuple[str, ...],
+    host_tokens: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    anchors = page.locator("a[href]")
+    seen_ids: set[str] = set()
+    records: list[dict[str, Any]] = []
+    max_scan = min(anchors.count(), max(target_count * 10, 60))
+    for index in range(max_scan):
+        anchor = anchors.nth(index)
+        href = anchor.get_attribute("href")
+        if not href:
+            continue
+        href = href.strip()
+        normalized_href = href.lower()
+        if not any(token in normalized_href for token in href_patterns):
+            continue
+        if not any(token in normalized_href for token in host_tokens):
+            continue
+        detail_url = href if href.startswith(("http://", "https://")) else urljoin(page.url, href)
+        text = anchor.inner_text(timeout=1000).strip()
+        lines = [_normalize_line(line) for line in text.splitlines() if _normalize_line(line)]
+        name = _pick_shop_name(lines)
+        if not name:
+            continue
+        shop_id = _extract_shop_id(detail_url, detail_url)
+        if shop_id in seen_ids:
+            continue
+        seen_ids.add(shop_id)
+        address = _pick_address(lines, city)
+        district = _pick_district(lines, city)
+        records.append(
+            {
+                "id": shop_id,
+                "name": name,
+                "cityname": city,
+                "adname": district,
+                "pname": None,
+                "address": address,
+                "tel": None,
+                "location": None,
+                "type": category or keyword or provider,
+                "detail_url": detail_url,
+                "_raw_provider": provider,
+                "_raw_payload": {
+                    "provider": provider,
+                    "query_city": city,
+                    "query_category": category,
+                    "query_keyword": keyword,
+                    "source_url": detail_url,
+                    "list_text": lines,
+                },
+            },
+        )
+        if len(records) >= target_count:
+            break
+    return records
 
 
 def _pick_address(lines: list[str], city: str) -> str | None:
