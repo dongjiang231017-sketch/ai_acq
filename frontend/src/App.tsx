@@ -580,6 +580,7 @@ function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone
           : 0;
       const disconnected = sorted.some((event) => event.type === "call_disconnected");
       const error = [...sorted].reverse().find((event) => event.type === "call_error");
+      const softClose = Boolean(error?.detail?.includes("AudioSocket connection closed"));
       const asrCount = sorted.filter((event) => event.type === "asr_final").length;
       const replyCount = sorted.filter((event) => event.type === "llm_reply").length;
       const messages = sorted
@@ -597,8 +598,8 @@ function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone
         durationSeconds,
         intentLevel: asrCount > 0 ? "B" : "待识别",
         currentNode: asrCount > 0 ? "客户已开口" : replyCount > 0 ? "AI首句已播" : "媒体桥接入",
-        outcome: error?.detail || (disconnected ? "电话已结束" : "通话中"),
-        statusLabel: error ? "异常" : disconnected ? "结束" : "监听",
+        outcome: error && !softClose ? error.detail || "通话媒体桥异常" : disconnected || softClose ? "电话已结束" : "通话中",
+        statusLabel: error && !softClose ? "异常" : disconnected || softClose ? "结束" : "监听",
         latestAt: latest || start || "",
         messages,
         record: null,
