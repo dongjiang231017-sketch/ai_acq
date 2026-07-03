@@ -52,18 +52,18 @@ def build_cellular_diagnostic(
     if cellular_confirmed:
         return _diagnostic(
             status="warn",
-            stage="cellular_answered_no_media",
-            title="蜂窝侧接通，媒体桥未完成",
-            summary=f"{voice_gateway_label()} 收到接通证据，但还没有进入实时 AI 媒体链路。",
-            detail="需要检查 Asterisk dialplan 是否进入 AudioSocket、桥接服务是否在线、以及通话是否很快挂断。",
+            stage="gateway_answered_waiting_for_human",
+            title="网关已呼出，等待真人接听验收",
+            summary=f"{voice_gateway_label()} 已接管本次 SIP 外呼；手机侧可能已响铃，但还没有真人语音和实时 AI 媒体证据。",
+            detail="部分语音网关会先应答 Asterisk 再拨蜂窝线路，所以这里不能等同于客户已经接听。需要接听后保持通话 10 秒以上，并确认实时监听出现真人语音和 AI 首句。",
             action_items=[
-                "确认 AudioSocket bridge 监听正常。",
-                "确认 Asterisk dialplan 接通后会执行 AudioSocket。",
-                "重新做单号试拨并在接听后保持通话 10 秒以上。",
+                "重新做单号试拨，并在手机响铃后接听。",
+                "接听后对着手机说一句“你好”，保持通话 10 秒以上。",
+                "观察实时监听是否出现真人语音、AI 首句和媒体桥事件。",
             ],
             technical_detail=compact_chain,
             can_retry=True,
-            customer_action_required=False,
+            customer_action_required=True,
         )
 
     if _has_any(diagnostic_text, ["no_route_destination", "404", "not found"]) or (result and result.verification_stage == "not_connected" and "找不到可用外呼路由" in result.message):

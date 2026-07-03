@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     asterisk_originate_context: str = "from-ai-acq"
     asterisk_originate_extension: str = "s"
     asterisk_originate_channel_template: str = "PJSIP/{phone}@{trunk}"
-    asterisk_originate_timeout_ms: int = 30000
+    asterisk_originate_timeout_ms: int = 90000
     asterisk_test_call_result_wait_seconds: float = 12.0
     asterisk_caller_id: str = "AI获客"
     asterisk_trunk_name: str = "uc100"

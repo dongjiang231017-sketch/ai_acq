@@ -141,11 +141,11 @@ def originate_verification(status: str) -> dict[str, str | bool]:
         }
     if status == "answered":
         return {
-            "verification_stage": "cellular_answered_no_media_proof",
+            "verification_stage": "gateway_answered_no_media_proof",
             "cellular_confirmed": True,
             "media_loop_confirmed": False,
             "acceptance_ready": False,
-            "acceptance_note": "Asterisk 收到接通事件；仍需 AudioSocket、ASR、TTS 和打断事件完成实时通话验收。",
+            "acceptance_note": "Asterisk 收到网关侧应答事件；这可能只是语音网关接管 SIP 呼叫，仍需真人接听、AudioSocket、ASR、TTS 和打断事件完成实时通话验收。",
         }
     if status == "dialing":
         return {

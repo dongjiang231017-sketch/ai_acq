@@ -1488,7 +1488,7 @@ function telephonyVerificationStageText(result: TelephonyTestCallResult) {
   if (result.verificationStage === "realtime_conversation_confirmed") return "真人实时对话已验收";
   if (result.verificationStage === "realtime_media_confirmed") return "线路与实时媒体已验收";
   if (result.verificationStage === "gateway_signaling_only") return "网关侧响应，未证明手机响铃";
-  if (result.verificationStage === "cellular_answered_no_media_proof") return "线路接通，待媒体链路验收";
+  if (result.verificationStage === "gateway_answered_no_media_proof" || result.verificationStage === "cellular_answered_no_media_proof") return "网关已呼出，待真人接听";
   if (result.verificationStage === "originate_submitted") return "已提交拨号，待线路证据";
   return "未达到真实通话验收";
 }
