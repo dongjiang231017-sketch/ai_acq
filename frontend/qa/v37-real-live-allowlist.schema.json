@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-acq.local/schemas/v37-real-live-allowlist.schema.json",
+  "title": "AI ACQ Real Live QA Allowlist",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["purpose", "testWindow", "budget", "confirmations", "recipients"],
+  "properties": {
+    "purpose": {
+      "$ref": "#/$defs/realText"
+    },
+    "testWindow": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["startsAt", "endsAt", "timezone"],
+      "properties": {
+        "startsAt": {
+          "$ref": "#/$defs/realText"
+        },
+        "endsAt": {
+          "$ref": "#/$defs/realText"
+        },
+        "timezone": {
+          "const": "Asia/Shanghai"
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["maxCalls", "maxSends", "intervalMs"],
+      "properties": {
+        "maxCalls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "maxSends": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "intervalMs": {
+          "type": "integer",
+          "minimum": 3000
+        }
+      }
+    },
+    "confirmations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "realDataApproved",
+        "liveCallApproved",
+        "liveSendApproved",
+        "productionWriteApproved"
+      ],
+      "properties": {
+        "realDataApproved": {
+          "const": true
+        },
+        "liveCallApproved": {
+          "const": true
+        },
+        "liveSendApproved": {
+          "const": true
+        },
+        "productionWriteApproved": {
+          "const": true
+        }
+      }
+    },
+    "recipients": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/recipient"
+      },
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "call": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  },
+                  "consent": {
+                    "const": true
+                  }
+                },
+                "required": ["enabled", "consent"]
+              }
+            }
+          }
+        },
+        {
+          "contains": {
+            "properties": {
+              "dm": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  },
+                  "consent": {
+                    "const": true
+                  }
+                },
+                "required": ["enabled", "consent"]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "realText": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "REPLACE_WITH|请替换|example\\.com|<[^>]+>|\\[.+\\]"
+      }
+    },
+    "phone": {
+      "type": "string",
+      "minLength": 7,
+      "maxLength": 32,
+      "not": {
+        "pattern": "REPLACE_WITH|请替换|example\\.com|<[^>]+>|\\[.+\\]"
+      },
+      "pattern": "^(?:\\+?\\d[\\d\\s().-]{5,}\\d)$"
+    },
+    "recipient": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["merchantName", "city", "category", "phone", "call", "dm"],
+      "properties": {
+        "merchantName": {
+          "$ref": "#/$defs/realText"
+        },
+        "city": {
+          "$ref": "#/$defs/realText"
+        },
+        "category": {
+          "$ref": "#/$defs/realText"
+        },
+        "contactName": {
+          "$ref": "#/$defs/realText"
+        },
+        "phone": {
+          "$ref": "#/$defs/phone"
+        },
+        "call": {
+          "$ref": "#/$defs/call"
+        },
+        "dm": {
+          "$ref": "#/$defs/dm"
+        }
+      }
+    },
+    "call": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "consent": {
+          "const": true
+        },
+        "consentEvidenceAlias": {
+          "$ref": "#/$defs/realText"
+        },
+        "expectedOutcome": {
+          "$ref": "#/$defs/realText"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["consent", "consentEvidenceAlias", "expectedOutcome"]
+          }
+        }
+      ]
+    },
+    "dm": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "platform": {
+          "$ref": "#/$defs/realText"
+        },
+        "platformUrl": {
+          "$ref": "#/$defs/realText"
+        },
+        "message": {
+          "$ref": "#/$defs/realText"
+        },
+        "consent": {
+          "const": true
+        },
+        "consentEvidenceAlias": {
+          "$ref": "#/$defs/realText"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["platform", "platformUrl", "message", "consent", "consentEvidenceAlias"]
+          }
+        }
+      ]
+    }
+  }
+}

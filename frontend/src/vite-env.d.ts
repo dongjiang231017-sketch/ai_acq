@@ -120,6 +120,27 @@ type AiAcqDesktopAsteriskStatus = {
   nextStep: string;
 };
 
+type AiAcqDesktopAppInfo = {
+  appName: string;
+  version: string;
+  remoteFrontendUrl: string;
+  manifestUrl: string;
+  onlineFrontendEnabled: boolean;
+};
+
+type AiAcqDesktopUpdateCheck = {
+  currentVersion: string;
+  latestVersion: string;
+  latestRevision: string;
+  updateAvailable: boolean;
+  updateUrl: string;
+  manifestUrl: string;
+  remoteFrontendUrl: string;
+  onlineFrontendEnabled: boolean;
+  appName: string;
+  message: string;
+};
+
 interface Window {
   aiAcqDesktop?: {
     isDesktopClient: boolean;
@@ -150,5 +171,8 @@ interface Window {
     getAsteriskSidecarStatus: () => Promise<AiAcqDesktopAsteriskStatus>;
     startAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;
     stopAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;
+    getAppInfo: () => Promise<AiAcqDesktopAppInfo>;
+    checkForClientUpdate: (payload?: { prompt?: boolean }) => Promise<AiAcqDesktopUpdateCheck>;
+    openClientUpdate: (url: string) => Promise<{ ok: boolean; message?: string }>;
   };
 }

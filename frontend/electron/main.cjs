@@ -1,6 +1,10 @@
-const { app, BrowserWindow, ipcMain, webContents } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, webContents } = require("electron");
 const path = require("path");
+const packageJson = require("../package.json");
 const { createAsteriskSidecar } = require("./asterisk-sidecar.cjs");
+
+const REMOTE_FRONTEND_URL = process.env.AI_ACQ_REMOTE_FRONTEND_URL || "http://101.132.63.159/ai-acq/";
+const UPDATE_MANIFEST_URL = process.env.AI_ACQ_UPDATE_MANIFEST_URL || "http://101.132.63.159/ai-acq-downloads/latest.json";
 
 const PLATFORM_SESSION_DOMAINS = {
   "美团": ["meituan.com"],
@@ -16,6 +20,107 @@ const userDataDir = process.env.AI_ACQ_DESKTOP_USER_DATA_DIR
   : app.getPath("userData");
 app.setPath("userData", userDataDir);
 const asteriskSidecar = createAsteriskSidecar({ userDataDir });
+
+function compareVersions(left, right) {
+  const leftParts = String(left || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = String(right || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function absoluteDownloadUrl(pathname) {
+  if (!pathname) return "";
+  if (/^https?:\/\//i.test(pathname)) return pathname;
+  return new URL(pathname, UPDATE_MANIFEST_URL).toString();
+}
+
+function selectUpdateFile(manifest) {
+  const files = manifest?.files || {};
+  if (process.platform === "darwin") {
+    return process.arch === "arm64"
+      ? files.stableMacArm64Dmg || files.macArm64Dmg || files.stableMacArm64Zip || files.macArm64Zip
+      : files.stableMacX64Dmg || files.macX64Dmg || files.stableMacArm64Dmg || files.macArm64Dmg;
+  }
+  if (process.platform === "win32") return files.stableWindowsX64Setup || files.windowsX64Setup;
+  return files.linuxAppImage || files.stableLinuxAppImage || "";
+}
+
+async function fetchUpdateManifest() {
+  const response = await fetch(`${UPDATE_MANIFEST_URL}?t=${Date.now()}`, {
+    headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+  });
+  if (!response.ok) throw new Error(`更新清单请求失败：HTTP ${response.status}`);
+  return response.json();
+}
+
+async function checkClientUpdate({ prompt = false, owner = null } = {}) {
+  const currentVersion = app.getVersion();
+  const manifest = await fetchUpdateManifest();
+  const updateUrl = absoluteDownloadUrl(selectUpdateFile(manifest));
+  const updateAvailable = compareVersions(manifest.version, currentVersion) > 0;
+  const result = {
+    currentVersion,
+    latestVersion: manifest.version || "",
+    latestRevision: manifest.revision || "",
+    updateAvailable,
+    updateUrl,
+    manifestUrl: UPDATE_MANIFEST_URL,
+    remoteFrontendUrl: REMOTE_FRONTEND_URL,
+    onlineFrontendEnabled: true,
+    appName: packageJson.productName || packageJson.name || app.getName(),
+    message: updateAvailable
+      ? `发现客户端 ${manifest.version}，当前 ${currentVersion}。`
+      : "当前客户端壳已是最新；业务前端会从服务器在线更新。",
+  };
+
+  if (prompt && updateAvailable && updateUrl) {
+    const dialogOptions = {
+      type: "info",
+      title: "发现新版本",
+      message: "发现新版本客户端",
+      detail: `${result.message}\n\n本版本已支持前端在线更新；如需要更新桌面壳，请打开下载地址。`,
+      buttons: ["打开下载", "稍后"],
+      defaultId: 0,
+      cancelId: 1,
+    };
+    const { response } = owner
+      ? await dialog.showMessageBox(owner, dialogOptions)
+      : await dialog.showMessageBox(dialogOptions);
+    if (response === 0) await shell.openExternal(updateUrl);
+  }
+
+  return result;
+}
+
+function localFrontendFile() {
+  return path.join(__dirname, "..", "dist", "index.html");
+}
+
+async function loadCustomerFrontend(window) {
+  const explicitFrontendUrl = String(process.env.AI_ACQ_FRONTEND_URL || "").trim();
+  if (explicitFrontendUrl) {
+    await window.loadURL(explicitFrontendUrl);
+    return { mode: "explicit", url: explicitFrontendUrl };
+  }
+
+  const remoteDisabled = process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "false";
+  if (app.isPackaged && !remoteDisabled) {
+    try {
+      await window.loadURL(REMOTE_FRONTEND_URL);
+      return { mode: "remote", url: REMOTE_FRONTEND_URL };
+    } catch (error) {
+      console.error("[ai-acq] remote frontend load failed, falling back to bundled dist:", error);
+    }
+  }
+
+  const file = localFrontendFile();
+  await window.loadFile(file);
+  return { mode: "bundled", url: file };
+}
 
 function domainsForPlatform(platform) {
   return PLATFORM_SESSION_DOMAINS[platform] ?? [];
@@ -911,6 +1016,28 @@ ipcMain.handle("asterisk-sidecar:start", async () => asteriskSidecar.start());
 
 ipcMain.handle("asterisk-sidecar:stop", async () => asteriskSidecar.stop());
 
+ipcMain.handle("app-info:get", async () => ({
+  appName: packageJson.productName || packageJson.name || app.getName(),
+  version: app.getVersion(),
+  remoteFrontendUrl: REMOTE_FRONTEND_URL,
+  manifestUrl: UPDATE_MANIFEST_URL,
+  onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND !== "false",
+}));
+
+ipcMain.handle("app-update:check", async (event, payload = {}) =>
+  checkClientUpdate({
+    prompt: Boolean(payload?.prompt),
+    owner: BrowserWindow.fromWebContents(event.sender),
+  }),
+);
+
+ipcMain.handle("app-update:open", async (_event, url) => {
+  const targetUrl = String(url || "").trim();
+  if (!targetUrl) return { ok: false, message: "缺少下载地址" };
+  await shell.openExternal(targetUrl);
+  return { ok: true };
+});
+
 function createWindow() {
   const window = new BrowserWindow({
     width: 1440,
@@ -928,16 +1055,20 @@ function createWindow() {
     },
   });
 
-  const frontendUrl = process.env.AI_ACQ_FRONTEND_URL;
-  if (frontendUrl) {
-    window.loadURL(frontendUrl);
-  } else {
-    window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
-  }
+  void loadCustomerFrontend(window);
 }
 
 app.whenReady().then(() => {
   createWindow();
+
+  if (app.isPackaged && process.env.AI_ACQ_DISABLE_UPDATE_PROMPT !== "true") {
+    setTimeout(() => {
+      const owner = BrowserWindow.getAllWindows()[0] || null;
+      void checkClientUpdate({ prompt: true, owner }).catch((error) => {
+        console.warn("[ai-acq] update check failed:", error);
+      });
+    }, 5000);
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

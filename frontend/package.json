@@ -1,7 +1,7 @@
 {
   "name": "ai-acq-qian-frontend",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -88,7 +88,12 @@
     "qa:v35:plan": "node scripts/live-blocker-director-v35-qa.mjs --plan-only",
     "qa:v35:live": "node scripts/live-blocker-director-v35-qa.mjs --require-live",
     "qa:v35:live-batch": "node scripts/live-blocker-director-v35-qa.mjs --require-live --live-batch",
-    "quality:v35": "npm run build && npm run qa:v35:plan -- --json"
+    "quality:v35": "npm run build && npm run qa:v35:plan -- --json",
+    "qa:v36": "node scripts/live-allowlist-v36-qa.mjs",
+    "qa:v36:validate": "node scripts/live-allowlist-v36-qa.mjs --allowlist qa/v36-real-live-allowlist.template.json",
+    "qa:v36:strict": "node scripts/live-allowlist-v36-qa.mjs --strict",
+    "qa:v36:template": "node scripts/live-allowlist-v36-qa.mjs",
+    "quality:v36": "npm run build && npm run qa:v36:validate -- --json"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
