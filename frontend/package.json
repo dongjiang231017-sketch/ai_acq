@@ -100,7 +100,16 @@
     "quality:v37": "npm run build && npm run qa:v37:validate -- --json",
     "qa:v38": "node scripts/live-readiness-bundle-v38-qa.mjs",
     "qa:v38:strict": "node scripts/live-readiness-bundle-v38-qa.mjs --strict",
-    "quality:v38": "npm run build && npm run qa:v38 -- --json --timeout-ms 30000"
+    "quality:v38": "npm run build && npm run qa:v38 -- --json --timeout-ms 30000",
+    "qa:v39": "node scripts/live-readiness-trace-v39-qa.mjs",
+    "qa:v39:strict": "node scripts/live-readiness-trace-v39-qa.mjs --strict",
+    "quality:v39": "npm run build && npm run qa:v39 -- --json --skip-ui --timeout-ms 30000",
+    "qa:v40": "node scripts/live-readiness-local-v40-qa.mjs",
+    "qa:v40:strict": "node scripts/live-readiness-local-v40-qa.mjs --strict",
+    "quality:v40": "npm run build && npm run qa:v40 -- --json --timeout-ms 30000",
+    "qa:v41": "node scripts/auth-readiness-v41-qa.mjs",
+    "qa:v41:strict": "node scripts/auth-readiness-v41-qa.mjs --strict",
+    "quality:v41": "npm run build && npm run qa:v41 -- --json --timeout-ms 180000"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

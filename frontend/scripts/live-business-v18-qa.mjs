@@ -411,6 +411,10 @@ async function screenshot(page, report, artifactDir, name) {
   report.artifacts.screenshots.push(file);
 }
 
+async function waitForFirstText(page, text, timeout = 15000) {
+  await page.getByText(text, { exact: false }).first().waitFor({ state: "visible", timeout });
+}
+
 function realDataRequirements(options) {
   return [
     { key: "username", label: "真实客户账号或本地可生成账号", ok: Boolean(options.username.trim()) || options.autoLocalAccount },
@@ -1042,7 +1046,7 @@ async function createRealOutboundTaskThroughUi(page, report, options) {
       }
     }
     await outboundPanel.getByRole("button", { name: /创建外呼任务/ }).click();
-    await page.getByText(taskName, { exact: false }).waitFor({ state: "visible", timeout: 12000 });
+    await waitForFirstText(page, taskName, 12000);
     uiSubmitted = true;
     addCheck(report, "真人路径: 真实外呼任务 UI 创建", "pass", taskName);
   } catch (error) {
@@ -1075,7 +1079,7 @@ async function createRealOutboundTaskThroughUi(page, report, options) {
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.getByRole("button", { name: /AI外呼系统/ }).click();
         await page.locator("section.outbound-tabs").getByRole("button", { name: /^任务列表$/ }).click();
-        await page.getByText(taskName, { exact: false }).waitFor({ state: "visible", timeout: 20000 });
+        await waitForFirstText(page, taskName, 20000);
         addCheck(report, "真实数据对账: 外呼任务前端可见", "pass", taskName);
       } else {
         addCheck(report, "真实数据对账: 外呼任务 API 兜底", "fail", `HTTP ${createdByApi.status}: ${JSON.stringify(createdByApi.body).slice(0, 300)}`);

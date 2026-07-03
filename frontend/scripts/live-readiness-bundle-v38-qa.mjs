@@ -119,38 +119,57 @@ function statusWeight(status) {
   return 0;
 }
 
+function normalizeFirstBlocker(firstBlocker) {
+  if (!firstBlocker) return "";
+  if (typeof firstBlocker === "string") return firstBlocker;
+  if (typeof firstBlocker === "object") return firstBlocker.layer || firstBlocker.name || firstBlocker.status || "";
+  return String(firstBlocker);
+}
+
+function reportDecision(report) {
+  const summary = report?.summary || report?.director || {};
+  return {
+    status: summary.status || "",
+    score: summary.score ?? summary.readinessScore ?? 0,
+    schemaReady: summary.schemaReady,
+    strictReady: summary.strictReady,
+    firstBlocker: normalizeFirstBlocker(summary.firstBlocker),
+    nextCommand: summary.nextCommand || summary.rerunCommand || summary.recipe?.rerunCommand || summary.nextV36Command || "",
+  };
+}
+
 function collectLayerStatus(name, run, readyKey) {
-  const summary = run?.report?.summary || {};
-  const status = summary.status || (run?.exitCode === 0 ? "pass" : "fail");
-  let ready = readyKey ? Boolean(summary[readyKey]) : status !== "fail";
-  if (readyKey === "directorReady") ready = Boolean(summary.firstBlocker || summary.status);
+  const decision = reportDecision(run?.report);
+  const status = decision.status || (run?.exitCode === 0 ? "pass" : "fail");
+  let ready = readyKey ? Boolean(decision[readyKey]) : status !== "fail";
+  if (readyKey === "directorReady") ready = Boolean(decision.firstBlocker || decision.status);
   return {
     name,
     status,
-    score: summary.score ?? 0,
+    score: decision.score,
     ready,
     exitCode: run?.exitCode ?? null,
     durationMs: run?.durationMs ?? 0,
     report: run?.report?.artifacts?.report || run?.report?.summary?.latestV34Report || "",
     markdown: run?.report?.artifacts?.markdown || "",
-    firstBlocker: summary.firstBlocker || "",
-    nextCommand: summary.nextCommand || summary.rerunCommand || summary.nextV36Command || "",
+    firstBlocker: decision.firstBlocker,
+    nextCommand: decision.nextCommand,
   };
 }
 
 function compactNestedReport(report) {
   if (!report) return null;
-  const summary = report.summary || {};
+  const decision = reportDecision(report);
   const artifacts = report.artifacts || {};
   return {
     version: report.version || "",
-    status: summary.status || "",
-    score: summary.score ?? summary.readinessScore ?? 0,
-    schemaReady: summary.schemaReady,
-    strictReady: summary.strictReady,
-    firstBlocker: summary.firstBlocker || "",
-    nextCommand: summary.nextCommand || summary.rerunCommand || summary.nextV36Command || "",
-    report: artifacts.report || summary.latestV34Report || "",
+    status: decision.status,
+    score: decision.score,
+    schemaReady: decision.schemaReady,
+    strictReady: decision.strictReady,
+    firstBlocker: decision.firstBlocker,
+    nextCommand: decision.nextCommand,
+    report: artifacts.report || report.summary?.latestV34Report || "",
     markdown: artifacts.markdown || "",
   };
 }

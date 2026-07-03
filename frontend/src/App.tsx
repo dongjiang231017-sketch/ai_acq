@@ -1356,6 +1356,7 @@ function telephonyReadinessLabel(health: TelephonyHealth, preflight?: TelephonyP
   if (preflight?.readyForDeviceTest) return "设备可联调";
   if (health.readyForTestCall && health.liveCallEnabled) return "可单号试拨";
   if (health.readyForTestCall) return "线路已就绪";
+  if (health.trunkReachable === false) return "UC100未注册";
   if (health.amiReachable && health.authenticated) return "AMI 已连接";
   return "待配置";
 }
@@ -1387,7 +1388,7 @@ function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHeal
   if (!health.configured) return "请先配置 AMI 账号和密码";
   if (!health.amiReachable) return "后端还连不上 Asterisk AMI";
   if (!health.pingOk) return "AMI Ping 未通过";
-  if (health.trunkReachable === false) return health.trunkStatus;
+  if (health.trunkReachable === false) return "服务器已连上 Asterisk，但没有收到 UC100 SIP 注册";
   if (!health.liveCallEnabled) return "单号试拨开关未开启";
   return health.trunkStatus || "语音网关线路待测试";
 }
@@ -1397,14 +1398,17 @@ function routeHealthSummary(health: TelephonyHealth, preflight: TelephonyPreflig
   const isLinked = Boolean(health.authenticated && health.trunkReachable);
   const isPartial = Boolean(health.amiReachable || health.authenticated || preflight.readyForDeviceTest);
   const status = isReady || isLinked ? "pass" : isPartial ? "warn" : "fail";
-  const title = status === "pass" ? "线路通畅" : status === "warn" ? "线路待联通" : "线路不可用";
+  const trunkMissing = health.trunkReachable === false;
+  const title = status === "pass" ? "线路通畅" : trunkMissing ? "UC100未注册" : status === "warn" ? "线路待联通" : "线路不可用";
   const detail =
     status === "pass"
       ? "后台线路检测通过，可以按配置执行外呼任务。"
+      : trunkMissing
+        ? "服务器 Asterisk/AMI 正常，但公网 SIP 注册还没有到达服务器。"
       : status === "warn"
         ? "后台正在接入线路，完成后会自动更新状态。"
         : "后台线路未接入，请等待管理员处理。";
-  const action = status === "pass" ? "可以创建任务" : status === "warn" ? "后台验收中" : "等待后台接入";
+  const action = status === "pass" ? "可以创建任务" : trunkMissing ? "等待设备注册" : status === "warn" ? "后台验收中" : "等待后台接入";
   return { status, title, detail, action };
 }
 
@@ -1446,6 +1450,23 @@ function telephonyPreflightSummary(preflight: TelephonyPreflight) {
   if (preflight.readyForSingleNumberTest) return "可做单号试拨";
   if (preflight.readyForDeviceTest) return "设备链路可联调";
   return "等待配置";
+}
+
+function voiceGatewayDiscoveryLabel(status?: AiAcqDesktopAsteriskStatus | null) {
+  const discovery = status?.voiceGatewayDiscovery;
+  if (!status) return "等待检测";
+  if (discovery?.status === "current") return "已发现当前设备";
+  if (discovery?.status === "updated") return "已自动切换设备";
+  if (discovery?.status === "not_found") return "未发现设备";
+  if (discovery?.status === "disabled") return "自动检测已关闭";
+  return "检测中";
+}
+
+function voiceGatewayDiscoveryDetail(status?: AiAcqDesktopAsteriskStatus | null) {
+  const discovery = status?.voiceGatewayDiscovery;
+  if (discovery?.message) return discovery.message;
+  if (!status) return "打开桌面客户端后会检测客户现场局域网里的语音网关。";
+  return status.nextStep || "请确认设备已通电、插卡、接入网络。";
 }
 
 function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
@@ -6104,6 +6125,13 @@ function App() {
     const showRules = showOverview || activeOutboundTab === "重拨规则";
     const showRealtime = showOverview || activeOutboundTab === "实时监听";
     const routeStatus = routeHealthSummary(telephonyHealth, telephonyPreflight);
+    const serverRegistrationTarget = serverSipRegistrationTarget(telephonyConfig);
+    const deviceDiscoveryLabel = voiceGatewayDiscoveryLabel(asteriskSidecarStatus);
+    const deviceDiscoveryDetail = voiceGatewayDiscoveryDetail(asteriskSidecarStatus);
+    const discoveredGatewayAddress =
+      asteriskSidecarStatus?.voiceGatewayDiscovery?.host && asteriskSidecarStatus.voiceGatewayDiscovery.sipPort
+        ? `${asteriskSidecarStatus.voiceGatewayDiscovery.host}:${asteriskSidecarStatus.voiceGatewayDiscovery.sipPort}`
+        : asteriskSidecarStatus?.customerDelivery?.gatewayAddress || "等待自动检测";
     const customerRouteNextStep =
       routeStatus.status === "pass"
         ? "线路检测通过，可以创建任务或进入实时监听。"
@@ -6140,7 +6168,7 @@ function App() {
             <article className="panel span-2 line-health-panel">
               <div className="panel-title">
                 <div>
-                  <p>Route Health</p>
+                  <p>外呼线路</p>
                   <h2>线路是否通畅</h2>
                 </div>
               </div>
@@ -6177,6 +6205,55 @@ function App() {
                 <div>
                   <span>下一步</span>
                   <strong>{customerRouteNextStep}</strong>
+                </div>
+              </div>
+              <div className={`device-onboarding-card is-${routeStatus.status}`}>
+                <div className="device-onboarding-header">
+                  <div>
+                    <span>现场设备对接</span>
+                    <strong>{telephonyHealth.trunkReachable ? "UC100已注册到云端" : "UC100等待注册到云端"}</strong>
+                    <small>
+                      交付人员把 UC100 注册到云端后，客户前端只做状态验收；未注册前不会进入真实拨号。
+                    </small>
+                  </div>
+                  <div className="device-onboarding-actions">
+                    <button className="secondary-button" disabled={!isDesktopClient} onClick={() => void refreshAsteriskSidecarStatus()} type="button">
+                      <RefreshCw size={16} />
+                      {isDesktopClient ? "自动检测现场设备" : "桌面客户端检测"}
+                    </button>
+                    <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
+                      <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
+                      刷新线路状态
+                    </button>
+                  </div>
+                </div>
+                <div className="device-onboarding-grid">
+                  <div>
+                    <span>自动检测</span>
+                    <strong>{deviceDiscoveryLabel}</strong>
+                    <small>{deviceDiscoveryDetail}</small>
+                  </div>
+                  <div>
+                    <span>本地发现地址</span>
+                    <strong>{discoveredGatewayAddress}</strong>
+                    <small>如果客户更换网络或换设备，点击自动检测重新识别。</small>
+                  </div>
+                  <div>
+                    <span>云端注册目标</span>
+                    <strong>{serverRegistrationTarget}</strong>
+                    <small>交付人员在 UC100 后台把 SIP Server / Registrar 指向这个地址。</small>
+                  </div>
+                  <div>
+                    <span>SIP账号</span>
+                    <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}</strong>
+                    <small>鉴权密码由交付人员配置，不在客户前端展示。</small>
+                  </div>
+                </div>
+                <div className="device-onboarding-steps">
+                  <span>1. 设备通电、插 SIM 卡并接入客户网络。</span>
+                  <span>2. 客户端点击自动检测，确认现场设备可被发现。</span>
+                  <span>3. 交付人员在设备后台填写云端注册目标和 SIP 账号。</span>
+                  <span>4. 云端收到注册后，本页自动变为线路通畅，再进入单号试拨。</span>
                 </div>
               </div>
               {telephonyConfig.asteriskDeploymentMode === "server" ? (

@@ -1,20 +1,50 @@
 # UC100 实体电话卡外呼接入准备
 
-这份文档用于 UC100 到货前后的开发联调和客户交付。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器、客户端内置 Asterisk sidecar 管理入口，以及设备未识卡前可用的实时语音管线模拟接口。
+这份文档用于 UC100 到货前后的开发联调和客户交付。当前系统已经有模拟电话网关、Redis 外呼队列、外呼 worker、通话网关字段、Asterisk AMI 健康检查、单号试拨接口、真实 originate 适配器、云端 Asterisk 注册验收面板，以及设备未识卡前可用的实时语音管线模拟接口。
+
+## 交付标准
+
+生产交付优先使用云端接入：
+
+```text
+实体 SIM 卡
+  -> UC100
+  -> SIP REGISTER 到云端 Asterisk
+  -> FastAPI / Redis worker / 实时媒体桥
+  -> ASR / 意图路由 / LLM / TTS
+  -> 通话记录 / 人工接管 / 实时监听
+```
+
+客户电脑不承担 Asterisk 运行时，也不让客户填写 AMI、SIP 密码、队列或防火墙配置。客户打开桌面客户端只看到三类信息：
+
+1. 线路是否通畅。
+2. 新设备是否被客户端发现。
+3. 交付人员需要把 UC100 注册到哪个云端 SIP 目标。
+
+正式交付顺序必须是：
+
+1. 交付人员在云服务器确认 Asterisk/AMI 正常。
+2. 云安全组和上游网络放通 `UDP 5060` 和 `UDP 10000-20000`。
+3. 交付人员在 UC100 后台配置 SIP Server/Registrar、账号和密码，让 UC100 主动注册到云端。
+4. 后端 `/api/outbound/telephony/health` 显示 `trunkReachable=true`，客户端显示 `线路通畅`。
+5. 只开启 `ASTERISK_LIVE_CALL_ENABLED=true` 做单号试拨。
+6. 单号试拨、媒体链路、AI 首句和实时监听都通过后，才考虑开启批量外呼。
+
+如果 `pjsip show contacts` 没有 UC100 contact，或者服务器抓不到 `UDP 5060` 入站包，不允许宣称外呼交付完成，也不应该启动真实拨号任务。
 
 ## 当前可先做
 
 1. 使用模拟网关跑通外呼任务。
 2. 使用 Redis 队列验证 worker 消费任务。
 3. 在通话记录中保存 `gateway_call_id`、`gateway_status`、`raw_payload`。
-4. 客户交付版使用桌面客户端内置 Asterisk sidecar；本机 Asterisk 只用于开发验证。
+4. 客户交付版使用云端 Asterisk；桌面客户端只展示线路状态和现场设备对接指引，本机 Asterisk 只用于开发验证。
 5. 在 AI 外呼系统的「真实线路接入」面板做无拨号预检。
 6. 使用 `python -m app.tools.uc100_preflight` 做命令行无拨号预检。
 7. 参考 `docs/CUSTOMER_OUTBOUND_USAGE.md`、`docs/CLIENT_ASTERISK_SIDECAR.md` 和 `docs/UC100_ASTERISK_SNIPPETS.md` 准备客户交付、sidecar、PJSIP trunk 和 dialplan。
 8. 在 AI 外呼系统的「实时语音管线」面板创建模拟通话，验证 ASR、意图路由、LLM、TTS 分块和打断状态机。
 9. 约定人工接管和实时监听需要的 WebSocket/坐席方案。
 
-## 推荐架构
+## 开发架构
 
 ```text
 实体 SIM 卡
