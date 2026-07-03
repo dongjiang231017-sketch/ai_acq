@@ -10,7 +10,6 @@ from app.api import (
     leads,
     learning,
     modules,
-    outbound,
     reports,
     system_settings,
     tasks,
@@ -24,7 +23,6 @@ api_router.include_router(collections.router, prefix="/collections", tags=["coll
 api_router.include_router(modules.router, prefix="/modules", tags=["modules"])
 api_router.include_router(leads.router, prefix="/leads", tags=["leads"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
-api_router.include_router(outbound.router, prefix="/outbound", tags=["outbound"])
 api_router.include_router(direct_messages.router, prefix="/direct-messages", tags=["direct-messages"])
 api_router.include_router(comment_intercepts.router, prefix="/direct-messages/intercepts", tags=["direct-message-intercepts"])
 api_router.include_router(intent.router, prefix="/intent", tags=["intent"])

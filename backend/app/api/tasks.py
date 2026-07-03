@@ -20,8 +20,6 @@ def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> OutreachT
         name=payload.name,
         channel=payload.channel,
         target_count=payload.target_count,
-        concurrency=payload.concurrency,
-        script_id=payload.script_id,
         scheduled_at=payload.scheduled_at,
         status="待启动",
     )
