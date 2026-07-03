@@ -97,7 +97,10 @@
     "qa:v37": "node scripts/live-allowlist-schema-v37-qa.mjs",
     "qa:v37:validate": "node scripts/live-allowlist-schema-v37-qa.mjs --allowlist qa/v36-real-live-allowlist.template.json",
     "qa:v37:strict": "node scripts/live-allowlist-schema-v37-qa.mjs --strict",
-    "quality:v37": "npm run build && npm run qa:v37:validate -- --json"
+    "quality:v37": "npm run build && npm run qa:v37:validate -- --json",
+    "qa:v38": "node scripts/live-readiness-bundle-v38-qa.mjs",
+    "qa:v38:strict": "node scripts/live-readiness-bundle-v38-qa.mjs --strict",
+    "quality:v38": "npm run build && npm run qa:v38 -- --json --timeout-ms 30000"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

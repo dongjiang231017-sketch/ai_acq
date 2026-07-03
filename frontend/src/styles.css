@@ -1255,7 +1255,7 @@ button:disabled {
 
 .route-status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1279,6 +1279,51 @@ button:disabled {
   color: #20304a;
   font-size: 17px;
   font-weight: 950;
+  overflow-wrap: anywhere;
+}
+
+.customer-route-summary {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.85fr) minmax(180px, 0.72fr) minmax(260px, 1fr);
+  gap: 12px;
+  border: 1px solid #dce7f5;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.customer-route-summary div {
+  min-width: 0;
+  border: 1px solid rgba(132, 151, 178, 0.22);
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 12px;
+}
+
+.customer-route-summary.is-pass div {
+  background: #f4fff8;
+}
+
+.customer-route-summary.is-fail div {
+  background: #fff8f8;
+}
+
+.customer-route-summary span,
+.customer-route-summary small {
+  display: block;
+  color: #728098;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.45;
+}
+
+.customer-route-summary strong {
+  display: block;
+  margin: 6px 0 4px;
+  color: #20304a;
+  font-size: 16px;
+  font-weight: 950;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 

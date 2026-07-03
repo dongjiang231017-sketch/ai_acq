@@ -6104,6 +6104,13 @@ function App() {
     const showRules = showOverview || activeOutboundTab === "重拨规则";
     const showRealtime = showOverview || activeOutboundTab === "实时监听";
     const routeStatus = routeHealthSummary(telephonyHealth, telephonyPreflight);
+    const customerRouteNextStep =
+      routeStatus.status === "pass"
+        ? "线路检测通过，可以创建任务或进入实时监听。"
+        : routeStatus.status === "warn"
+          ? "后台正在处理线路联通，完成后客户工作台会自动显示可用状态。"
+          : "线路暂未接通，请等待服务人员在后台完成接入。";
+    const routeCheckedAt = new Date(telephonyPreflight.checkedAt).toLocaleString("zh-CN", { hour12: false });
     const monitorCalls = liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6);
 
     return (
@@ -6154,6 +6161,22 @@ function App() {
                     <span>后台处理</span>
                     <strong>{routeStatus.action}</strong>
                   </div>
+                </div>
+              </div>
+              <div className={`customer-route-summary is-${routeStatus.status}`}>
+                <div>
+                  <span>已绑定线路</span>
+                  <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
+                  <small>客户前端只展示线路状态；设备、账号、网关和外呼策略由后台维护。</small>
+                </div>
+                <div>
+                  <span>最近检测</span>
+                  <strong>{telephonyPreflightSummary(telephonyPreflight)}</strong>
+                  <small>{routeCheckedAt}</small>
+                </div>
+                <div>
+                  <span>下一步</span>
+                  <strong>{customerRouteNextStep}</strong>
                 </div>
               </div>
               {telephonyConfig.asteriskDeploymentMode === "server" ? (

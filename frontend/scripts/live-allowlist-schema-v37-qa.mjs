@@ -100,12 +100,18 @@ function pointerToPath(pointer) {
 function formatSchemaError(error) {
   const pathName = pointerToPath(error.instancePath);
   const params = error.params ? JSON.stringify(error.params) : "";
+  let message = error.message || "schema validation failed";
+  if (error.keyword === "not") message = "placeholder or empty value is not allowed";
+  if (error.keyword === "const" && error.params?.allowedValue === true) message = "must be explicitly true";
+  if (error.keyword === "pattern" && String(error.schemaPath || "").includes("/phone/")) message = "phone must be dialable";
+  if (error.keyword === "contains" && String(error.schemaPath || "").includes("allOf/0")) message = "at least one call-ready recipient is required";
+  if (error.keyword === "contains" && String(error.schemaPath || "").includes("allOf/1")) message = "at least one DM-ready recipient is required";
   return {
     level: "fail",
     path: pathName,
     keyword: error.keyword,
     schemaPath: error.schemaPath,
-    message: `${error.message || "schema validation failed"}${params ? ` ${params}` : ""}`,
+    message: `${message}${params && message === error.message ? ` ${params}` : ""}`,
   };
 }
 
