@@ -17,6 +17,7 @@ from app.core.security import hash_password, verify_password
 from app.db.session import SessionLocal, engine
 from app.models.audit import AuditLog
 from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
+from app.models.delivery import VoiceGatewayLine, VoiceGatewayLineEvent
 from app.models.growth import (
     FollowUpWorkOrder,
     IntentCustomer,
@@ -1505,6 +1506,108 @@ class SystemSettingAdmin(ModelView, model=SystemSetting):
     }
 
 
+class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
+    name = "语音网关线路"
+    name_plural = "语音网关线路"
+    icon = "fa-solid fa-network-wired"
+
+    column_list = [
+        VoiceGatewayLine.customer_name,
+        VoiceGatewayLine.line_name,
+        VoiceGatewayLine.gateway_label,
+        VoiceGatewayLine.sip_server_host,
+        VoiceGatewayLine.sip_server_port,
+        VoiceGatewayLine.sip_transport,
+        VoiceGatewayLine.sip_username,
+        VoiceGatewayLine.trunk_name,
+        VoiceGatewayLine.channel_count,
+        VoiceGatewayLine.status,
+        VoiceGatewayLine.registration_status,
+        VoiceGatewayLine.acceptance_status,
+        VoiceGatewayLine.updated_at,
+    ]
+    column_searchable_list = [
+        VoiceGatewayLine.customer_name,
+        VoiceGatewayLine.line_name,
+        VoiceGatewayLine.sip_username,
+        VoiceGatewayLine.trunk_name,
+        VoiceGatewayLine.device_serial,
+    ]
+    column_sortable_list = [VoiceGatewayLine.created_at, VoiceGatewayLine.updated_at, VoiceGatewayLine.status]
+    column_default_sort = [(VoiceGatewayLine.updated_at, True)]
+    column_details_exclude_list = [VoiceGatewayLine.sip_password_hash]
+    form_excluded_columns = [VoiceGatewayLine.sip_password_hash, VoiceGatewayLine.events]
+    column_labels = {
+        VoiceGatewayLine.owner_user_id: "客户账号",
+        VoiceGatewayLine.created_by_user_id: "创建人",
+        VoiceGatewayLine.line_name: "线路名称",
+        VoiceGatewayLine.customer_name: "客户名称",
+        VoiceGatewayLine.status: "交付状态",
+        VoiceGatewayLine.gateway_profile_key: "网关档案",
+        VoiceGatewayLine.gateway_label: "网关名称",
+        VoiceGatewayLine.gateway_vendor: "厂商",
+        VoiceGatewayLine.gateway_model: "型号",
+        VoiceGatewayLine.gateway_category: "类型",
+        VoiceGatewayLine.deployment_mode: "部署模式",
+        VoiceGatewayLine.sip_server_host: "SIP服务器",
+        VoiceGatewayLine.sip_server_port: "SIP端口",
+        VoiceGatewayLine.sip_transport: "SIP协议",
+        VoiceGatewayLine.sip_username: "SIP账号",
+        VoiceGatewayLine.sip_auth_username: "鉴权账号",
+        VoiceGatewayLine.sip_password_secret_alias: "密码密钥别名",
+        VoiceGatewayLine.trunk_name: "云端Trunk",
+        VoiceGatewayLine.channel_count: "通道数",
+        VoiceGatewayLine.codec_primary: "主编码",
+        VoiceGatewayLine.codec_secondary: "备用编码",
+        VoiceGatewayLine.dtmf_mode: "DTMF",
+        VoiceGatewayLine.rtp_port_range: "RTP端口",
+        VoiceGatewayLine.route_direction: "路由方向",
+        VoiceGatewayLine.device_admin_url: "设备后台地址",
+        VoiceGatewayLine.device_serial: "设备序列号",
+        VoiceGatewayLine.device_mac: "设备MAC",
+        VoiceGatewayLine.network_note: "网络说明",
+        VoiceGatewayLine.registration_status: "注册状态",
+        VoiceGatewayLine.route_status: "路由状态",
+        VoiceGatewayLine.sim_status: "SIM/VoLTE状态",
+        VoiceGatewayLine.rtp_status: "RTP状态",
+        VoiceGatewayLine.acceptance_status: "验收状态",
+        VoiceGatewayLine.last_registered_at: "最近注册时间",
+        VoiceGatewayLine.last_preflight_at: "最近预检时间",
+        VoiceGatewayLine.notes: "备注",
+        VoiceGatewayLine.created_at: "创建时间",
+        VoiceGatewayLine.updated_at: "更新时间",
+    }
+
+
+class VoiceGatewayLineEventAdmin(ModelView, model=VoiceGatewayLineEvent):
+    name = "线路验收事件"
+    name_plural = "线路验收事件"
+    icon = "fa-solid fa-list-check"
+
+    can_edit = False
+    column_list = [
+        VoiceGatewayLineEvent.line_id,
+        VoiceGatewayLineEvent.event_type,
+        VoiceGatewayLineEvent.status,
+        VoiceGatewayLineEvent.summary,
+        VoiceGatewayLineEvent.created_at,
+    ]
+    column_searchable_list = [VoiceGatewayLineEvent.event_type, VoiceGatewayLineEvent.status, VoiceGatewayLineEvent.summary]
+    column_sortable_list = [VoiceGatewayLineEvent.created_at, VoiceGatewayLineEvent.status]
+    column_default_sort = [(VoiceGatewayLineEvent.created_at, True)]
+    column_labels = {
+        VoiceGatewayLineEvent.line_id: "线路",
+        VoiceGatewayLineEvent.owner_user_id: "客户账号",
+        VoiceGatewayLineEvent.actor_user_id: "操作人",
+        VoiceGatewayLineEvent.event_type: "事件类型",
+        VoiceGatewayLineEvent.status: "状态",
+        VoiceGatewayLineEvent.summary: "摘要",
+        VoiceGatewayLineEvent.detail: "详情",
+        VoiceGatewayLineEvent.evidence_json: "证据JSON",
+        VoiceGatewayLineEvent.created_at: "创建时间",
+    }
+
+
 class SystemAuditLogAdmin(ModelView, model=SystemAuditLog):
     name = "系统审计"
     name_plural = "系统审计"
@@ -1618,5 +1721,7 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(VoiceCloneRecordAdmin)
     admin.add_view(VoiceUsageRecordAdmin)
     admin.add_view(ReportExportAdmin)
+    admin.add_view(VoiceGatewayLineAdmin)
+    admin.add_view(VoiceGatewayLineEventAdmin)
     admin.add_view(SystemSettingAdmin)
     admin.add_view(SystemAuditLogAdmin)

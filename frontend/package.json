@@ -109,7 +109,21 @@
     "quality:v40": "npm run build && npm run qa:v40 -- --json --timeout-ms 30000",
     "qa:v41": "node scripts/auth-readiness-v41-qa.mjs",
     "qa:v41:strict": "node scripts/auth-readiness-v41-qa.mjs --strict",
-    "quality:v41": "npm run build && npm run qa:v41 -- --json --timeout-ms 180000"
+    "quality:v41": "npm run build && npm run qa:v41 -- --json --timeout-ms 180000",
+    "qa:v42": "node scripts/auth-visual-v42-qa.mjs",
+    "qa:v42:strict": "node scripts/auth-visual-v42-qa.mjs --strict",
+    "qa:v42:update-baseline": "node scripts/auth-visual-v42-qa.mjs --update-baseline",
+    "quality:v42": "npm run build && npm run qa:v42 -- --json --timeout-ms 180000",
+    "qa:v43": "node scripts/auth-semantic-v43-qa.mjs",
+    "qa:v43:strict": "node scripts/auth-semantic-v43-qa.mjs --strict",
+    "qa:v43:update-baseline": "node scripts/auth-semantic-v43-qa.mjs --update-baseline",
+    "quality:v43": "npm run build && npm run qa:v43 -- --json --timeout-ms 180000",
+    "qa:v44": "node scripts/auth-action-map-v44-qa.mjs",
+    "qa:v44:strict": "node scripts/auth-action-map-v44-qa.mjs --strict",
+    "quality:v44": "npm run build && npm run qa:v44 -- --json --timeout-ms 180000",
+    "qa:v45": "node scripts/auth-state-path-v45-qa.mjs",
+    "qa:v45:strict": "node scripts/auth-state-path-v45-qa.mjs --strict",
+    "quality:v45": "npm run build && npm run qa:v45 -- --json --timeout-ms 180000"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

@@ -1,0 +1,137 @@
+{
+  "version": "V44-auth-action-contract/v1",
+  "project": "ai_acq/frontend",
+  "globalRequiredTerms": [
+    "商家AI获客",
+    "AI外呼系统",
+    "搜索商家、任务或客户",
+    "新建任务"
+  ],
+  "roleMinimums": {
+    "navigation": 1,
+    "heading": 3,
+    "button": 20,
+    "enabledButton": 20,
+    "textbox": 1
+  },
+  "flows": [
+    {
+      "key": "primary_navigation",
+      "title": "Primary module navigation is agent-addressable",
+      "requiredTerms": [
+        "实时工作台",
+        "线索采集",
+        "商家线索库",
+        "AI外呼系统",
+        "平台私信系统",
+        "意向客户池",
+        "声音档案",
+        "数据报表",
+        "系统设置"
+      ],
+      "requiredActions": [
+        "实时工作台",
+        "线索采集",
+        "商家线索库",
+        "AI外呼系统",
+        "平台私信系统",
+        "意向客户池",
+        "声音档案",
+        "数据报表",
+        "系统设置"
+      ],
+      "minEnabledButtons": 9
+    },
+    {
+      "key": "outbound_tabs",
+      "title": "Outbound workspace tabs are directly reachable",
+      "requiredTerms": [
+        "外呼总览",
+        "任务列表",
+        "话术流程",
+        "通话记录",
+        "重拨规则",
+        "实时监听"
+      ],
+      "requiredActions": [
+        "外呼总览",
+        "任务列表",
+        "话术流程",
+        "通话记录",
+        "重拨规则",
+        "实时监听"
+      ],
+      "minEnabledButtons": 6
+    },
+    {
+      "key": "global_commands",
+      "title": "Global search and task commands are visible",
+      "requiredTerms": [
+        "搜索商家、任务或客户",
+        "刷新数据",
+        "退出",
+        "新建任务"
+      ],
+      "requiredActions": [
+        "刷新数据",
+        "退出",
+        "新建任务"
+      ],
+      "requiredTextboxes": [
+        "搜索商家、任务或客户"
+      ],
+      "minEnabledButtons": 3
+    },
+    {
+      "key": "outbound_metrics",
+      "title": "Outbound operating metrics are visible",
+      "requiredTerms": [
+        "在线坐席",
+        "进行中通话",
+        "需接管",
+        "异常静默",
+        "实时转写",
+        "客户追问"
+      ],
+      "requiredActions": [],
+      "minEnabledButtons": 0
+    },
+    {
+      "key": "line_readiness_panel",
+      "title": "Line readiness and safe refresh controls are inspectable",
+      "requiredTerms": [
+        "线路是否通畅",
+        "线路不可用",
+        "后台线路未接入",
+        "云端注册目标",
+        "SIP账号",
+        "刷新线路状态"
+      ],
+      "requiredActions": [
+        "刷新线路状态"
+      ],
+      "allowedDisabledActions": [
+        "桌面客户端检测"
+      ],
+      "minEnabledButtons": 1
+    },
+    {
+      "key": "live_monitor_panel",
+      "title": "Live monitor queue and takeover actions are visible",
+      "requiredTerms": [
+        "实时监听聊天",
+        "实时通话客户",
+        "青岚美甲工作室",
+        "南昌餐饮店",
+        "宠物生活馆",
+        "当前话术"
+      ],
+      "requiredActions": [
+        "/^刷新$/",
+        "/^接管\\s/",
+        "/^重拨\\s/"
+      ],
+      "minEnabledButtons": 3
+    }
+  ]
+}

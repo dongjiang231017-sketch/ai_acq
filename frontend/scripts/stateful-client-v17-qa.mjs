@@ -326,6 +326,19 @@ async function screenshot(page, report, artifactDir, name) {
   return file;
 }
 
+async function ariaSnapshot(page, report, artifactDir, name) {
+  const file = path.join(artifactDir, `${name}.aria.yml`);
+  let snapshot = "";
+  if (typeof page.ariaSnapshot === "function") {
+    snapshot = await page.ariaSnapshot({ mode: "ai", depth: 10 });
+  } else {
+    snapshot = await page.locator("body").ariaSnapshot({ mode: "ai", depth: 10 });
+  }
+  await fs.writeFile(file, `${snapshot || ""}\n`, "utf8");
+  report.artifacts.ariaSnapshots.push(file);
+  return file;
+}
+
 function attachPageTelemetry(page, report, urls) {
   page.on("console", (message) => {
     if (["error", "warning"].includes(message.type())) {
@@ -470,6 +483,7 @@ async function runPlaywright(report, options, artifactDir, urls, credentials) {
       await replayPage.getByRole("heading", { name: /AI外呼系统/ }).waitFor({ state: "visible", timeout: 25000 });
       await replayPage.getByText("在线坐席", { exact: false }).waitFor({ state: "visible", timeout: 15000 });
       const replayScreenshot = await screenshot(replayPage, report, artifactDir, "02b-auth-state-reuse-dashboard");
+      const replayAriaSnapshot = await ariaSnapshot(replayPage, report, artifactDir, "02b-auth-state-reuse-dashboard");
       const replayAuthState = await replayPage.evaluate(() => {
         const raw = window.localStorage.getItem("ai_acq_client_auth");
         return raw ? JSON.parse(raw) : null;
@@ -477,9 +491,11 @@ async function runPlaywright(report, options, artifactDir, urls, credentials) {
       report.state.authReplay = {
         storageStatePath,
         screenshot: replayScreenshot,
+        ariaSnapshot: replayAriaSnapshot,
         tokenReused: Boolean(replayAuthState?.accessToken),
       };
       addCheck(report, "认证态复用: 新浏览器上下文直达业务台", replayAuthState?.accessToken ? "pass" : "fail", "storageState replay reached AI外呼系统 without login form");
+      addCheck(report, "认证态复用: 业务台 ARIA 快照已保存", replayAriaSnapshot ? "pass" : "fail", "auth replay ARIA snapshot captured");
     } finally {
       await replayContext.close();
     }
@@ -998,6 +1014,7 @@ async function main() {
       report: path.join(artifactDir, "report.json"),
       trace: null,
       screenshots: [],
+      ariaSnapshots: [],
       storageState: "",
       backendLog: path.join(artifactDir, "backend.log"),
       frontendLog: path.join(artifactDir, "frontend.log"),

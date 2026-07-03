@@ -177,6 +177,7 @@ function compactV17(report) {
     authReplay: {
       storageStatePath: authReplay.storageStatePath || report.artifacts?.storageState || "",
       screenshot: authReplay.screenshot || "",
+      ariaSnapshot: authReplay.ariaSnapshot || "",
       tokenReused: Boolean(authReplay.tokenReused),
     },
     artifacts: {
@@ -184,6 +185,7 @@ function compactV17(report) {
       report: report.artifacts?.report || "",
       trace: report.artifacts?.trace || "",
       storageState: report.artifacts?.storageState || "",
+      ariaSnapshots: Array.isArray(report.artifacts?.ariaSnapshots) ? report.artifacts.ariaSnapshots : [],
       screenshots: Array.isArray(report.artifacts?.screenshots)
         ? report.artifacts.screenshots.filter((item) => /02-after-login|02b-auth-state-reuse|13-mobile/.test(item))
         : [],
@@ -245,6 +247,7 @@ function renderMarkdown(report) {
   lines.push(`V40 trace: ${report.v40?.artifacts?.trace || "n/a"}`);
   lines.push(`V40 screenshot: ${report.v40?.artifacts?.screenshot || "n/a"}`);
   lines.push(`V17 auth replay screenshot: ${report.v17?.authReplay?.screenshot || "n/a"}`);
+  lines.push(`V17 auth replay ARIA: ${report.v17?.authReplay?.ariaSnapshot || "n/a"}`);
   lines.push(`V17 storage state: ${report.v17?.authReplay?.storageStatePath || "n/a"}`);
   lines.push(`Next command: \`${report.summary.nextCommand || "n/a"}\``);
   lines.push("");
