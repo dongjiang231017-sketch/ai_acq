@@ -6491,6 +6491,34 @@ function App() {
                   <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨" : "未开启"}</strong>
                 </div>
               </div>
+              <form className="telephony-test-form" onSubmit={submitTelephonyTestCall}>
+                <label>
+                  试拨手机号
+                  <input
+                    inputMode="tel"
+                    placeholder="输入自己的手机号"
+                    value={telephonyTestForm.phone}
+                    onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, phone: event.target.value })}
+                  />
+                </label>
+                <label>
+                  主叫备注
+                  <input
+                    placeholder="默认 AI获客"
+                    value={telephonyTestForm.callerId}
+                    onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, callerId: event.target.value })}
+                  />
+                </label>
+                <button
+                  className="primary-button"
+                  disabled={isTestingTelephony || !telephonyHealth.readyForTestCall || !telephonyConfig.asteriskLiveCallEnabled}
+                  type="submit"
+                >
+                  <PhoneCall size={16} />
+                  {isTestingTelephony ? "试拨中" : "单号试拨"}
+                </button>
+                <p className="telephony-test-message">{telephonyMessage}</p>
+              </form>
               <div className="line-preflight gateway-profile-strip">
                 <div className="line-preflight-header">
                   <div>

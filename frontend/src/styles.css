@@ -1059,6 +1059,49 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.telephony-test-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(160px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  border: 1px solid #dbe8f7;
+  border-radius: 12px;
+  background: #f7fbff;
+  padding: 12px;
+}
+
+.telephony-test-form label {
+  display: grid;
+  gap: 6px;
+  color: #708096;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.telephony-test-form input {
+  min-width: 0;
+  border: 1px solid #d5e2f2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #26364d;
+  font: inherit;
+  font-weight: 850;
+}
+
+.telephony-test-form .primary-button {
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.telephony-test-message {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #52637b;
+  font-size: 13px;
+  font-weight: 820;
+  line-height: 1.55;
+}
+
 .line-preflight {
   border: 1px solid #e2ebf6;
   border-radius: 12px;
@@ -3952,6 +3995,7 @@ button:disabled {
 
   .line-test-row,
   .line-test-form,
+  .telephony-test-form,
   .realtime-call-form {
     grid-template-columns: 1fr;
   }
