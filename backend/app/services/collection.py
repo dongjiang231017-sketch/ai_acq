@@ -8,7 +8,7 @@ from hashlib import md5
 from datetime import datetime
 from math import ceil
 from typing import Any
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -54,6 +54,7 @@ PHONE_TEXT_RE = re.compile(r"(?:1[3-9]\d{9}|400[- ]?\d{3}[- ]?\d{4}|800[- ]?\d{3
 
 MAP_PROVIDERS = {"amap", "baidu", "tencent"}
 PLATFORM_PROVIDERS = {"meituan", "shangou", "douyin"}
+PUBLIC_PROVIDERS = {"public_web"}
 PROVIDER_SOURCE_LABELS = {
     "amap": "地图点位采集",
     "baidu": "地图点位采集",
@@ -61,6 +62,7 @@ PROVIDER_SOURCE_LABELS = {
     "meituan": "平台页面采集",
     "shangou": "平台页面采集",
     "douyin": "平台页面采集",
+    "public_web": "公开网页采集",
 }
 PLATFORM_PROVIDER_METADATA = {
     "meituan": {
@@ -80,6 +82,28 @@ PLATFORM_PROVIDER_METADATA = {
     },
 }
 BROWSER_PLATFORM_PROVIDERS = browser_managed_providers()
+PUBLIC_SEARCH_EXCLUDED_HOSTS = (
+    "sogou.com",
+    "bing.com",
+    "microsoft.com",
+    "baidu.com",
+    "amap.com",
+    "weibo.com",
+    "zhihu.com",
+    "douyin.com",
+)
+PUBLIC_SEARCH_BAD_URL_TOKENS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".css",
+    ".js",
+    "javascript:",
+    "mailto:",
+)
 
 
 def _clean_items(values: list[str]) -> list[str]:
@@ -198,6 +222,7 @@ def _provider_label(provider: str) -> str:
         "amap": "高德地图",
         "baidu": "百度地图",
         "tencent": "腾讯位置服务",
+        "public_web": "公开网页",
     }
     return labels.get(provider, provider)
 
@@ -368,6 +393,163 @@ def _discover_platform_urls(provider: str, query: str, limit: int, search_base_u
     return urls
 
 
+def _unwrap_search_url(raw_url: str, base_url: str) -> str | None:
+    value = unescape(str(raw_url or "")).strip()
+    if not value:
+        return None
+    if value.startswith("//"):
+        value = f"https:{value}"
+    if value.startswith("/"):
+        value = urljoin(base_url, value)
+    parsed = urlsplit(value)
+    if parsed.netloc.endswith("sogou.com") or parsed.netloc.endswith("bing.com"):
+        query = parse_qs(parsed.query)
+        for key in ("url", "u", "target", "to"):
+            target = query.get(key, [""])[0]
+            if target.startswith(("http://", "https://")):
+                return unquote(target)
+    return value if value.startswith(("http://", "https://")) else None
+
+
+def _is_public_web_candidate(url: str) -> bool:
+    lowered = url.lower()
+    if any(token in lowered for token in PUBLIC_SEARCH_BAD_URL_TOKENS):
+        return False
+    parsed = urlsplit(url)
+    host = parsed.netloc.lower()
+    if not host:
+        return False
+    if any(host == excluded or host.endswith(f".{excluded}") for excluded in PUBLIC_SEARCH_EXCLUDED_HOSTS):
+        return False
+    if "verify" in host or "captcha" in lowered or "login" in lowered:
+        return False
+    return True
+
+
+def _extract_href_candidates(html: str, base_url: str) -> list[str]:
+    urls: list[str] = []
+    for match in re.finditer(r'href=["\'](?P<href>[^"\']+)["\']', html, flags=re.IGNORECASE):
+        candidate = _unwrap_search_url(match.group("href"), base_url)
+        if not candidate or not _is_public_web_candidate(candidate):
+            continue
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
+def _discover_public_web_urls(query: str, limit: int) -> list[str]:
+    urls: list[str] = []
+    search_urls = [
+        f"https://www.sogou.com/web?{urlencode({'query': query})}",
+        f"https://cn.bing.com/search?{urlencode({'q': query})}",
+    ]
+    for search_url in search_urls:
+        try:
+            html = _request_text(search_url)
+        except Exception:
+            continue
+        for candidate in _extract_href_candidates(html, search_url):
+            if candidate not in urls:
+                urls.append(candidate)
+            if len(urls) >= limit:
+                return urls
+    return urls
+
+
+def _visible_text(html: str) -> str:
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _strip_html_tags(text)
+    return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def _extract_label_value(text: str, label: str, max_chars: int = 100) -> str | None:
+    match = re.search(rf"{label}\s*[:：]\s*(?P<value>.{{2,{max_chars}}})", text)
+    if not match:
+        return None
+    value = re.split(r"(电话|联系电话|手机|地址|【|团购内容|查看|更多|上一篇|下一篇)", match.group("value"), maxsplit=1)[0]
+    value = value.strip(" ：:-_，,。;；|")
+    return value or None
+
+
+def _extract_public_business_phone(html: str) -> str | None:
+    text = _visible_text(html)
+    fixed_phone = re.search(r"(?<!\d)(?:0\d{2,3}[-\s]?\d{7,8}|400[-\s]?\d{3}[-\s]?\d{4}|800[-\s]?\d{3}[-\s]?\d{4})(?!\d)", text)
+    if fixed_phone:
+        return _normalize_phone_item(fixed_phone.group(0))
+
+    for match in re.finditer(r"(?<!\d)1[3-9]\d{9}(?!\d)", text):
+        context = text[max(0, match.start() - 80) : match.end() + 80]
+        if re.search(r"(电话|联系电话|联系|手机|商家|门店|餐厅|饭店|店铺|订餐|咨询)", context):
+            return _normalize_phone_item(match.group(0))
+    return None
+
+
+def _extract_public_web_name(html: str, url: str, city: str, category: str) -> str | None:
+    text = _visible_text(html)
+    title = _extract_title(html) or urlsplit(url).netloc
+    title = re.split(r"[-_|—]", title, maxsplit=1)[0]
+    for token in (city, category, "南昌", "本地宝", "电话邦", "电话查询", "58同城", "商家电话", "团购"):
+        title = title.replace(token, "")
+    title = title.strip(" ：:-_，,。;；|")
+    generic_names = {"联系我们", "联系我", "关于我们", "电话邦", "mp.weixin.qq.com", urlsplit(url).netloc}
+    if len(title) >= 2 and title not in generic_names:
+        cleaned_title = _clean_candidate_name(title)
+        if cleaned_title and cleaned_title not in generic_names:
+            return cleaned_title
+
+    for label in ("原标题", "商家名称", "店名", "名称"):
+        value = _extract_label_value(text, label, 80)
+        cleaned_value = _clean_candidate_name(value)
+        if cleaned_value and cleaned_value not in generic_names:
+            return cleaned_value
+    return None
+
+
+def _extract_public_web_address(html: str) -> str | None:
+    text = _visible_text(html)
+    value = _extract_label_value(text, "地址", 120)
+    if value:
+        return value
+    return _extract_platform_address(html)
+
+
+def _extract_public_web_record(url: str, html: str, city: str, category: str, keyword: str) -> dict[str, Any] | None:
+    if any(marker in html for marker in ("请输入验证码", "访问过于频繁", "安全验证", "登录后查看")):
+        return None
+    text = _visible_text(html)
+    relevance_terms = _clean_items([city, category, keyword, "美食", "餐厅", "饭店", "酒家", "火锅", "团购", "订餐"])
+    if not any(term in text for term in relevance_terms):
+        return None
+    phone = _extract_public_business_phone(html)
+    if not phone:
+        return None
+    name = _extract_public_web_name(html, url, city, category)
+    if not name:
+        return None
+    return {
+        "id": md5(f"public_web:{url}".encode("utf-8")).hexdigest(),
+        "name": name,
+        "cityname": city,
+        "adname": None,
+        "pname": None,
+        "address": _extract_public_web_address(html),
+        "tel": phone,
+        "location": None,
+        "type": category or keyword or "公开网页",
+        "detail_url": url,
+        "_raw_provider": "public_web",
+        "_raw_payload": {
+            "provider": "public_web",
+            "query_city": city,
+            "query_category": category,
+            "query_keyword": keyword,
+            "source_url": url,
+            "title": _extract_title(html),
+        },
+    }
+
+
 def _candidate_address_score(reference: str | None, candidate: str | None) -> int:
     if not reference or not candidate:
         return 0
@@ -455,6 +637,10 @@ def _read_provider_api_key(db: Session, provider: str) -> str | None:
         return config.api_key.strip()
     if provider == "amap" and settings.amap_web_key:
         return settings.amap_web_key
+    if provider == "baidu" and settings.baidu_map_key:
+        return settings.baidu_map_key
+    if provider == "tencent" and settings.tencent_map_key:
+        return settings.tencent_map_key
     return None
 
 
@@ -721,6 +907,44 @@ def _request_platform_pois(
     return records[:target_count]
 
 
+def _request_public_web_pois(
+    city: str,
+    category: str,
+    keyword: str,
+    target_count: int,
+) -> list[dict[str, Any]]:
+    queries = [
+        " ".join(_clean_items([city, category, keyword, "电话"])),
+        " ".join(_clean_items([city, category, "商家", "电话"])),
+        " ".join(_clean_items([city, keyword, "商家", "电话"])),
+    ]
+    urls: list[str] = []
+    for query in [item for item in queries if item]:
+        for candidate in _discover_public_web_urls(query, max(target_count * 8, 24)):
+            if candidate not in urls:
+                urls.append(candidate)
+            if len(urls) >= max(target_count * 10, 30):
+                break
+        if len(urls) >= max(target_count * 10, 30):
+            break
+
+    records: list[dict[str, Any]] = []
+    for url in urls:
+        try:
+            html = _request_text(url)
+        except Exception:
+            continue
+        record = _extract_public_web_record(url, html, city, category, keyword)
+        if not record:
+            continue
+        if any(existing["id"] == record["id"] or _normalize_text(existing["name"]) == _normalize_text(record["name"]) for existing in records):
+            continue
+        records.append(record)
+        if len(records) >= target_count:
+            break
+    return records
+
+
 def _request_provider_pois(
     db: Session,
     provider: str,
@@ -737,6 +961,8 @@ def _request_provider_pois(
         return _request_tencent_pois(db, city, category, keyword, target_count)
     if provider in PLATFORM_PROVIDERS:
         return _request_platform_pois(db, provider, city, category, keyword, target_count)
+    if provider in PUBLIC_PROVIDERS:
+        return _request_public_web_pois(city, category, keyword, target_count)
     raise CollectionError("当前只支持地图点位和平台公开页面采集数据源")
 
 
@@ -848,8 +1074,8 @@ def run_collection_task(db: Session, task: LeadCollectionTask) -> LeadCollection
     categories = _clean_items(task.categories or [])
     keywords = _clean_items(task.keywords or []) or [""]
     owner_user_id = task.owner_user_id
-    if task.provider not in MAP_PROVIDERS | PLATFORM_PROVIDERS:
-        raise CollectionError("当前只支持地图点位和平台公开页面采集数据源")
+    if task.provider not in MAP_PROVIDERS | PLATFORM_PROVIDERS | PUBLIC_PROVIDERS:
+        raise CollectionError("当前只支持地图点位、平台公开页面和公开网页采集数据源")
     if not cities or not categories:
         raise CollectionError("采集任务必须至少包含一个城市和一个品类")
     source_label = PROVIDER_SOURCE_LABELS.get(task.provider, "公开来源采集")

@@ -1,0 +1,24 @@
+{
+  "recipients": [
+    {
+      "channels": ["call", "dm"],
+      "name": "真实商家A-请替换",
+      "city": "南昌",
+      "category": "本地生活",
+      "contactName": "负责人A",
+      "phone": "REPLACE_WITH_REAL_PHONE_1",
+      "platform": "抖音",
+      "platformUrl": "https://example.com/merchant-a",
+      "dmMessage": "您好，看到贵店有本地生活获客需求，想确认是否方便了解视频号团购到店获客方案？"
+    },
+    {
+      "channels": ["call"],
+      "name": "真实商家B-请替换",
+      "city": "南昌",
+      "category": "餐饮",
+      "contactName": "负责人B",
+      "phone": "REPLACE_WITH_REAL_PHONE_2",
+      "platform": "美团"
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
+
+from app.schemas.common import ApiModel as BaseModel
 
 
 class LeadCreate(BaseModel):
@@ -13,6 +15,7 @@ class LeadCreate(BaseModel):
     contact_name: Annotated[str | None, Field(alias="contactName")] = None
     contact_title: Annotated[str | None, Field(alias="contactTitle")] = None
     wechat_id: Annotated[str | None, Field(alias="wechatId")] = None
+    platform_url: Annotated[str | None, Field(alias="platformUrl")] = None
     platform_homepage_url: Annotated[str | None, Field(alias="platformHomepageUrl")] = None
     source_poi_id: Annotated[str | None, Field(alias="sourcePoiId")] = None
     province: str | None = None
@@ -41,6 +44,7 @@ class LeadRead(BaseModel):
     contact_name: Annotated[str | None, Field(alias="contactName")]
     contact_title: Annotated[str | None, Field(alias="contactTitle")]
     wechat_id: Annotated[str | None, Field(alias="wechatId")]
+    platform_url: Annotated[str | None, Field(alias="platformUrl")]
     platform_homepage_url: Annotated[str | None, Field(alias="platformHomepageUrl")]
     source_poi_id: Annotated[str | None, Field(alias="sourcePoiId")]
     province: str | None

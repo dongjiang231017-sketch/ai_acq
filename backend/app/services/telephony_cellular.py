@@ -1,0 +1,280 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from typing import Any
+
+from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, AsteriskOriginateResult, check_asterisk_health
+from app.services.voice_gateway_profiles import current_voice_gateway_profile, voice_gateway_label
+
+
+def build_cellular_diagnostic(
+    result: AsteriskOriginateResult | None = None,
+    *,
+    media_loop_confirmed: bool = False,
+    human_speech_confirmed: bool = False,
+    ai_speech_confirmed: bool = False,
+    call_screening_detected: bool = False,
+) -> dict[str, object]:
+    profile = current_voice_gateway_profile()
+    events = _events_from_raw_payload(result.raw_payload if result else "")
+    compact_chain = _compact_event_chain(events)
+    diagnostic_text = _diagnostic_text(events, result.message if result else "")
+    gateway_status = result.status if result else "unknown"
+    cellular_confirmed = bool(result and result.cellular_confirmed)
+
+    if human_speech_confirmed and ai_speech_confirmed:
+        return _diagnostic(
+            status="pass",
+            stage="realtime_conversation_confirmed",
+            title="真人实时通话已确认",
+            summary="已确认手机侧真人语音和 AI 音频回放，可以作为本轮实时通话验收证据。",
+            detail="AudioSocket、ASR、TTS 和真人响应都已进入同一通电话。",
+            action_items=["保存本轮通话录音和评分结果。", "继续用单号小批量复测稳定性，批量外呼仍需单独打开开关。"],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=False,
+        )
+
+    if media_loop_confirmed:
+        return _diagnostic(
+            status="warn",
+            stage="realtime_media_confirmed",
+            title="媒体桥已接通，真人对话未完成",
+            summary="线路已经接入 AudioSocket，但还没有同时确认真人语音和 AI 首句。",
+            detail="这通常是电话助理、语音信箱、客户未说话或测试未继续导致。",
+            action_items=["接通后请对着手机说一句“你好”。", "观察实时监听是否出现真人语音确认和 AI 首句播出。"],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=True,
+        )
+
+    if cellular_confirmed:
+        return _diagnostic(
+            status="warn",
+            stage="cellular_answered_no_media",
+            title="蜂窝侧接通，媒体桥未完成",
+            summary=f"{voice_gateway_label()} 收到接通证据，但还没有进入实时 AI 媒体链路。",
+            detail="需要检查 Asterisk dialplan 是否进入 AudioSocket、桥接服务是否在线、以及通话是否很快挂断。",
+            action_items=[
+                "确认 AudioSocket bridge 监听正常。",
+                "确认 Asterisk dialplan 接通后会执行 AudioSocket。",
+                "重新做单号试拨并在接听后保持通话 10 秒以上。",
+            ],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=False,
+        )
+
+    if _has_any(diagnostic_text, ["no_route_destination", "404", "not found"]) or (result and result.verification_stage == "not_connected" and "找不到可用外呼路由" in result.message):
+        return _diagnostic(
+            status="fail",
+            stage="gateway_route_failed",
+            title="语音网关没有可用外呼路由",
+            summary="Asterisk 已把号码交给语音网关，但网关没有把 SIP 呼叫路由到 SIM/VoLTE 线路。",
+            detail="这不是 AI 模型问题。需要在网关后台检查 SIP 分机到蜂窝线路的呼叫控制/路由规则。",
+            action_items=[
+                "打开语音网关后台，检查 SIP 分机/中继到 VoLTE/SIM 的外呼路由。",
+                "确认号码匹配规则允许当前手机号段。",
+                "确认线路选择指向在线 SIM，而不是空线路或错误分组。",
+            ],
+            technical_detail=compact_chain,
+            can_retry=False,
+            customer_action_required=True,
+        )
+
+    if _has_any(diagnostic_text, ["503", "congestion", "normal circuit/channel congestion", "cause=34", "cause 34"]):
+        return _diagnostic(
+            status="fail",
+            stage="cellular_temporarily_unavailable",
+            title="蜂窝线路临时不可用",
+            summary="SIP 注册正常，但网关/运营商没有给本次外呼分配可用蜂窝通道。",
+            detail="常见原因是 SIM/VoLTE 模块卡住、运营商临时拒绝、信号波动、单卡通道被占用或风控。",
+            action_items=[
+                "在语音网关后台查看当前呼叫/话单里的失败原因。",
+                "确认 SIM 余额、VoLTE、信号和运营商外呼权限正常。",
+                "断开并重新连接 VoLTE 数据，必要时重启语音网关后再试。",
+            ],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=True,
+        )
+
+    if gateway_status == "ringing":
+        return _diagnostic(
+            status="warn",
+            stage="gateway_signaling_only",
+            title="只到网关振铃证据",
+            summary="Asterisk/语音网关 SIP 侧有响应，但还没有证明手机真实响铃或接听。",
+            detail="昨天能通说明 AI 媒体链路曾经正常；现在需要确认网关是否真的把本次呼叫打到 SIM/运营商。若网关话单显示“通道不可用”，优先恢复 VoLTE/SIM 通道。",
+            action_items=[
+                "前端再次试拨时，同时打开语音网关后台的当前呼叫或话单页面。",
+                "如果网关话单没有蜂窝呼出记录，检查 SIP 到 VoLTE 路由。",
+                "如果话单显示通道不可用，重连 VoLTE、重启语音网关或换 SIM/通道验证。",
+                "如果话单有呼出但手机不响，检查 SIM/运营商/号码拦截。",
+            ],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=True,
+        )
+
+    if gateway_status in {"busy", "no_answer", "cancelled"}:
+        return _diagnostic(
+            status="warn",
+            stage=f"cellular_{gateway_status}",
+            title="蜂窝侧未形成有效接听",
+            summary="线路没有进入可验收的真人实时通话。",
+            detail="如果手机没有响铃，请优先看语音网关话单；如果手机响了但未接，请接听后保持通话。",
+            action_items=["确认手机侧是否实际响铃。", "接听后说一句“你好”，等待实时监听出现真人确认。"],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=True,
+        )
+
+    if result and not result.accepted:
+        return _diagnostic(
+            status="fail",
+            stage="originate_failed",
+            title="Asterisk 外呼提交失败",
+            summary=result.message or "Asterisk 没有接受本次外呼请求。",
+            detail="先恢复 Asterisk/网关注册，再重新做单号试拨。",
+            action_items=["点击自动恢复线路。", "确认 trunk 注册后再试拨。"],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=False,
+        )
+
+    return _diagnostic(
+        status="warn",
+        stage="cellular_not_verified",
+        title="蜂窝线路待验收",
+        summary="当前只完成基础注册检查，还没有真实蜂窝接通和媒体桥证据。",
+        detail=f"{profile.label} 已作为语音网关档案，但必须通过单号试拨确认 SIM/运营商侧真实可用。",
+        action_items=["先做单号试拨。", "接听后说话，确认实时监听出现真人语音和 AI 首句。"],
+        technical_detail=compact_chain,
+        can_retry=True,
+        customer_action_required=True,
+    )
+
+
+def recover_telephony_line() -> dict[str, object]:
+    profile = current_voice_gateway_profile()
+    registration_name = f"{profile.trunk_name}-registration" if profile.trunk_name else ""
+    commands = [
+        "dialplan reload",
+        "module reload res_pjsip.so",
+        "module reload res_pjsip_outbound_registration.so",
+    ]
+    if registration_name:
+        commands.append(f"pjsip send register {registration_name}")
+    commands.extend(
+        [
+            "pjsip show registrations",
+            "pjsip show contacts",
+            f"pjsip show endpoint {profile.trunk_name}" if profile.trunk_name else "pjsip show endpoints",
+        ]
+    )
+    command_results: list[dict[str, object]] = []
+    status = "pass"
+    summary = "已执行 Asterisk/PJSIP 安全恢复动作，并重新检测线路状态。"
+    try:
+        with AsteriskAmiClient() as client:
+            for command in commands:
+                response = client.command(command)
+                output = response.field_text("Output") or response.message
+                command_results.append(
+                    {
+                        "command": command,
+                        "ok": response.ok,
+                        "message": response.message,
+                        "output": output[-1200:],
+                    }
+                )
+                if not response.ok:
+                    status = "warn"
+    except AsteriskAmiError as exc:
+        status = "fail"
+        summary = str(exc)
+        command_results.append({"command": "AMI", "ok": False, "message": str(exc), "output": ""})
+    health = check_asterisk_health().as_dict()
+    if health.get("trunkReachable") is not True:
+        status = "fail" if status == "pass" else status
+    return {
+        "checkedAt": datetime.utcnow(),
+        "status": status,
+        "summary": summary,
+        "commands": command_results,
+        "health": health,
+        "nextStep": _line_recovery_next_step(status, bool(health.get("trunkReachable"))),
+    }
+
+
+def _line_recovery_next_step(status: str, trunk_ok: bool) -> str:
+    if not trunk_ok:
+        return "Asterisk 到语音网关仍未恢复，请检查网关电源、网络、SIP账号和当前LAN地址。"
+    if status == "fail":
+        return "Asterisk 可达但恢复动作失败，请查看命令输出或重启客户端内置 Asterisk。"
+    return "Asterisk/网关注册已刷新；请马上做一次单号试拨，并同时查看语音网关当前呼叫/话单。"
+
+
+def _diagnostic(
+    *,
+    status: str,
+    stage: str,
+    title: str,
+    summary: str,
+    detail: str,
+    action_items: list[str],
+    technical_detail: str = "",
+    can_retry: bool,
+    customer_action_required: bool,
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "stage": stage,
+        "title": title,
+        "summary": summary,
+        "detail": detail,
+        "actionItems": action_items,
+        "technicalDetail": technical_detail,
+        "canRetry": can_retry,
+        "customerActionRequired": customer_action_required,
+    }
+
+
+def _events_from_raw_payload(raw_payload: str) -> list[dict[str, Any]]:
+    if not raw_payload:
+        return []
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return []
+    events = payload.get("events")
+    return events if isinstance(events, list) else []
+
+
+def _compact_event_chain(events: list[dict[str, Any]]) -> str:
+    compact: list[str] = []
+    for event in events[-8:]:
+        if not isinstance(event, dict):
+            continue
+        compact.append(
+            "/".join(
+                str(event.get(key) or "")
+                for key in ["Event", "ChannelStateDesc", "DialStatus", "Cause", "Cause-txt", "TechCause", "Reason"]
+                if event.get(key)
+            )
+        )
+    return " -> ".join(part for part in compact if part)
+
+
+def _diagnostic_text(events: list[dict[str, Any]], message: str) -> str:
+    parts = [message]
+    for event in events:
+        if isinstance(event, dict):
+            parts.extend(str(event.get(key) or "") for key in ["Event", "DialStatus", "Cause", "Cause-txt", "TechCause", "Reason"])
+    return " ".join(parts).lower()
+
+
+def _has_any(text: str, keywords: list[str]) -> bool:
+    return any(keyword.lower() in text for keyword in keywords)

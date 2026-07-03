@@ -19,6 +19,7 @@ class MerchantLead(Base):
     contact_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     contact_title: Mapped[str | None] = mapped_column(String(80), nullable=True)
     wechat_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    platform_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     platform_homepage_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_poi_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     province: Mapped[str | None] = mapped_column(String(40), nullable=True)

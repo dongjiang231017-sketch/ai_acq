@@ -17,7 +17,7 @@
 - 数据库：PostgreSQL
 - 可视化数据后台：SQLAdmin
 - 数据库迁移：Alembic
-- 队列/缓存：后续接 Redis
+- 队列/缓存：Redis
 - Docker：暂时不用，等功能稳定后再补
 
 ## 本机 PostgreSQL
@@ -56,7 +56,6 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m playwright install chromium
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
@@ -80,19 +79,20 @@ http://localhost:8000/admin
 密码：admin123456
 ```
 
-首次登录时，系统会用 `backend/.env` 里的账号自动初始化第一位「后台成员」。之后后台登录成员在 SQLAdmin 的「后台成员」菜单里管理，新增成员时填写明文密码，保存后会自动加密。
+首次登录后台时，系统会用 `backend/.env` 里的账号自动初始化第一位「后台成员」。之后后台成员在 SQLAdmin 的「后台成员」菜单里管理，新增成员时填写明文密码，保存后会自动加密。
 
 客户注册申请在 SQLAdmin 的「注册申请」菜单审核。点击「审核通过」后，系统会自动在「用户管理」里创建客户工作台账号：
 
 - 登录名：优先使用申请里的期望登录名；没有填写时使用联系人手机号。
 - 初始密码：联系人手机号后 6 位；手机号不足 6 位时使用 `123456`。
 
-初始后台密码配置在 `backend/.env`，正式部署前必须改掉：
+后台密码配置在 `backend/.env`，正式部署前必须改掉：
 
 ```env
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123456
 ADMIN_SECRET_KEY=ai-acq-qian-local-admin-session-key-20260628
+AUTH_SECRET_KEY=replace-this-with-a-long-random-auth-string
 ```
 
 线索采集接口密钥在 SQLAdmin 的「采集接口配置」里维护。系统已预置：
@@ -163,6 +163,43 @@ VITE_API_BASE_URL=http://localhost:8001/api
 3. 先实现线索库、导入/采集、外呼任务这 3 条主流程。
 4. 再接平台私信、意向客户池、AI 学习中心。
 5. 最后补声音档案、报表、系统设置、权限和审计。
+
+## UC100 实体卡外呼准备
+
+UC100 未到货前，后端默认使用模拟电话网关，可以先开发任务、队列、记录、重拨和人工接管前置流程。到货后再按 `docs/UC100_OUTBOUND_SETUP.md` 接入 Asterisk/UC100。
+
+模拟模式：
+
+```env
+TELEPHONY_GATEWAY_MODE=simulator
+OUTBOUND_QUEUE_ENABLED=false
+```
+
+Redis worker 测试：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.workers.outbound_worker --once
+```
+
+查看当前电话网关配置：
+
+```text
+GET /api/outbound/telephony/config
+```
+
+UC100/Asterisk 对接预检：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.tools.uc100_preflight --phone 你的测试手机号
+```
+
+前端入口：AI 外呼系统 -> 实时监听 -> 真实线路接入 -> 预检线路。
+
+Asterisk/UC100 配置样例见 `docs/UC100_ASTERISK_SNIPPETS.md`。
 
 ## 数据库迁移
 

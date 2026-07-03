@@ -1,14 +1,13 @@
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from secrets import compare_digest
 
 from fastapi import FastAPI, Request
-from markupsafe import Markup
 from sqlalchemy import func, select
 from sqladmin import Admin, Flash, ModelView, action
 from sqladmin.authentication import AuthenticationBackend
 from sqladmin.forms import ModelConverter
-from sqladmin.widgets import BooleanInputWidget, FileInputWidget
+from sqladmin.widgets import BooleanInputWidget
 from starlette.responses import RedirectResponse
 from wtforms import PasswordField
 from wtforms.validators import InputRequired, Optional
@@ -18,13 +17,35 @@ from app.core.security import hash_password, verify_password
 from app.db.session import SessionLocal, engine
 from app.models.audit import AuditLog
 from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
-from app.models.lead import MerchantLead
-from app.models.task import OutreachTask
+from app.models.growth import (
+    FollowUpWorkOrder,
+    IntentCustomer,
+    IntentEvent,
+    KnowledgeBaseItem,
+    LearningExperiment,
+    LearningSuggestion,
+    VoiceCloneRecord,
+    VoiceProfile,
+    VoiceSample,
+    VoiceTrainingJob,
+    VoiceUsageRecord,
+)
 from app.models.user import AdminUser, RegistrationRequest, Role, User, UserRole
-from app.services.registration import (
-    RegistrationReviewError,
-    approve_registration_request,
-    reject_registration_request,
+from app.models.lead import MerchantLead
+from app.models.operations import ReportExport, SystemAuditLog, SystemSetting
+from app.models.task import (
+    CallRecord,
+    CallScript,
+    CommentInterceptSource,
+    CommentLeadConversion,
+    DirectMessage,
+    DirectMessageAccount,
+    DirectMessageConversation,
+    DirectMessagePlatformConfig,
+    DirectMessageTemplate,
+    OutreachTask,
+    RecallRule,
+    SocialComment,
 )
 from app.services.platform_browser import (
     BrowserSessionError,
@@ -32,12 +53,15 @@ from app.services.platform_browser import (
     open_platform_login_window,
     validate_platform_browser_session,
 )
+from app.services.registration import (
+    RegistrationReviewError,
+    approve_registration_request,
+    reject_registration_request,
+)
+
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
-
-# SQLAdmin's BooleanInputWidget misses this attribute with the current WTForms
-# version, which breaks create/edit pages for boolean model fields.
 if not hasattr(BooleanInputWidget, "validation_attrs"):
     BooleanInputWidget.validation_attrs = ["required", "disabled"]
 
@@ -50,35 +74,6 @@ class PasswordOptionalModelConverter(ModelConverter):
                 validator for validator in kwargs["validators"] if not isinstance(validator, InputRequired)
             ]
         return kwargs
-
-
-def _localized_file_input(self: FileInputWidget, field, **kwargs) -> Markup:
-    if not field.flags.required:
-        checkbox_id = f"{field.id}_checkbox"
-        checkbox_label = Markup('<label class="form-check-label" for="{}">清除</label>').format(checkbox_id)
-        checkbox_input = Markup('<input class="form-check-input" type="checkbox" id="{}" name="{}">').format(
-            checkbox_id,
-            checkbox_id,
-        )
-        checkbox = Markup('<div class="form-check">{}{}</div>').format(checkbox_input, checkbox_label)
-    else:
-        checkbox = Markup()
-
-    if field.data:
-        current_value = Markup("<p>当前文件：{}</p>").format(field.data)
-        field.flags.required = False
-        return current_value + checkbox + super(FileInputWidget, self).__call__(field, **kwargs)
-
-    return super(FileInputWidget, self).__call__(field, **kwargs)
-
-
-FileInputWidget.__call__ = _localized_file_input
-
-
-def _format_user(user: User | None) -> str:
-    if user is None:
-        return "-"
-    return user.display_name or user.username or "-"
 
 
 class AdminAuth(AuthenticationBackend):
@@ -155,31 +150,14 @@ class MerchantLeadAdmin(ModelView, model=MerchantLead):
         MerchantLead.category,
         MerchantLead.contact_name,
         MerchantLead.phone,
-        MerchantLead.owner_user,
+        MerchantLead.platform_url,
         MerchantLead.intent_score,
         MerchantLead.status,
-        MerchantLead.follow_up_status,
         MerchantLead.source,
-        MerchantLead.source_poi_id,
         MerchantLead.created_at,
-        MerchantLead.updated_at,
     ]
-    column_searchable_list = [
-        MerchantLead.name,
-        MerchantLead.phone,
-        MerchantLead.contact_name,
-        MerchantLead.city,
-        MerchantLead.address,
-        MerchantLead.platform_homepage_url,
-        MerchantLead.source_poi_id,
-    ]
-    column_sortable_list = [
-        MerchantLead.created_at,
-        MerchantLead.updated_at,
-        MerchantLead.intent_score,
-        MerchantLead.city,
-        MerchantLead.next_follow_up_at,
-    ]
+    column_searchable_list = [MerchantLead.name, MerchantLead.phone, MerchantLead.contact_name, MerchantLead.city]
+    column_sortable_list = [MerchantLead.created_at, MerchantLead.intent_score, MerchantLead.city]
     column_default_sort = [(MerchantLead.created_at, True)]
     column_labels = {
         MerchantLead.name: "商家名称",
@@ -188,413 +166,11 @@ class MerchantLeadAdmin(ModelView, model=MerchantLead):
         MerchantLead.category: "品类",
         MerchantLead.phone: "电话",
         MerchantLead.contact_name: "联系人",
-        MerchantLead.contact_title: "联系人职务",
-        MerchantLead.wechat_id: "微信号",
-        MerchantLead.platform_homepage_url: "平台主页",
-        MerchantLead.source_poi_id: "来源编号",
-        MerchantLead.province: "省份",
-        MerchantLead.district: "区县",
-        MerchantLead.address: "地址",
-        MerchantLead.longitude: "经度",
-        MerchantLead.latitude: "纬度",
+        MerchantLead.platform_url: "平台店铺URL",
         MerchantLead.source: "来源",
         MerchantLead.intent_score: "意向分",
         MerchantLead.status: "状态",
-        MerchantLead.follow_up_status: "跟进状态",
-        MerchantLead.remark: "备注",
-        MerchantLead.owner_user_id: "负责人",
-        MerchantLead.owner_user: "负责人",
-        MerchantLead.created_by_user_id: "创建人",
-        MerchantLead.created_by_user: "创建人",
-        MerchantLead.last_contact_at: "最近联系时间",
-        MerchantLead.next_follow_up_at: "下次跟进时间",
         MerchantLead.created_at: "创建时间",
-        MerchantLead.updated_at: "更新时间",
-    }
-    column_formatters = {
-        MerchantLead.owner_user: lambda model, _: _format_user(model.owner_user),
-        MerchantLead.created_by_user: lambda model, _: _format_user(model.created_by_user),
-    }
-    column_formatters_detail = column_formatters
-
-
-class LeadProviderConfigAdmin(ModelView, model=LeadProviderConfig):
-    name = "接口配置"
-    name_plural = "采集接口配置"
-    icon = "fa-solid fa-key"
-
-    column_list = [
-        LeadProviderConfig.name,
-        LeadProviderConfig.provider,
-        LeadProviderConfig.enabled,
-        LeadProviderConfig.daily_limit,
-        LeadProviderConfig.qps_limit,
-        LeadProviderConfig.updated_at,
-    ]
-    column_searchable_list = [LeadProviderConfig.name, LeadProviderConfig.provider, LeadProviderConfig.remark]
-    column_sortable_list = [LeadProviderConfig.updated_at, LeadProviderConfig.provider]
-    column_default_sort = [(LeadProviderConfig.updated_at, True)]
-    column_details_exclude_list = [LeadProviderConfig.api_key, LeadProviderConfig.secret_key]
-    form_overrides = {
-        "api_key": PasswordField,
-        "secret_key": PasswordField,
-    }
-    form_widget_args = {
-        "api_key": {
-            "autocomplete": "new-password",
-            "placeholder": "编辑时留空表示不修改",
-        },
-        "secret_key": {
-            "autocomplete": "new-password",
-            "placeholder": "没有则留空；编辑时留空表示不修改",
-        },
-    }
-    form_args = {
-        "api_key": {
-            "label": "访问密钥",
-            "description": "地图平台填写访问密钥；平台公开页面采集来源可留空。",
-            "validators": [Optional()],
-        },
-        "secret_key": {
-            "label": "签名密钥",
-            "description": "百度如果启用签名校验可填写；其他来源没有则留空。",
-            "validators": [Optional()],
-        },
-    }
-    column_labels = {
-        LeadProviderConfig.provider: "平台编码",
-        LeadProviderConfig.name: "平台名称",
-        LeadProviderConfig.api_key: "访问密钥",
-        LeadProviderConfig.secret_key: "签名密钥",
-        LeadProviderConfig.service_url: "接口地址",
-        LeadProviderConfig.enabled: "启用",
-        LeadProviderConfig.daily_limit: "日限额",
-        LeadProviderConfig.qps_limit: "每秒限额",
-        LeadProviderConfig.remark: "备注",
-        LeadProviderConfig.created_at: "创建时间",
-        LeadProviderConfig.updated_at: "更新时间",
-    }
-
-    async def on_model_change(self, data: dict, model: LeadProviderConfig, is_created: bool, request: Request) -> None:
-        if not is_created:
-            if not data.get("api_key"):
-                data["api_key"] = model.api_key
-            if not data.get("secret_key"):
-                data["secret_key"] = model.secret_key
-
-
-class PlatformBrowserSessionAdmin(ModelView, model=PlatformBrowserSession):
-    name = "浏览器登录态"
-    name_plural = "平台浏览器登录态"
-    icon = "fa-solid fa-desktop"
-
-    can_create = False
-    can_delete = False
-    can_edit = False
-
-    column_list = [
-        PlatformBrowserSession.name,
-        PlatformBrowserSession.provider,
-        PlatformBrowserSession.status,
-        PlatformBrowserSession.login_process_id,
-        PlatformBrowserSession.last_login_started_at,
-        PlatformBrowserSession.last_login_finished_at,
-        PlatformBrowserSession.last_validated_at,
-        PlatformBrowserSession.updated_at,
-    ]
-    column_searchable_list = [
-        PlatformBrowserSession.name,
-        PlatformBrowserSession.provider,
-        PlatformBrowserSession.status,
-        PlatformBrowserSession.last_error,
-        PlatformBrowserSession.note,
-    ]
-    column_sortable_list = [
-        PlatformBrowserSession.updated_at,
-        PlatformBrowserSession.last_validated_at,
-        PlatformBrowserSession.provider,
-    ]
-    column_default_sort = [(PlatformBrowserSession.updated_at, True)]
-    column_labels = {
-        PlatformBrowserSession.provider: "平台编码",
-        PlatformBrowserSession.name: "平台名称",
-        PlatformBrowserSession.login_url: "登录入口",
-        PlatformBrowserSession.home_url: "首页地址",
-        PlatformBrowserSession.profile_dir: "本地配置目录",
-        PlatformBrowserSession.status: "状态",
-        PlatformBrowserSession.login_process_id: "登录进程 PID",
-        PlatformBrowserSession.last_login_started_at: "最近打开窗口",
-        PlatformBrowserSession.last_login_finished_at: "最近关闭窗口",
-        PlatformBrowserSession.last_validated_at: "最近校验时间",
-        PlatformBrowserSession.last_error: "最近错误",
-        PlatformBrowserSession.note: "说明",
-        PlatformBrowserSession.created_at: "创建时间",
-        PlatformBrowserSession.updated_at: "更新时间",
-    }
-
-    def _action_redirect(self, request: Request) -> RedirectResponse:
-        return RedirectResponse(request.url_for("admin:list", identity=self.identity), status_code=302)
-
-    def _selected_ids(self, request: Request) -> list[str]:
-        return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
-
-    @action(
-        name="open-login",
-        label="打开登录窗口",
-        confirmation_message="确认打开选中平台的登录窗口？请在弹出的浏览器里手动登录，登录后直接关闭窗口。",
-        add_in_detail=True,
-        add_in_list=True,
-    )
-    async def open_login(self, request: Request) -> RedirectResponse:
-        selected_ids = self._selected_ids(request)
-        if not selected_ids:
-            Flash.warning(request, "请先选择要登录的平台")
-            return self._action_redirect(request)
-
-        opened: list[str] = []
-        errors: list[str] = []
-        for session_id in selected_ids:
-            with SessionLocal() as db:
-                session = db.get(PlatformBrowserSession, session_id)
-                if session is None:
-                    errors.append(f"未找到记录：{session_id}")
-                    continue
-                try:
-                    open_platform_login_window(db, session.provider)
-                    opened.append(session.name)
-                except BrowserSessionError as exc:
-                    errors.append(str(exc))
-
-        if opened:
-            Flash.success(request, "已打开登录窗口：" + "；".join(opened))
-        if errors:
-            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
-        return self._action_redirect(request)
-
-    @action(
-        name="validate-session",
-        label="校验登录态",
-        confirmation_message="确认校验选中平台的本地登录态？",
-        add_in_detail=True,
-        add_in_list=True,
-    )
-    async def validate_login(self, request: Request) -> RedirectResponse:
-        selected_ids = self._selected_ids(request)
-        if not selected_ids:
-            Flash.warning(request, "请先选择要校验的平台")
-            return self._action_redirect(request)
-
-        results: list[str] = []
-        for session_id in selected_ids:
-            with SessionLocal() as db:
-                session = db.get(PlatformBrowserSession, session_id)
-                if session is None:
-                    continue
-                validated = validate_platform_browser_session(db, session.provider)
-                message = validated.name + "：" + validated.status
-                if validated.last_error:
-                    message += f"（{validated.last_error}）"
-                results.append(message)
-
-        if results:
-            Flash.success(request, "；".join(results))
-        return self._action_redirect(request)
-
-    @action(
-        name="clear-session",
-        label="清空登录态",
-        confirmation_message="确认删除选中平台的本地登录态目录？下次使用前需要重新登录。",
-        add_in_detail=True,
-        add_in_list=True,
-    )
-    async def clear_login(self, request: Request) -> RedirectResponse:
-        selected_ids = self._selected_ids(request)
-        if not selected_ids:
-            Flash.warning(request, "请先选择要清空的平台")
-            return self._action_redirect(request)
-
-        cleared: list[str] = []
-        errors: list[str] = []
-        for session_id in selected_ids:
-            with SessionLocal() as db:
-                session = db.get(PlatformBrowserSession, session_id)
-                if session is None:
-                    errors.append(f"未找到记录：{session_id}")
-                    continue
-                try:
-                    clear_platform_browser_session(db, session.provider)
-                    cleared.append(session.name)
-                except BrowserSessionError as exc:
-                    errors.append(str(exc))
-
-        if cleared:
-            Flash.success(request, "已清空登录态：" + "；".join(cleared))
-        if errors:
-            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
-        return self._action_redirect(request)
-
-
-class LeadCollectionTaskAdmin(ModelView, model=LeadCollectionTask):
-    name = "采集任务"
-    name_plural = "采集任务"
-    icon = "fa-solid fa-magnifying-glass-location"
-
-    column_list = [
-        LeadCollectionTask.name,
-        LeadCollectionTask.provider,
-        LeadCollectionTask.cities,
-        LeadCollectionTask.categories,
-        LeadCollectionTask.keywords,
-        LeadCollectionTask.target_per_keyword,
-        LeadCollectionTask.status,
-        LeadCollectionTask.last_run_status,
-        LeadCollectionTask.owner_user,
-        LeadCollectionTask.created_at,
-    ]
-    column_searchable_list = [LeadCollectionTask.name, LeadCollectionTask.provider, LeadCollectionTask.status]
-    column_sortable_list = [LeadCollectionTask.created_at, LeadCollectionTask.updated_at]
-    column_default_sort = [(LeadCollectionTask.created_at, True)]
-    column_labels = {
-        LeadCollectionTask.name: "任务名称",
-        LeadCollectionTask.provider: "数据源",
-        LeadCollectionTask.cities: "城市",
-        LeadCollectionTask.categories: "品类",
-        LeadCollectionTask.keywords: "关键词",
-        LeadCollectionTask.target_per_keyword: "每组目标数",
-        LeadCollectionTask.status: "状态",
-        LeadCollectionTask.last_run_status: "最近运行",
-        LeadCollectionTask.remark: "备注",
-        LeadCollectionTask.owner_user_id: "所属用户",
-        LeadCollectionTask.owner_user: "所属用户",
-        LeadCollectionTask.created_by_user_id: "创建人",
-        LeadCollectionTask.created_by_user: "创建人",
-        LeadCollectionTask.created_at: "创建时间",
-        LeadCollectionTask.updated_at: "更新时间",
-    }
-    column_formatters = {
-        LeadCollectionTask.owner_user: lambda model, _: _format_user(model.owner_user),
-        LeadCollectionTask.created_by_user: lambda model, _: _format_user(model.created_by_user),
-    }
-    column_formatters_detail = column_formatters
-
-
-class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
-    name = "采集运行"
-    name_plural = "采集运行"
-    icon = "fa-solid fa-rotate"
-
-    can_create = False
-    can_edit = False
-    column_list = [
-        LeadCollectionRun.task_id,
-        LeadCollectionRun.provider,
-        LeadCollectionRun.status,
-        LeadCollectionRun.requested_count,
-        LeadCollectionRun.fetched_count,
-        LeadCollectionRun.inserted_count,
-        LeadCollectionRun.duplicate_count,
-        LeadCollectionRun.failed_count,
-        LeadCollectionRun.started_at,
-        LeadCollectionRun.finished_at,
-    ]
-    column_searchable_list = [LeadCollectionRun.provider, LeadCollectionRun.status, LeadCollectionRun.error_message]
-    column_sortable_list = [LeadCollectionRun.started_at, LeadCollectionRun.finished_at]
-    column_default_sort = [(LeadCollectionRun.started_at, True)]
-    column_labels = {
-        LeadCollectionRun.task_id: "任务",
-        LeadCollectionRun.provider: "数据源",
-        LeadCollectionRun.status: "状态",
-        LeadCollectionRun.requested_count: "计划请求",
-        LeadCollectionRun.fetched_count: "抓取数量",
-        LeadCollectionRun.inserted_count: "入库数量",
-        LeadCollectionRun.duplicate_count: "重复数量",
-        LeadCollectionRun.failed_count: "失败数量",
-        LeadCollectionRun.error_message: "错误信息",
-        LeadCollectionRun.started_at: "开始时间",
-        LeadCollectionRun.finished_at: "结束时间",
-    }
-
-
-class RawLeadRecordAdmin(ModelView, model=RawLeadRecord):
-    name = "原始线索"
-    name_plural = "原始线索"
-    icon = "fa-solid fa-database"
-
-    can_create = False
-    can_edit = False
-    column_list = [
-        RawLeadRecord.name,
-        RawLeadRecord.owner_user,
-        RawLeadRecord.provider,
-        RawLeadRecord.source_poi_id,
-        RawLeadRecord.city,
-        RawLeadRecord.district,
-        RawLeadRecord.category,
-        RawLeadRecord.phone,
-        RawLeadRecord.import_status,
-        RawLeadRecord.created_at,
-    ]
-    column_searchable_list = [
-        RawLeadRecord.name,
-        RawLeadRecord.source_poi_id,
-        RawLeadRecord.source_url,
-        RawLeadRecord.city,
-        RawLeadRecord.district,
-        RawLeadRecord.phone,
-        RawLeadRecord.address,
-    ]
-    column_sortable_list = [RawLeadRecord.created_at, RawLeadRecord.city]
-    column_default_sort = [(RawLeadRecord.created_at, True)]
-    column_labels = {
-        RawLeadRecord.task_id: "任务",
-        RawLeadRecord.run_id: "运行",
-        RawLeadRecord.lead_id: "正式线索",
-        RawLeadRecord.owner_user_id: "所属用户",
-        RawLeadRecord.owner_user: "所属用户",
-        RawLeadRecord.provider: "数据源",
-        RawLeadRecord.source_poi_id: "来源编号",
-        RawLeadRecord.name: "商户名称",
-        RawLeadRecord.city: "城市",
-        RawLeadRecord.district: "区县",
-        RawLeadRecord.category: "品类",
-        RawLeadRecord.phone: "电话",
-        RawLeadRecord.address: "地址",
-        RawLeadRecord.source_url: "来源页面",
-        RawLeadRecord.longitude: "经度",
-        RawLeadRecord.latitude: "纬度",
-        RawLeadRecord.import_status: "入库状态",
-        RawLeadRecord.raw_payload: "原始数据",
-        RawLeadRecord.created_at: "创建时间",
-    }
-    column_formatters = {
-        RawLeadRecord.owner_user: lambda model, _: _format_user(model.owner_user),
-    }
-    column_formatters_detail = column_formatters
-
-
-class OutreachTaskAdmin(ModelView, model=OutreachTask):
-    name = "触达任务"
-    name_plural = "触达任务"
-    icon = "fa-solid fa-phone-volume"
-
-    column_list = [
-        OutreachTask.name,
-        OutreachTask.channel,
-        OutreachTask.status,
-        OutreachTask.target_count,
-        OutreachTask.scheduled_at,
-        OutreachTask.created_at,
-    ]
-    column_searchable_list = [OutreachTask.name, OutreachTask.channel, OutreachTask.status]
-    column_sortable_list = [OutreachTask.created_at, OutreachTask.scheduled_at, OutreachTask.target_count]
-    column_default_sort = [(OutreachTask.created_at, True)]
-    column_labels = {
-        OutreachTask.name: "任务名称",
-        OutreachTask.channel: "触达方式",
-        OutreachTask.status: "状态",
-        OutreachTask.target_count: "目标数量",
-        OutreachTask.scheduled_at: "预约时间",
-        OutreachTask.created_at: "创建时间",
     }
 
 
@@ -613,7 +189,7 @@ class UserAdmin(ModelView, model=User):
         User.last_login_at,
         User.created_at,
     ]
-    column_searchable_list = [User.username, User.display_name, User.email, User.phone]
+    column_searchable_list = [User.username, User.display_name, User.phone, User.email]
     column_sortable_list = [User.created_at, User.last_login_at, User.username]
     column_default_sort = [(User.created_at, True)]
     column_details_exclude_list = [User.password_hash]
@@ -859,14 +435,1108 @@ class RegistrationRequestAdmin(ModelView, model=RegistrationRequest):
         return self._action_redirect(request)
 
 
-class AuditLogAdmin(ModelView, model=AuditLog):
-    name = "审计日志"
-    name_plural = "审计日志"
+class LeadProviderConfigAdmin(ModelView, model=LeadProviderConfig):
+    name = "接口配置"
+    name_plural = "采集接口配置"
+    icon = "fa-solid fa-key"
+
+    column_list = [
+        LeadProviderConfig.name,
+        LeadProviderConfig.provider,
+        LeadProviderConfig.enabled,
+        LeadProviderConfig.daily_limit,
+        LeadProviderConfig.qps_limit,
+        LeadProviderConfig.updated_at,
+    ]
+    column_searchable_list = [LeadProviderConfig.name, LeadProviderConfig.provider, LeadProviderConfig.remark]
+    column_sortable_list = [LeadProviderConfig.updated_at, LeadProviderConfig.provider]
+    column_default_sort = [(LeadProviderConfig.updated_at, True)]
+    form_widget_args = {
+        "api_key": {
+            "autocomplete": "off",
+            "placeholder": "编辑时留空表示不修改",
+        },
+        "secret_key": {
+            "autocomplete": "off",
+            "placeholder": "没有则留空；编辑时留空表示不修改",
+        },
+    }
+    form_args = {
+        "api_key": {
+            "label": "访问密钥",
+            "description": "地图平台填写访问密钥；平台公开页面采集来源可留空。",
+            "validators": [Optional()],
+        },
+        "secret_key": {
+            "label": "签名密钥",
+            "description": "百度如果启用签名校验可填写；其他来源没有则留空。",
+            "validators": [Optional()],
+        },
+    }
+    column_labels = {
+        LeadProviderConfig.provider: "平台编码",
+        LeadProviderConfig.name: "平台名称",
+        LeadProviderConfig.api_key: "访问密钥",
+        LeadProviderConfig.secret_key: "签名密钥",
+        LeadProviderConfig.service_url: "接口地址",
+        LeadProviderConfig.enabled: "启用",
+        LeadProviderConfig.daily_limit: "日限额",
+        LeadProviderConfig.qps_limit: "QPS",
+        LeadProviderConfig.remark: "备注",
+        LeadProviderConfig.created_at: "创建时间",
+        LeadProviderConfig.updated_at: "更新时间",
+    }
+
+    async def on_model_change(
+        self,
+        data: dict,
+        model: LeadProviderConfig,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        if not is_created:
+            if not data.get("api_key"):
+                data["api_key"] = model.api_key
+            if not data.get("secret_key"):
+                data["secret_key"] = model.secret_key
+
+
+class LeadCollectionTaskAdmin(ModelView, model=LeadCollectionTask):
+    name = "采集任务"
+    name_plural = "采集任务"
+    icon = "fa-solid fa-magnifying-glass-location"
+
+    column_list = [
+        LeadCollectionTask.name,
+        LeadCollectionTask.provider,
+        LeadCollectionTask.cities,
+        LeadCollectionTask.categories,
+        LeadCollectionTask.keywords,
+        LeadCollectionTask.target_per_keyword,
+        LeadCollectionTask.status,
+        LeadCollectionTask.last_run_status,
+        LeadCollectionTask.created_at,
+    ]
+    column_searchable_list = [LeadCollectionTask.name, LeadCollectionTask.provider, LeadCollectionTask.status]
+    column_sortable_list = [LeadCollectionTask.created_at, LeadCollectionTask.updated_at]
+    column_default_sort = [(LeadCollectionTask.created_at, True)]
+
+
+class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
+    name = "采集运行"
+    name_plural = "采集运行"
+    icon = "fa-solid fa-rotate"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        LeadCollectionRun.task_id,
+        LeadCollectionRun.provider,
+        LeadCollectionRun.status,
+        LeadCollectionRun.requested_count,
+        LeadCollectionRun.fetched_count,
+        LeadCollectionRun.inserted_count,
+        LeadCollectionRun.duplicate_count,
+        LeadCollectionRun.failed_count,
+        LeadCollectionRun.started_at,
+        LeadCollectionRun.finished_at,
+    ]
+    column_searchable_list = [LeadCollectionRun.provider, LeadCollectionRun.status, LeadCollectionRun.error_message]
+    column_sortable_list = [LeadCollectionRun.started_at, LeadCollectionRun.finished_at]
+    column_default_sort = [(LeadCollectionRun.started_at, True)]
+
+
+class RawLeadRecordAdmin(ModelView, model=RawLeadRecord):
+    name = "原始线索"
+    name_plural = "原始采集线索"
+    icon = "fa-solid fa-database"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        RawLeadRecord.name,
+        RawLeadRecord.provider,
+        RawLeadRecord.source_poi_id,
+        RawLeadRecord.city,
+        RawLeadRecord.category,
+        RawLeadRecord.phone,
+        RawLeadRecord.import_status,
+        RawLeadRecord.created_at,
+    ]
+    column_searchable_list = [RawLeadRecord.name, RawLeadRecord.source_poi_id, RawLeadRecord.city, RawLeadRecord.phone]
+    column_sortable_list = [RawLeadRecord.created_at, RawLeadRecord.city]
+    column_default_sort = [(RawLeadRecord.created_at, True)]
+
+
+class PlatformBrowserSessionAdmin(ModelView, model=PlatformBrowserSession):
+    name = "浏览器登录态"
+    name_plural = "平台浏览器登录态"
+    icon = "fa-solid fa-desktop"
+
+    can_create = False
+    can_delete = False
+    can_edit = False
+    column_list = [
+        PlatformBrowserSession.name,
+        PlatformBrowserSession.provider,
+        PlatformBrowserSession.status,
+        PlatformBrowserSession.login_process_id,
+        PlatformBrowserSession.last_login_started_at,
+        PlatformBrowserSession.last_login_finished_at,
+        PlatformBrowserSession.last_validated_at,
+        PlatformBrowserSession.updated_at,
+    ]
+    column_searchable_list = [
+        PlatformBrowserSession.name,
+        PlatformBrowserSession.provider,
+        PlatformBrowserSession.status,
+        PlatformBrowserSession.last_error,
+        PlatformBrowserSession.note,
+    ]
+    column_sortable_list = [
+        PlatformBrowserSession.updated_at,
+        PlatformBrowserSession.last_validated_at,
+        PlatformBrowserSession.provider,
+    ]
+    column_default_sort = [(PlatformBrowserSession.updated_at, True)]
+    column_labels = {
+        PlatformBrowserSession.provider: "平台编码",
+        PlatformBrowserSession.name: "平台名称",
+        PlatformBrowserSession.login_url: "登录入口",
+        PlatformBrowserSession.home_url: "首页地址",
+        PlatformBrowserSession.profile_dir: "本地配置目录",
+        PlatformBrowserSession.status: "状态",
+        PlatformBrowserSession.login_process_id: "登录进程 PID",
+        PlatformBrowserSession.last_login_started_at: "最近打开窗口",
+        PlatformBrowserSession.last_login_finished_at: "最近关闭窗口",
+        PlatformBrowserSession.last_validated_at: "最近校验时间",
+        PlatformBrowserSession.last_error: "最近错误",
+        PlatformBrowserSession.note: "说明",
+        PlatformBrowserSession.created_at: "创建时间",
+        PlatformBrowserSession.updated_at: "更新时间",
+    }
+
+    def _action_redirect(self, request: Request) -> RedirectResponse:
+        return RedirectResponse(request.url_for("admin:list", identity=self.identity), status_code=302)
+
+    def _selected_ids(self, request: Request) -> list[str]:
+        return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+
+    @action(
+        name="open-login",
+        label="打开登录窗口",
+        confirmation_message="确认打开选中平台的登录窗口？请在弹出的浏览器里手动登录，登录后直接关闭窗口。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def open_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要登录的平台")
+            return self._action_redirect(request)
+
+        opened: list[str] = []
+        errors: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    errors.append(f"未找到记录：{session_id}")
+                    continue
+                try:
+                    open_platform_login_window(db, session.provider)
+                    opened.append(session.name)
+                except BrowserSessionError as exc:
+                    errors.append(str(exc))
+
+        if opened:
+            Flash.success(request, "已打开登录窗口：" + "；".join(opened))
+        if errors:
+            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+    @action(
+        name="validate-session",
+        label="校验登录态",
+        confirmation_message="确认校验选中平台的本地登录态？",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def validate_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要校验的平台")
+            return self._action_redirect(request)
+
+        results: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    continue
+                validated = validate_platform_browser_session(db, session.provider)
+                message = validated.name + "：" + validated.status
+                if validated.last_error:
+                    message += f"（{validated.last_error}）"
+                results.append(message)
+
+        if results:
+            Flash.success(request, "；".join(results))
+        return self._action_redirect(request)
+
+    @action(
+        name="clear-session",
+        label="清空登录态",
+        confirmation_message="确认删除选中平台的本地登录态目录？下次使用前需要重新登录。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def clear_login(self, request: Request) -> RedirectResponse:
+        selected_ids = self._selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要清空的平台")
+            return self._action_redirect(request)
+
+        cleared: list[str] = []
+        errors: list[str] = []
+        for session_id in selected_ids:
+            with SessionLocal() as db:
+                session = db.get(PlatformBrowserSession, session_id)
+                if session is None:
+                    errors.append(f"未找到记录：{session_id}")
+                    continue
+                try:
+                    clear_platform_browser_session(db, session.provider)
+                    cleared.append(session.name)
+                except BrowserSessionError as exc:
+                    errors.append(str(exc))
+
+        if cleared:
+            Flash.success(request, "已清空登录态：" + "；".join(cleared))
+        if errors:
+            Flash.error(request, "部分平台处理失败：" + "；".join(errors))
+        return self._action_redirect(request)
+
+
+class OutreachTaskAdmin(ModelView, model=OutreachTask):
+    name = "触达任务"
+    name_plural = "触达任务"
+    icon = "fa-solid fa-phone-volume"
+
+    column_list = [
+        OutreachTask.name,
+        OutreachTask.channel,
+        OutreachTask.status,
+        OutreachTask.target_count,
+        OutreachTask.completed_count,
+        OutreachTask.connected_count,
+        OutreachTask.intent_count,
+        OutreachTask.concurrency,
+        OutreachTask.scheduled_at,
+        OutreachTask.created_at,
+    ]
+    column_searchable_list = [OutreachTask.name, OutreachTask.channel, OutreachTask.status]
+    column_sortable_list = [OutreachTask.created_at, OutreachTask.scheduled_at, OutreachTask.target_count]
+    column_default_sort = [(OutreachTask.created_at, True)]
+    column_labels = {
+        OutreachTask.name: "任务名称",
+        OutreachTask.channel: "触达方式",
+        OutreachTask.status: "状态",
+        OutreachTask.target_count: "目标数量",
+        OutreachTask.completed_count: "完成数量",
+        OutreachTask.connected_count: "接通数量",
+        OutreachTask.intent_count: "意向数量",
+        OutreachTask.failed_count: "失败数量",
+        OutreachTask.concurrency: "并发坐席",
+        OutreachTask.script_id: "话术ID",
+        OutreachTask.scheduled_at: "预约时间",
+        OutreachTask.started_at: "开始时间",
+        OutreachTask.finished_at: "完成时间",
+        OutreachTask.created_at: "创建时间",
+    }
+
+
+class CallScriptAdmin(ModelView, model=CallScript):
+    name = "外呼话术"
+    name_plural = "外呼话术"
+    icon = "fa-solid fa-comments"
+
+    column_list = [CallScript.name, CallScript.is_active, CallScript.created_at]
+    column_searchable_list = [CallScript.name, CallScript.opening, CallScript.qualification]
+    column_sortable_list = [CallScript.created_at, CallScript.is_active]
+    column_labels = {
+        CallScript.name: "话术名称",
+        CallScript.opening: "开场白",
+        CallScript.qualification: "筛选问题",
+        CallScript.objection: "异议处理",
+        CallScript.closing: "收尾动作",
+        CallScript.is_active: "启用",
+        CallScript.created_at: "创建时间",
+    }
+
+
+class CallRecordAdmin(ModelView, model=CallRecord):
+    name = "通话记录"
+    name_plural = "通话记录"
+    icon = "fa-solid fa-headset"
+
+    column_list = [
+        CallRecord.merchant_name,
+        CallRecord.phone,
+        CallRecord.ai_seat,
+        CallRecord.duration_seconds,
+        CallRecord.intent_level,
+        CallRecord.current_node,
+        CallRecord.outcome,
+        CallRecord.gateway_status,
+        CallRecord.need_handoff,
+        CallRecord.recall_at,
+        CallRecord.created_at,
+    ]
+    column_searchable_list = [CallRecord.merchant_name, CallRecord.phone, CallRecord.ai_seat, CallRecord.outcome]
+    column_sortable_list = [CallRecord.created_at, CallRecord.duration_seconds, CallRecord.intent_level]
+    column_default_sort = [(CallRecord.created_at, True)]
+    column_labels = {
+        CallRecord.merchant_name: "商家",
+        CallRecord.phone: "电话",
+        CallRecord.ai_seat: "AI坐席",
+        CallRecord.duration_seconds: "通话时长",
+        CallRecord.intent_level: "意向等级",
+        CallRecord.current_node: "当前节点",
+        CallRecord.outcome: "结果",
+        CallRecord.transcript: "转写内容",
+        CallRecord.gateway_call_id: "网关通话ID",
+        CallRecord.gateway_status: "网关状态",
+        CallRecord.raw_payload: "网关原始事件",
+        CallRecord.need_handoff: "需人工接管",
+        CallRecord.recall_at: "重拨时间",
+        CallRecord.created_at: "创建时间",
+    }
+
+
+class RecallRuleAdmin(ModelView, model=RecallRule):
+    name = "重拨规则"
+    name_plural = "重拨规则"
+    icon = "fa-solid fa-clock-rotate-left"
+
+    column_list = [
+        RecallRule.name,
+        RecallRule.no_answer_interval_minutes,
+        RecallRule.busy_interval_minutes,
+        RecallRule.max_attempts,
+        RecallRule.quiet_start,
+        RecallRule.quiet_end,
+        RecallRule.enabled,
+    ]
+    column_labels = {
+        RecallRule.name: "规则名称",
+        RecallRule.no_answer_interval_minutes: "未接间隔分钟",
+        RecallRule.busy_interval_minutes: "忙线间隔分钟",
+        RecallRule.max_attempts: "最大次数",
+        RecallRule.quiet_start: "勿扰开始",
+        RecallRule.quiet_end: "勿扰结束",
+        RecallRule.enabled: "启用",
+    }
+
+
+class DirectMessageAccountAdmin(ModelView, model=DirectMessageAccount):
+    name = "平台个人号"
+    name_plural = "平台私信个人号"
+    icon = "fa-solid fa-user-shield"
+
+    column_list = [
+        DirectMessageAccount.platform,
+        DirectMessageAccount.account_name,
+        DirectMessageAccount.login_label,
+        DirectMessageAccount.status,
+        DirectMessageAccount.session_status,
+        DirectMessageAccount.risk_status,
+        DirectMessageAccount.browser_profile_key,
+        DirectMessageAccount.daily_limit,
+        DirectMessageAccount.sent_today,
+        DirectMessageAccount.last_sent_at,
+        DirectMessageAccount.last_sync_at,
+    ]
+    column_searchable_list = [
+        DirectMessageAccount.platform,
+        DirectMessageAccount.account_name,
+        DirectMessageAccount.status,
+        DirectMessageAccount.session_status,
+        DirectMessageAccount.risk_status,
+    ]
+    column_sortable_list = [DirectMessageAccount.created_at, DirectMessageAccount.sent_today, DirectMessageAccount.daily_limit]
+    column_labels = {
+        DirectMessageAccount.platform: "平台",
+        DirectMessageAccount.account_name: "个人号名称",
+        DirectMessageAccount.login_label: "个人号标识",
+        DirectMessageAccount.status: "状态",
+        DirectMessageAccount.browser_profile_key: "浏览器Profile",
+        DirectMessageAccount.browser_profile_path: "Profile路径",
+        DirectMessageAccount.session_status: "登录态",
+        DirectMessageAccount.risk_status: "风险状态",
+        DirectMessageAccount.daily_limit: "日上限",
+        DirectMessageAccount.sent_today: "今日已发",
+        DirectMessageAccount.min_send_interval_seconds: "最小发送间隔秒",
+        DirectMessageAccount.cooldown_until: "冷却至",
+        DirectMessageAccount.last_sent_at: "最近发送",
+        DirectMessageAccount.last_sync_at: "最近同步",
+        DirectMessageAccount.last_login_check_at: "最近登录检测",
+        DirectMessageAccount.last_error: "错误原因",
+        DirectMessageAccount.created_at: "创建时间",
+    }
+
+
+class DirectMessagePlatformConfigAdmin(ModelView, model=DirectMessagePlatformConfig):
+    name = "平台选择器"
+    name_plural = "平台私信选择器"
+    icon = "fa-solid fa-code"
+
+    column_list = [
+        DirectMessagePlatformConfig.platform,
+        DirectMessagePlatformConfig.home_url,
+        DirectMessagePlatformConfig.inbox_url,
+        DirectMessagePlatformConfig.enabled,
+        DirectMessagePlatformConfig.created_at,
+    ]
+    column_searchable_list = [DirectMessagePlatformConfig.platform, DirectMessagePlatformConfig.home_url]
+    column_sortable_list = [DirectMessagePlatformConfig.created_at, DirectMessagePlatformConfig.enabled]
+    column_labels = {
+        DirectMessagePlatformConfig.platform: "平台",
+        DirectMessagePlatformConfig.home_url: "首页",
+        DirectMessagePlatformConfig.inbox_url: "收件箱",
+        DirectMessagePlatformConfig.merchant_search_url: "商家搜索页",
+        DirectMessagePlatformConfig.login_check_selector: "登录态选择器",
+        DirectMessagePlatformConfig.risk_check_selector: "风控选择器",
+        DirectMessagePlatformConfig.merchant_link_selector: "商家结果选择器",
+        DirectMessagePlatformConfig.message_button_selector: "私信按钮选择器",
+        DirectMessagePlatformConfig.input_selector: "输入框选择器",
+        DirectMessagePlatformConfig.send_button_selector: "发送按钮选择器",
+        DirectMessagePlatformConfig.sent_success_selector: "发送成功选择器",
+        DirectMessagePlatformConfig.unread_selector: "未读选择器",
+        DirectMessagePlatformConfig.conversation_item_selector: "会话条目选择器",
+        DirectMessagePlatformConfig.conversation_title_selector: "会话标题选择器",
+        DirectMessagePlatformConfig.message_text_selector: "消息文本选择器",
+        DirectMessagePlatformConfig.enabled: "启用",
+        DirectMessagePlatformConfig.created_at: "创建时间",
+    }
+
+
+class DirectMessageTemplateAdmin(ModelView, model=DirectMessageTemplate):
+    name = "私信模板"
+    name_plural = "私信模板"
+    icon = "fa-solid fa-message"
+
+    column_list = [
+        DirectMessageTemplate.name,
+        DirectMessageTemplate.platform,
+        DirectMessageTemplate.is_active,
+        DirectMessageTemplate.created_at,
+    ]
+    column_searchable_list = [DirectMessageTemplate.name, DirectMessageTemplate.platform, DirectMessageTemplate.content]
+    column_sortable_list = [DirectMessageTemplate.created_at, DirectMessageTemplate.is_active]
+    column_labels = {
+        DirectMessageTemplate.name: "模板名称",
+        DirectMessageTemplate.platform: "适用平台",
+        DirectMessageTemplate.content: "内容",
+        DirectMessageTemplate.is_active: "启用",
+        DirectMessageTemplate.created_at: "创建时间",
+    }
+
+
+class DirectMessageConversationAdmin(ModelView, model=DirectMessageConversation):
+    name = "私信会话"
+    name_plural = "私信会话"
+    icon = "fa-solid fa-comments"
+
+    column_list = [
+        DirectMessageConversation.platform,
+        DirectMessageConversation.merchant_name,
+        DirectMessageConversation.status,
+        DirectMessageConversation.intent_level,
+        DirectMessageConversation.need_handoff,
+        DirectMessageConversation.last_message_at,
+        DirectMessageConversation.created_at,
+    ]
+    column_searchable_list = [
+        DirectMessageConversation.platform,
+        DirectMessageConversation.merchant_name,
+        DirectMessageConversation.status,
+    ]
+    column_sortable_list = [DirectMessageConversation.created_at, DirectMessageConversation.last_message_at]
+    column_default_sort = [(DirectMessageConversation.created_at, True)]
+    column_labels = {
+        DirectMessageConversation.platform: "平台",
+        DirectMessageConversation.merchant_name: "商家",
+        DirectMessageConversation.status: "状态",
+        DirectMessageConversation.intent_level: "意向等级",
+        DirectMessageConversation.last_message: "最后消息",
+        DirectMessageConversation.need_handoff: "需接管",
+        DirectMessageConversation.last_message_at: "最后消息时间",
+        DirectMessageConversation.created_at: "创建时间",
+    }
+
+
+class DirectMessageAdmin(ModelView, model=DirectMessage):
+    name = "私信消息"
+    name_plural = "私信消息"
+    icon = "fa-solid fa-envelope-open-text"
+
+    column_list = [
+        DirectMessage.direction,
+        DirectMessage.status,
+        DirectMessage.external_message_id,
+        DirectMessage.created_at,
+    ]
+    column_searchable_list = [DirectMessage.direction, DirectMessage.status, DirectMessage.content]
+    column_sortable_list = [DirectMessage.created_at]
+    column_default_sort = [(DirectMessage.created_at, True)]
+    column_labels = {
+        DirectMessage.direction: "方向",
+        DirectMessage.content: "内容",
+        DirectMessage.status: "状态",
+        DirectMessage.external_message_id: "平台消息ID",
+        DirectMessage.raw_payload: "原始事件",
+        DirectMessage.created_at: "创建时间",
+    }
+
+
+class CommentInterceptSourceAdmin(ModelView, model=CommentInterceptSource):
+    name = "评论截流源"
+    name_plural = "评论截流源"
+    icon = "fa-solid fa-filter"
+
+    column_list = [
+        CommentInterceptSource.platform,
+        CommentInterceptSource.source_type,
+        CommentInterceptSource.name,
+        CommentInterceptSource.sync_status,
+        CommentInterceptSource.last_sync_at,
+        CommentInterceptSource.created_at,
+    ]
+    column_searchable_list = [CommentInterceptSource.platform, CommentInterceptSource.name, CommentInterceptSource.keyword]
+    column_sortable_list = [CommentInterceptSource.created_at, CommentInterceptSource.last_sync_at]
+    column_default_sort = [(CommentInterceptSource.created_at, True)]
+    column_labels = {
+        CommentInterceptSource.platform: "平台",
+        CommentInterceptSource.source_type: "来源类型",
+        CommentInterceptSource.name: "来源名称",
+        CommentInterceptSource.keyword: "关键词",
+        CommentInterceptSource.video_url: "视频URL",
+        CommentInterceptSource.video_title: "视频标题",
+        CommentInterceptSource.owner_account_id: "归属个人号",
+        CommentInterceptSource.sync_status: "同步状态",
+        CommentInterceptSource.sync_frequency_minutes: "同步间隔分钟",
+        CommentInterceptSource.keyword_rules: "意向关键词",
+        CommentInterceptSource.auto_reply_enabled: "自动回复",
+        CommentInterceptSource.human_confirm_required: "人工确认",
+        CommentInterceptSource.last_sync_at: "最近同步",
+        CommentInterceptSource.last_error: "错误原因",
+        CommentInterceptSource.created_at: "创建时间",
+    }
+
+
+class SocialCommentAdmin(ModelView, model=SocialComment):
+    name = "截流评论"
+    name_plural = "截流评论池"
+    icon = "fa-solid fa-comment-dots"
+
+    column_list = [
+        SocialComment.platform,
+        SocialComment.author_name,
+        SocialComment.intent_level,
+        SocialComment.intent_score,
+        SocialComment.status,
+        SocialComment.risk_status,
+        SocialComment.commented_at,
+        SocialComment.created_at,
+    ]
+    column_searchable_list = [SocialComment.platform, SocialComment.author_name, SocialComment.content]
+    column_sortable_list = [SocialComment.intent_score, SocialComment.created_at, SocialComment.commented_at]
+    column_default_sort = [(SocialComment.intent_score, True)]
+    column_labels = {
+        SocialComment.source_id: "截流源",
+        SocialComment.platform: "平台",
+        SocialComment.external_comment_id: "评论ID",
+        SocialComment.video_url: "视频URL",
+        SocialComment.author_name: "评论用户",
+        SocialComment.author_profile_url: "用户主页",
+        SocialComment.content: "评论内容",
+        SocialComment.city: "城市",
+        SocialComment.category: "品类",
+        SocialComment.like_count: "点赞",
+        SocialComment.reply_count: "回复",
+        SocialComment.intent_score: "意向分",
+        SocialComment.intent_level: "意向等级",
+        SocialComment.status: "状态",
+        SocialComment.risk_status: "风险",
+        SocialComment.raw_payload: "原始数据",
+        SocialComment.commented_at: "评论时间",
+        SocialComment.created_at: "创建时间",
+    }
+
+
+class CommentLeadConversionAdmin(ModelView, model=CommentLeadConversion):
+    name = "评论转线索"
+    name_plural = "评论转线索记录"
+    icon = "fa-solid fa-arrow-right-to-bracket"
+
+    column_list = [
+        CommentLeadConversion.comment_id,
+        CommentLeadConversion.lead_id,
+        CommentLeadConversion.action,
+        CommentLeadConversion.status,
+        CommentLeadConversion.created_at,
+    ]
+    column_searchable_list = [CommentLeadConversion.action, CommentLeadConversion.status, CommentLeadConversion.note]
+    column_sortable_list = [CommentLeadConversion.created_at]
+    column_labels = {
+        CommentLeadConversion.comment_id: "评论ID",
+        CommentLeadConversion.lead_id: "线索ID",
+        CommentLeadConversion.action: "动作",
+        CommentLeadConversion.status: "状态",
+        CommentLeadConversion.note: "备注",
+        CommentLeadConversion.created_at: "创建时间",
+    }
+
+
+class IntentCustomerAdmin(ModelView, model=IntentCustomer):
+    name = "意向客户"
+    name_plural = "意向客户池"
+    icon = "fa-solid fa-user-check"
+
+    column_list = [
+        IntentCustomer.merchant_name,
+        IntentCustomer.platform,
+        IntentCustomer.city,
+        IntentCustomer.intent_level,
+        IntentCustomer.intent_score,
+        IntentCustomer.owner_name,
+        IntentCustomer.follow_status,
+        IntentCustomer.need_handoff,
+        IntentCustomer.dnc_status,
+        IntentCustomer.updated_at,
+    ]
+    column_searchable_list = [IntentCustomer.merchant_name, IntentCustomer.phone, IntentCustomer.owner_name]
+    column_sortable_list = [IntentCustomer.intent_score, IntentCustomer.updated_at]
+    column_default_sort = [(IntentCustomer.updated_at, True)]
+    column_labels = {
+        IntentCustomer.merchant_name: "商家",
+        IntentCustomer.platform: "平台",
+        IntentCustomer.city: "城市",
+        IntentCustomer.category: "品类",
+        IntentCustomer.contact_name: "联系人",
+        IntentCustomer.phone: "电话",
+        IntentCustomer.intent_level: "意向等级",
+        IntentCustomer.intent_score: "意向分",
+        IntentCustomer.source_channels: "来源渠道",
+        IntentCustomer.latest_signal: "最近信号",
+        IntentCustomer.evidence_summary: "证据摘要",
+        IntentCustomer.owner_name: "负责人",
+        IntentCustomer.follow_status: "跟进状态",
+        IntentCustomer.next_follow_at: "下次跟进",
+        IntentCustomer.need_handoff: "需人工接管",
+        IntentCustomer.dnc_status: "勿扰",
+        IntentCustomer.created_at: "创建时间",
+        IntentCustomer.updated_at: "更新时间",
+    }
+
+
+class IntentEventAdmin(ModelView, model=IntentEvent):
+    name = "意向事件"
+    name_plural = "意向证据事件"
+    icon = "fa-solid fa-timeline"
+
+    column_list = [
+        IntentEvent.channel,
+        IntentEvent.source_type,
+        IntentEvent.intent_level,
+        IntentEvent.summary,
+        IntentEvent.need_handoff,
+        IntentEvent.created_at,
+    ]
+    column_searchable_list = [IntentEvent.channel, IntentEvent.source_type, IntentEvent.summary, IntentEvent.evidence_text]
+    column_sortable_list = [IntentEvent.created_at]
+    column_default_sort = [(IntentEvent.created_at, True)]
+    column_labels = {
+        IntentEvent.customer_id: "客户ID",
+        IntentEvent.lead_id: "线索ID",
+        IntentEvent.source_type: "来源类型",
+        IntentEvent.source_record_id: "来源记录ID",
+        IntentEvent.channel: "渠道",
+        IntentEvent.intent_level: "意向等级",
+        IntentEvent.summary: "摘要",
+        IntentEvent.evidence_text: "证据内容",
+        IntentEvent.need_handoff: "需人工接管",
+        IntentEvent.created_at: "创建时间",
+    }
+
+
+class FollowUpWorkOrderAdmin(ModelView, model=FollowUpWorkOrder):
+    name = "跟进工单"
+    name_plural = "跟进工单"
+    icon = "fa-solid fa-list-check"
+
+    column_list = [
+        FollowUpWorkOrder.title,
+        FollowUpWorkOrder.owner_name,
+        FollowUpWorkOrder.status,
+        FollowUpWorkOrder.priority,
+        FollowUpWorkOrder.sla_due_at,
+        FollowUpWorkOrder.created_at,
+    ]
+    column_searchable_list = [FollowUpWorkOrder.title, FollowUpWorkOrder.owner_name, FollowUpWorkOrder.status]
+    column_sortable_list = [FollowUpWorkOrder.created_at, FollowUpWorkOrder.sla_due_at]
+    column_labels = {
+        FollowUpWorkOrder.customer_id: "客户ID",
+        FollowUpWorkOrder.title: "工单标题",
+        FollowUpWorkOrder.owner_name: "负责人",
+        FollowUpWorkOrder.status: "状态",
+        FollowUpWorkOrder.priority: "优先级",
+        FollowUpWorkOrder.sla_due_at: "SLA截止",
+        FollowUpWorkOrder.last_note: "最近记录",
+        FollowUpWorkOrder.closed_reason: "关闭原因",
+        FollowUpWorkOrder.created_at: "创建时间",
+        FollowUpWorkOrder.updated_at: "更新时间",
+    }
+
+
+class LearningSuggestionAdmin(ModelView, model=LearningSuggestion):
+    name = "AI学习建议"
+    name_plural = "AI学习建议"
+    icon = "fa-solid fa-lightbulb"
+
+    column_list = [
+        LearningSuggestion.title,
+        LearningSuggestion.target_type,
+        LearningSuggestion.status,
+        LearningSuggestion.impact_score,
+        LearningSuggestion.reviewer,
+        LearningSuggestion.created_at,
+    ]
+    column_searchable_list = [LearningSuggestion.title, LearningSuggestion.summary, LearningSuggestion.proposed_content]
+    column_sortable_list = [LearningSuggestion.created_at, LearningSuggestion.impact_score]
+    column_labels = {
+        LearningSuggestion.source_type: "来源类型",
+        LearningSuggestion.source_record_id: "来源记录ID",
+        LearningSuggestion.target_type: "作用对象",
+        LearningSuggestion.title: "标题",
+        LearningSuggestion.summary: "摘要",
+        LearningSuggestion.proposed_content: "建议内容",
+        LearningSuggestion.evidence_text: "证据",
+        LearningSuggestion.status: "状态",
+        LearningSuggestion.reviewer: "审核人",
+        LearningSuggestion.review_note: "审核意见",
+        LearningSuggestion.impact_score: "影响分",
+        LearningSuggestion.rollback_point: "回滚点",
+        LearningSuggestion.created_at: "创建时间",
+        LearningSuggestion.reviewed_at: "审核时间",
+        LearningSuggestion.published_at: "发布时间",
+    }
+
+
+class KnowledgeBaseItemAdmin(ModelView, model=KnowledgeBaseItem):
+    name = "知识库条目"
+    name_plural = "AI知识库"
+    icon = "fa-solid fa-book"
+
+    column_list = [
+        KnowledgeBaseItem.title,
+        KnowledgeBaseItem.category,
+        KnowledgeBaseItem.status,
+        KnowledgeBaseItem.version,
+        KnowledgeBaseItem.updated_at,
+    ]
+    column_searchable_list = [KnowledgeBaseItem.title, KnowledgeBaseItem.category, KnowledgeBaseItem.content]
+    column_sortable_list = [KnowledgeBaseItem.updated_at]
+    column_labels = {
+        KnowledgeBaseItem.title: "标题",
+        KnowledgeBaseItem.category: "分类",
+        KnowledgeBaseItem.content: "内容",
+        KnowledgeBaseItem.status: "状态",
+        KnowledgeBaseItem.version: "版本",
+        KnowledgeBaseItem.source_suggestion_id: "来源建议ID",
+        KnowledgeBaseItem.created_at: "创建时间",
+        KnowledgeBaseItem.updated_at: "更新时间",
+    }
+
+
+class LearningExperimentAdmin(ModelView, model=LearningExperiment):
+    name = "效果实验"
+    name_plural = "学习效果实验"
+    icon = "fa-solid fa-flask"
+
+    column_list = [
+        LearningExperiment.name,
+        LearningExperiment.target_type,
+        LearningExperiment.status,
+        LearningExperiment.sample_size,
+        LearningExperiment.success_metric,
+        LearningExperiment.created_at,
+    ]
+    column_searchable_list = [LearningExperiment.name, LearningExperiment.hypothesis, LearningExperiment.variant]
+    column_sortable_list = [LearningExperiment.created_at, LearningExperiment.sample_size]
+    column_labels = {
+        LearningExperiment.name: "实验名称",
+        LearningExperiment.target_type: "作用对象",
+        LearningExperiment.status: "状态",
+        LearningExperiment.hypothesis: "假设",
+        LearningExperiment.variant: "变量",
+        LearningExperiment.sample_size: "样本量",
+        LearningExperiment.success_metric: "成功指标",
+        LearningExperiment.result_summary: "结果摘要",
+        LearningExperiment.started_at: "开始时间",
+        LearningExperiment.ended_at: "结束时间",
+        LearningExperiment.created_at: "创建时间",
+    }
+
+
+class VoiceProfileAdmin(ModelView, model=VoiceProfile):
+    name = "声音档案"
+    name_plural = "声音档案"
+    icon = "fa-solid fa-microphone-lines"
+
+    column_list = [
+        VoiceProfile.name,
+        VoiceProfile.owner_name,
+        VoiceProfile.scenario,
+        VoiceProfile.status,
+        VoiceProfile.authorization_status,
+        VoiceProfile.sample_count,
+        VoiceProfile.updated_at,
+    ]
+    column_searchable_list = [VoiceProfile.name, VoiceProfile.owner_name, VoiceProfile.scenario]
+    column_sortable_list = [VoiceProfile.updated_at, VoiceProfile.sample_count]
+    column_labels = {
+        VoiceProfile.name: "档案名称",
+        VoiceProfile.owner_name: "授权人",
+        VoiceProfile.scenario: "使用场景",
+        VoiceProfile.status: "状态",
+        VoiceProfile.authorization_status: "授权状态",
+        VoiceProfile.sample_count: "样本数",
+        VoiceProfile.fallback_voice: "回退音色",
+        VoiceProfile.consent_material: "授权材料",
+        VoiceProfile.risk_note: "风险备注",
+        VoiceProfile.created_at: "创建时间",
+        VoiceProfile.updated_at: "更新时间",
+    }
+
+
+class VoiceTrainingJobAdmin(ModelView, model=VoiceTrainingJob):
+    name = "音色复刻"
+    name_plural = "音色复刻任务"
+    icon = "fa-solid fa-wave-square"
+
+    column_list = [
+        VoiceTrainingJob.profile_id,
+        VoiceTrainingJob.status,
+        VoiceTrainingJob.progress,
+        VoiceTrainingJob.engine,
+        VoiceTrainingJob.sample_minutes,
+        VoiceTrainingJob.created_at,
+    ]
+    column_searchable_list = [VoiceTrainingJob.status, VoiceTrainingJob.engine, VoiceTrainingJob.message]
+    column_sortable_list = [VoiceTrainingJob.created_at, VoiceTrainingJob.progress]
+    column_labels = {
+        VoiceTrainingJob.profile_id: "声音档案ID",
+        VoiceTrainingJob.status: "状态",
+        VoiceTrainingJob.progress: "进度",
+        VoiceTrainingJob.engine: "训练引擎",
+        VoiceTrainingJob.sample_minutes: "样本分钟",
+        VoiceTrainingJob.message: "消息",
+        VoiceTrainingJob.created_at: "创建时间",
+        VoiceTrainingJob.started_at: "开始时间",
+        VoiceTrainingJob.finished_at: "完成时间",
+    }
+
+
+class VoiceSampleAdmin(ModelView, model=VoiceSample):
+    name = "声音样本"
+    name_plural = "声音样本"
+    icon = "fa-solid fa-file-audio"
+
+    column_list = [
+        VoiceSample.profile_id,
+        VoiceSample.file_name,
+        VoiceSample.content_type,
+        VoiceSample.size_bytes,
+        VoiceSample.duration_seconds,
+        VoiceSample.quality_status,
+        VoiceSample.created_at,
+    ]
+    column_searchable_list = [VoiceSample.file_name, VoiceSample.quality_status, VoiceSample.uploaded_by]
+    column_sortable_list = [VoiceSample.created_at, VoiceSample.size_bytes, VoiceSample.duration_seconds]
+    column_labels = {
+        VoiceSample.profile_id: "声音档案ID",
+        VoiceSample.file_name: "文件名",
+        VoiceSample.content_type: "文件类型",
+        VoiceSample.storage_path: "本地存储路径",
+        VoiceSample.size_bytes: "文件大小",
+        VoiceSample.duration_seconds: "样本时长",
+        VoiceSample.quality_status: "质检状态",
+        VoiceSample.transcript: "转写文本",
+        VoiceSample.uploaded_by: "上传人",
+        VoiceSample.created_at: "上传时间",
+    }
+
+
+class VoiceCloneRecordAdmin(ModelView, model=VoiceCloneRecord):
+    name = "克隆记录"
+    name_plural = "克隆语音记录"
+    icon = "fa-solid fa-record-vinyl"
+
+    column_list = [
+        VoiceCloneRecord.cloned_voice_name,
+        VoiceCloneRecord.status,
+        VoiceCloneRecord.engine,
+        VoiceCloneRecord.external_voice_id,
+        VoiceCloneRecord.sample_count,
+        VoiceCloneRecord.sample_minutes,
+        VoiceCloneRecord.created_at,
+    ]
+    column_searchable_list = [VoiceCloneRecord.cloned_voice_name, VoiceCloneRecord.status, VoiceCloneRecord.engine]
+    column_sortable_list = [VoiceCloneRecord.created_at, VoiceCloneRecord.sample_count]
+    column_labels = {
+        VoiceCloneRecord.profile_id: "声音档案ID",
+        VoiceCloneRecord.training_job_id: "训练任务ID",
+        VoiceCloneRecord.cloned_voice_name: "克隆音色",
+        VoiceCloneRecord.engine: "克隆引擎",
+        VoiceCloneRecord.external_voice_id: "外部音色ID",
+        VoiceCloneRecord.preview_audio_path: "试听音频路径",
+        VoiceCloneRecord.status: "状态",
+        VoiceCloneRecord.sample_count: "样本数",
+        VoiceCloneRecord.sample_minutes: "样本分钟",
+        VoiceCloneRecord.result: "结果",
+        VoiceCloneRecord.created_at: "创建时间",
+        VoiceCloneRecord.completed_at: "完成时间",
+    }
+
+
+class VoiceUsageRecordAdmin(ModelView, model=VoiceUsageRecord):
+    name = "声音使用记录"
+    name_plural = "声音使用记录"
+    icon = "fa-solid fa-clock"
+
+    column_list = [
+        VoiceUsageRecord.merchant_name,
+        VoiceUsageRecord.scenario,
+        VoiceUsageRecord.result,
+        VoiceUsageRecord.fallback_used,
+        VoiceUsageRecord.created_at,
+    ]
+    column_searchable_list = [VoiceUsageRecord.merchant_name, VoiceUsageRecord.scenario, VoiceUsageRecord.result]
+    column_sortable_list = [VoiceUsageRecord.created_at]
+    column_labels = {
+        VoiceUsageRecord.profile_id: "声音档案ID",
+        VoiceUsageRecord.task_id: "任务ID",
+        VoiceUsageRecord.merchant_name: "商家",
+        VoiceUsageRecord.scenario: "场景",
+        VoiceUsageRecord.result: "结果",
+        VoiceUsageRecord.fallback_used: "使用回退",
+        VoiceUsageRecord.created_at: "创建时间",
+    }
+
+
+class ReportExportAdmin(ModelView, model=ReportExport):
+    name = "报表导出"
+    name_plural = "报表导出任务"
+    icon = "fa-solid fa-file-export"
+
+    column_list = [
+        ReportExport.report_type,
+        ReportExport.date_range,
+        ReportExport.file_format,
+        ReportExport.requester,
+        ReportExport.status,
+        ReportExport.row_count,
+        ReportExport.sensitive_fields_included,
+        ReportExport.created_at,
+    ]
+    column_searchable_list = [ReportExport.report_type, ReportExport.requester, ReportExport.status]
+    column_sortable_list = [ReportExport.created_at, ReportExport.row_count]
+    column_default_sort = [(ReportExport.created_at, True)]
+    column_labels = {
+        ReportExport.report_type: "报表类型",
+        ReportExport.date_range: "时间范围",
+        ReportExport.file_format: "格式",
+        ReportExport.requester: "申请人",
+        ReportExport.status: "状态",
+        ReportExport.download_url: "下载地址",
+        ReportExport.row_count: "行数",
+        ReportExport.sensitive_fields_included: "包含敏感字段",
+        ReportExport.created_at: "创建时间",
+        ReportExport.finished_at: "完成时间",
+    }
+
+
+class SystemSettingAdmin(ModelView, model=SystemSetting):
+    name = "系统设置"
+    name_plural = "系统设置"
+    icon = "fa-solid fa-sliders"
+
+    column_list = [
+        SystemSetting.group_key,
+        SystemSetting.item_key,
+        SystemSetting.label,
+        SystemSetting.value_type,
+        SystemSetting.status,
+        SystemSetting.sensitive,
+        SystemSetting.updated_by,
+        SystemSetting.updated_at,
+    ]
+    column_searchable_list = [SystemSetting.group_key, SystemSetting.item_key, SystemSetting.label, SystemSetting.value]
+    column_sortable_list = [SystemSetting.group_key, SystemSetting.updated_at]
+    column_labels = {
+        SystemSetting.group_key: "分组",
+        SystemSetting.item_key: "配置键",
+        SystemSetting.label: "名称",
+        SystemSetting.value: "配置值",
+        SystemSetting.value_type: "值类型",
+        SystemSetting.status: "状态",
+        SystemSetting.description: "说明",
+        SystemSetting.sensitive: "敏感",
+        SystemSetting.updated_by: "更新人",
+        SystemSetting.created_at: "创建时间",
+        SystemSetting.updated_at: "更新时间",
+    }
+
+
+class SystemAuditLogAdmin(ModelView, model=SystemAuditLog):
+    name = "系统审计"
+    name_plural = "系统审计"
     icon = "fa-solid fa-shield-halved"
+
+    can_create = False
+    can_edit = False
+    column_list = [
+        SystemAuditLog.actor,
+        SystemAuditLog.action,
+        SystemAuditLog.target_type,
+        SystemAuditLog.summary,
+        SystemAuditLog.created_at,
+    ]
+    column_searchable_list = [SystemAuditLog.actor, SystemAuditLog.action, SystemAuditLog.summary]
+    column_sortable_list = [SystemAuditLog.created_at]
+    column_default_sort = [(SystemAuditLog.created_at, True)]
+    column_labels = {
+        SystemAuditLog.actor: "操作者",
+        SystemAuditLog.action: "动作",
+        SystemAuditLog.target_type: "对象类型",
+        SystemAuditLog.target_id: "对象ID",
+        SystemAuditLog.summary: "摘要",
+        SystemAuditLog.before_value: "变更前",
+        SystemAuditLog.after_value: "变更后",
+        SystemAuditLog.created_at: "时间",
+    }
+
+
+class AuditLogAdmin(ModelView, model=AuditLog):
+    name = "客户审计"
+    name_plural = "客户审计日志"
+    icon = "fa-solid fa-shield-halved"
+
     can_create = False
     can_edit = False
     can_delete = False
-
     column_list = [
         AuditLog.action,
         AuditLog.resource_type,
@@ -907,16 +1577,41 @@ def setup_admin(app: FastAPI) -> None:
         templates_dir=str(TEMPLATES_DIR),
         authentication_backend=authentication_backend,
     )
-    admin.add_view(MerchantLeadAdmin)
+    admin.add_view(AdminUserAdmin)
+    admin.add_view(UserAdmin)
+    admin.add_view(RoleAdmin)
+    admin.add_view(UserRoleAdmin)
+    admin.add_view(RegistrationRequestAdmin)
+    admin.add_view(AuditLogAdmin)
     admin.add_view(LeadProviderConfigAdmin)
-    admin.add_view(PlatformBrowserSessionAdmin)
     admin.add_view(LeadCollectionTaskAdmin)
     admin.add_view(LeadCollectionRunAdmin)
     admin.add_view(RawLeadRecordAdmin)
+    admin.add_view(PlatformBrowserSessionAdmin)
+    admin.add_view(MerchantLeadAdmin)
     admin.add_view(OutreachTaskAdmin)
-    admin.add_view(AdminUserAdmin)
-    admin.add_view(UserAdmin)
-    admin.add_view(RegistrationRequestAdmin)
-    admin.add_view(RoleAdmin)
-    admin.add_view(UserRoleAdmin)
-    admin.add_view(AuditLogAdmin)
+    admin.add_view(CallScriptAdmin)
+    admin.add_view(CallRecordAdmin)
+    admin.add_view(RecallRuleAdmin)
+    admin.add_view(DirectMessageAccountAdmin)
+    admin.add_view(DirectMessagePlatformConfigAdmin)
+    admin.add_view(DirectMessageTemplateAdmin)
+    admin.add_view(DirectMessageConversationAdmin)
+    admin.add_view(DirectMessageAdmin)
+    admin.add_view(CommentInterceptSourceAdmin)
+    admin.add_view(SocialCommentAdmin)
+    admin.add_view(CommentLeadConversionAdmin)
+    admin.add_view(IntentCustomerAdmin)
+    admin.add_view(IntentEventAdmin)
+    admin.add_view(FollowUpWorkOrderAdmin)
+    admin.add_view(LearningSuggestionAdmin)
+    admin.add_view(KnowledgeBaseItemAdmin)
+    admin.add_view(LearningExperimentAdmin)
+    admin.add_view(VoiceProfileAdmin)
+    admin.add_view(VoiceTrainingJobAdmin)
+    admin.add_view(VoiceSampleAdmin)
+    admin.add_view(VoiceCloneRecordAdmin)
+    admin.add_view(VoiceUsageRecordAdmin)
+    admin.add_view(ReportExportAdmin)
+    admin.add_view(SystemSettingAdmin)
+    admin.add_view(SystemAuditLogAdmin)

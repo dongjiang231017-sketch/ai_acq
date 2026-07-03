@@ -136,7 +136,7 @@ yyyy`);var n=zo(t),i=r?"getUTC":"get",a=n[i+"FullYear"](),o=n[i+"Month"]()+1,s=n
             })));
           }
         }
-        
+
         if (${w}.value === undefined) {
           if (${b} in input) {
             newResult[${b}] = undefined;
@@ -144,7 +144,7 @@ yyyy`);var n=zo(t),i=r?"getUTC":"get",a=n[i+"FullYear"](),o=n[i+"Month"]()+1,s=n
         } else {
           newResult[${b}] = ${w}.value;
         }
-        
+
       `):A?d.write(`
         if (${w}.issues.length) {
           payload.issues = payload.issues.concat(${w}.issues.map(iss => ({
@@ -152,7 +152,7 @@ yyyy`);var n=zo(t),i=r?"getUTC":"get",a=n[i+"FullYear"](),o=n[i+"Month"]()+1,s=n
             path: iss.path ? [${b}, ...iss.path] : [${b}]
           })));
         }
-        
+
         if (${w}.value === undefined) {
           if (${b} in input) {
             newResult[${b}] = undefined;
@@ -160,7 +160,7 @@ yyyy`);var n=zo(t),i=r?"getUTC":"get",a=n[i+"FullYear"](),o=n[i+"Month"]()+1,s=n
         } else {
           newResult[${b}] = ${w}.value;
         }
-        
+
       `):d.write(`
         const ${w}_present = ${b} in input;
         if (${w}.issues.length) {

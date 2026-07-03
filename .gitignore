@@ -20,10 +20,18 @@ htmlcov/
 backend/.venv/
 backend/local.db
 backend/.runtime/
+.voice_samples/
+backend/.voice_samples/
+.voice_outputs/
+backend/.voice_outputs/
+.dm_browser_profiles/
+backend/.dm_browser_profiles/
 
 # Node / frontend
 frontend/node_modules/
 frontend/dist/
+frontend/release/
+frontend/.electron-user-data/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
@@ -33,6 +41,10 @@ frontend/vite.config.d.ts
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Local agent/tool caches
+.playwright-cli/
+.serena/
 
 # Editors
 .idea/

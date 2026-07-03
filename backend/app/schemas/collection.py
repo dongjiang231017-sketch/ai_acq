@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
+
+from app.schemas.common import ApiModel as BaseModel
 
 
 class LeadCollectionTaskCreate(BaseModel):
