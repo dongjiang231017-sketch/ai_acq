@@ -49,6 +49,7 @@ AUDIO_SOCKET_KIND_AUDIO = 0x10
 AUDIO_SOCKET_KIND_ERROR = 0xFF
 PCM_FRAME_BYTES = 320
 PCM_FRAME_SECONDS = 0.02
+AUDIOSOCKET_STARTUP_KEEPALIVE_SECONDS = 15.0
 OMNI_LOCAL_BARGE_MIN_SENT_BYTES = PCM_FRAME_BYTES * 12
 OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.35
@@ -343,6 +344,7 @@ class AudioSocketCallSession:
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
+        self._startup_keepalive_active = threading.Event()
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
 
     def run(self) -> None:
@@ -352,6 +354,7 @@ class AudioSocketCallSession:
             if not self._await_call_uuid():
                 return
             self.logger.emit("call_connected", callId=self.call_id, peer=f"{self.peer[0]}:{self.peer[1]}", voice=self.config.tts_voice_name)
+            self._start_startup_keepalive()
             self._start_asr()
             self._turn_thread.start()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
@@ -361,6 +364,7 @@ class AudioSocketCallSession:
         finally:
             self.stop_event.set()
             self.interrupt_event.set()
+            self._stop_startup_keepalive()
             self._stop_asr()
             self._stop_audio_capture()
             try:
@@ -368,6 +372,35 @@ class AudioSocketCallSession:
             except OSError:
                 pass
             self.logger.emit("call_disconnected", callId=self.call_id)
+
+    def _start_startup_keepalive(self) -> None:
+        self._startup_keepalive_active.set()
+        threading.Thread(target=self._startup_keepalive_loop, name="ai-acq-audiosocket-keepalive", daemon=True).start()
+
+    def _stop_startup_keepalive(self) -> None:
+        self._startup_keepalive_active.clear()
+
+    def _startup_keepalive_loop(self) -> None:
+        silence = b"\x00" * PCM_FRAME_BYTES
+        deadline = time.monotonic() + AUDIOSOCKET_STARTUP_KEEPALIVE_SECONDS
+        sent = 0
+        next_frame_at = time.perf_counter()
+        while (
+            self._startup_keepalive_active.is_set()
+            and not self.stop_event.is_set()
+            and time.monotonic() < deadline
+        ):
+            try:
+                self._send_frame(AUDIO_SOCKET_KIND_AUDIO, silence)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("startup_keepalive_error", callId=self.call_id, error=str(exc))
+                break
+            sent += 1
+            next_frame_at += PCM_FRAME_SECONDS
+            time.sleep(max(0.0, next_frame_at - time.perf_counter()))
+        self._startup_keepalive_active.clear()
+        if sent:
+            self.logger.emit("startup_keepalive_done", callId=self.call_id, frames=sent)
 
     def _await_call_uuid(self) -> bool:
         started = time.monotonic()
@@ -946,6 +979,7 @@ class AudioSocketCallSession:
                 processedPeak=processed_stats.peak,
                 processedClipped=processed_stats.clipped,
             )
+        self._stop_startup_keepalive()
         if self._audio_capture:
             self._audio_capture.write_outbound(processed_frame)
         self._send_frame(AUDIO_SOCKET_KIND_AUDIO, processed_frame)
@@ -1072,6 +1106,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 voice=self.config.omni_voice,
                 mode="omni",
             )
+            self._start_startup_keepalive()
             self._start_omni()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
@@ -1080,6 +1115,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         finally:
             self.stop_event.set()
             self.interrupt_event.set()
+            self._stop_startup_keepalive()
             self._stop_omni()
             self._stop_audio_capture()
             try:
@@ -1615,6 +1651,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 if not self._omni_tts_started:
                     self._omni_first_audio_ms = int((time.perf_counter() - self._omni_response_started_at) * 1000)
                     self._omni_tts_started = True
+                    self._stop_startup_keepalive()
                     if self._omni_barge_forced_response_until > time.monotonic():
                         self._omni_barge_forced_audio_started = True
                     self.logger.emit(
