@@ -93,7 +93,11 @@
     "qa:v36:validate": "node scripts/live-allowlist-v36-qa.mjs --allowlist qa/v36-real-live-allowlist.template.json",
     "qa:v36:strict": "node scripts/live-allowlist-v36-qa.mjs --strict",
     "qa:v36:template": "node scripts/live-allowlist-v36-qa.mjs",
-    "quality:v36": "npm run build && npm run qa:v36:validate -- --json"
+    "quality:v36": "npm run build && npm run qa:v36:validate -- --json",
+    "qa:v37": "node scripts/live-allowlist-schema-v37-qa.mjs",
+    "qa:v37:validate": "node scripts/live-allowlist-schema-v37-qa.mjs --allowlist qa/v36-real-live-allowlist.template.json",
+    "qa:v37:strict": "node scripts/live-allowlist-schema-v37-qa.mjs --strict",
+    "quality:v37": "npm run build && npm run qa:v37:validate -- --json"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -106,6 +110,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "ajv": "^8.20.0",
     "electron": "^42.5.1",
     "electron-builder": "^26.15.3",
     "typescript": "^5.8.0",
