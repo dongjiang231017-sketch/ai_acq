@@ -12,14 +12,14 @@ const DEFAULTS = {
   sipPort: 5060,
   rtpStart: 10000,
   rtpEnd: 10100,
-  trunkName: "uc100",
-  voiceGatewayProfile: "uc100_sip_volte",
-  voiceGatewayLabel: "语音网关（UC100 测试档案）",
-  voiceGatewayHost: "192.168.10.100",
-  voiceGatewaySipPort: 5080,
+  trunkName: "dinstar8t",
+  voiceGatewayProfile: "dinstar_8t_server",
+  voiceGatewayLabel: "鼎信 8T 多卡网关",
+  voiceGatewayHost: "",
+  voiceGatewaySipPort: 5060,
   asteriskAdvertisedHost: "",
   asteriskLocalNet: "172.16.0.0/12",
-  maxChannels: 1,
+  maxChannels: 8,
   audioSocketHost: "127.0.0.1",
   audioSocketPort: 9019,
   gatewayDiscoveryEnabled: true,
@@ -265,15 +265,35 @@ class AsteriskSidecar {
     const sipPort = positiveNumber(state.voiceGatewaySipPort, DEFAULTS.voiceGatewaySipPort);
     const httpPort = positiveNumber(state.gatewayDiscoveryHttpPort, DEFAULTS.gatewayDiscoveryHttpPort);
     if (currentHost) {
-      const currentReachable =
-        (await isTcpOpen(currentHost, sipPort, Math.min(timeoutMs, 500))) ||
-        (await isKnownVoiceGatewayHttp(currentHost, httpPort, Math.min(timeoutMs, 500)));
-      if (currentReachable) {
+      const currentGateway = await confirmVoiceGatewayHost(currentHost, sipPort, httpPort, Math.min(timeoutMs, 500));
+      if (currentGateway.reachable) {
+        const stateBefore = JSON.stringify({
+          voiceGatewaySipPort: state.voiceGatewaySipPort,
+          voiceGatewayProfile: state.voiceGatewayProfile,
+          voiceGatewayLabel: state.voiceGatewayLabel,
+          trunkName: state.trunkName,
+          maxChannels: state.maxChannels,
+        });
+        state.voiceGatewaySipPort = currentGateway.sipPort;
+        state.uc100SipPort = currentGateway.sipPort;
+        applyDiscoveredVoiceGatewayProfile(state, currentGateway);
+        const stateAfter = JSON.stringify({
+          voiceGatewaySipPort: state.voiceGatewaySipPort,
+          voiceGatewayProfile: state.voiceGatewayProfile,
+          voiceGatewayLabel: state.voiceGatewayLabel,
+          trunkName: state.trunkName,
+          maxChannels: state.maxChannels,
+        });
+        if (stateAfter !== stateBefore) {
+          fs.writeFileSync(layout.statePath, JSON.stringify(state, null, 2));
+          this.writeConfigs({ ...layout, runtime });
+        }
         return {
           status: "current",
           host: currentHost,
-          sipPort,
-          message: `当前语音网关 ${currentHost}:${sipPort} 可达，无需重新匹配。`,
+          sipPort: currentGateway.sipPort,
+          source: currentGateway.source,
+          message: `当前语音网关 ${currentHost}:${currentGateway.sipPort} 可达，无需重新匹配。`,
         };
       }
     }
@@ -312,6 +332,7 @@ class AsteriskSidecar {
     state.voiceGatewaySipPort = discovery.sipPort;
     state.uc100Host = discovery.host;
     state.uc100SipPort = discovery.sipPort;
+    applyDiscoveredVoiceGatewayProfile(state, discovery);
     state.voiceGatewayDiscoveredAt = new Date().toISOString();
     state.voiceGatewayDiscoverySource = discovery.source;
     state.voiceGatewayPreviousHost = previousHost || "";
@@ -790,43 +811,125 @@ function isTcpOpen(host, port, timeoutMs) {
 }
 
 async function discoverVoiceGateway({ currentHost, sipPort, httpPort, timeoutMs, concurrency }) {
-  const hosts = gatewayCandidateHosts(currentHost);
-  const checks = hosts.map((host) => async () => {
-    const [httpSignature, sipOpen] = await Promise.all([
+  const candidates = gatewayCandidateHosts(currentHost);
+  const sipPorts = voiceGatewaySipScanPorts(sipPort);
+  const checks = candidates.map((candidate) => async () => {
+    const host = candidate.host;
+    const [httpSignature, sipOpenPort] = await Promise.all([
       readVoiceGatewayHttpSignature(host, httpPort, timeoutMs),
-      isTcpOpen(host, sipPort, timeoutMs),
+      firstOpenPort(candidate.host, sipPorts, timeoutMs),
     ]);
-    if (!httpSignature.matched && !sipOpen) return null;
     if (httpSignature.matched) {
-      return { host, sipPort, source: httpSignature.title ? `http:${httpSignature.title}` : "http:voice-gateway" };
+      return {
+        host,
+        sipPort: sipOpenPort || httpSignature.sipPort || preferredSipPort(sipPorts),
+        source: httpSignature.source || (httpSignature.title ? `http:${httpSignature.title}` : "http:voice-gateway"),
+        profileKey: httpSignature.profileKey,
+        label: httpSignature.label,
+        trunkName: httpSignature.trunkName,
+        maxChannels: httpSignature.maxChannels,
+      };
     }
-    return { host, sipPort, source: `sip:${sipPort}` };
+    if (sipOpenPort && candidate.source === "current" && !candidate.isLocalHost) {
+      return { host, sipPort: sipOpenPort, source: `sip:${sipOpenPort}` };
+    }
+    return null;
   });
   const result = await runLimited(checks, Math.max(4, Math.min(positiveNumber(concurrency, DEFAULTS.gatewayDiscoveryConcurrency), 96)));
   return result.find(Boolean) || null;
 }
 
 function gatewayCandidateHosts(currentHost) {
-  const hosts = new Set();
-  if (currentHost) hosts.add(currentHost);
-  for (const network of localIpv4Networks()) {
-    for (let host = 1; host <= 254; host += 1) hosts.add(`${network}.${host}`);
+  const { networks, localHosts } = localIpv4NetworkInfo();
+  const candidates = [];
+  const seen = new Set();
+  const add = (host, source) => {
+    const normalized = String(host || "").trim();
+    if (!normalized || seen.has(normalized) || localHosts.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push({ host: normalized, source, isLocalHost: false });
+  };
+  if (currentHost) add(currentHost, "current");
+  for (const network of networks) {
+    for (let host = 1; host <= 254; host += 1) add(`${network}.${host}`, "lan");
   }
-  return [...hosts];
+  return candidates;
 }
 
-function localIpv4Networks() {
+function localIpv4NetworkInfo() {
   const networks = new Set();
-  for (const addresses of Object.values(os.networkInterfaces())) {
+  const localHosts = new Set();
+  for (const [name, addresses] of Object.entries(os.networkInterfaces())) {
+    const ignoredInterface = isIgnoredNetworkInterfaceName(name);
     for (const address of addresses || []) {
       if (address.family !== "IPv4" || address.internal) continue;
       const parts = String(address.address || "").split(".");
       if (parts.length !== 4) continue;
       if (parts[0] === "127" || parts[0] === "169") continue;
+      localHosts.add(address.address);
+      if (ignoredInterface) continue;
       networks.add(parts.slice(0, 3).join("."));
     }
   }
-  return [...networks];
+  return { networks: [...networks], localHosts };
+}
+
+function isIgnoredNetworkInterfaceName(name) {
+  return /^(lo|utun|awdl|llw|bridge|docker|veth|vmnet|vboxnet|tailscale|wg|tun|tap|zt|anpi|gif|stf|ipsec|ppp)/i.test(String(name || "")) ||
+    /virtual|vEthernet|hyper-v|vmware|parallels/i.test(String(name || ""));
+}
+
+function voiceGatewaySipScanPorts(primaryPort) {
+  const ports = [positiveNumber(primaryPort, DEFAULTS.voiceGatewaySipPort), 5060, 5080, 15060]
+    .map((port) => Number(port))
+    .filter((port) => Number.isFinite(port) && port > 0);
+  return [...new Set(ports)];
+}
+
+function preferredSipPort(ports) {
+  return ports.includes(5060) ? 5060 : ports[0] || DEFAULTS.voiceGatewaySipPort;
+}
+
+async function firstOpenPort(host, ports, timeoutMs) {
+  for (const port of ports) {
+    if (await isTcpOpen(host, port, timeoutMs)) return port;
+  }
+  return 0;
+}
+
+async function confirmVoiceGatewayHost(host, sipPort, httpPort, timeoutMs) {
+  const { localHosts } = localIpv4NetworkInfo();
+  const normalized = String(host || "").trim();
+  if (!normalized || localHosts.has(normalized)) return { reachable: false };
+  const sipPorts = voiceGatewaySipScanPorts(sipPort);
+  const [httpSignature, sipOpenPort] = await Promise.all([
+    readVoiceGatewayHttpSignature(normalized, httpPort, timeoutMs),
+    firstOpenPort(normalized, sipPorts, timeoutMs),
+  ]);
+  if (httpSignature.matched) {
+    return {
+      reachable: true,
+      host: normalized,
+      sipPort: sipOpenPort || httpSignature.sipPort || preferredSipPort(sipPorts),
+      source: httpSignature.source || "http:voice-gateway",
+      profileKey: httpSignature.profileKey,
+      label: httpSignature.label,
+      trunkName: httpSignature.trunkName,
+      maxChannels: httpSignature.maxChannels,
+    };
+  }
+  if (sipOpenPort) return { reachable: true, host: normalized, sipPort: sipOpenPort, source: `sip:${sipOpenPort}` };
+  return { reachable: false };
+}
+
+function applyDiscoveredVoiceGatewayProfile(state, discovery) {
+  if (!discovery) return;
+  if (discovery.profileKey) state.voiceGatewayProfile = discovery.profileKey;
+  if (discovery.label) state.voiceGatewayLabel = discovery.label;
+  if (discovery.trunkName && (!state.trunkName || state.trunkName === "uc100" || state.trunkName === DEFAULTS.trunkName)) {
+    state.trunkName = discovery.trunkName;
+  }
+  if (discovery.maxChannels) state.maxChannels = Number(discovery.maxChannels);
 }
 
 async function isKnownVoiceGatewayHttp(host, port, timeoutMs) {
@@ -845,8 +948,20 @@ function readVoiceGatewayHttpSignature(host, port, timeoutMs) {
       response.on("end", () => {
         const title = titleFromHtml(body);
         const server = String(response.headers.server || "");
+        const authenticate = String(response.headers["www-authenticate"] || "");
+        const cookies = Array.isArray(response.headers["set-cookie"])
+          ? response.headers["set-cookie"].join("\n")
+          : String(response.headers["set-cookie"] || "");
+        const signature = classifyVoiceGatewayHttpSignature({
+          title,
+          server,
+          authenticate,
+          cookies,
+          body: body.slice(0, 4096),
+          statusCode: response.statusCode || 0,
+        });
         resolve({
-          matched: isVoiceGatewaySignature(`${title}\n${server}\n${body.slice(0, 2048)}`),
+          ...signature,
           title,
         });
       });
@@ -856,8 +971,41 @@ function readVoiceGatewayHttpSignature(host, port, timeoutMs) {
   });
 }
 
-function isVoiceGatewaySignature(text) {
-  return /UC100|UC100-ZYH|Dinstar|鼎信|语音网关|VoLTE/i.test(text);
+function classifyVoiceGatewayHttpSignature({ title, server, authenticate, cookies, body, statusCode }) {
+  const text = `${title}\n${server}\n${authenticate}\n${cookies}\n${body}`;
+  if (/UC100|UC100-ZYH/i.test(text)) {
+    return {
+      matched: true,
+      source: title ? `http:${title}` : "http:uc100",
+      profileKey: "uc100_sip_volte",
+      label: "语音网关（UC100 测试档案）",
+      trunkName: "uc100",
+      maxChannels: 1,
+      sipPort: 5080,
+    };
+  }
+  if (/Dinstar|DINSTAR|鼎信|DWG|UC2000|MTG|GSM Gateway|VoLTE/i.test(text)) {
+    return dinstarGatewaySignature(title || "voice-gateway");
+  }
+  const looksLikeDinstarDigest =
+    Number(statusCode) === 401 &&
+    /Web Server\/2\.1\.0/i.test(server) &&
+    /Digest\s+realm="?Web Server"?/i.test(authenticate) &&
+    /devckie=/i.test(cookies);
+  if (looksLikeDinstarDigest) return dinstarGatewaySignature("dinstar-digest-web-server");
+  return { matched: false, source: "" };
+}
+
+function dinstarGatewaySignature(sourceName) {
+  return {
+    matched: true,
+    source: `http:${sourceName}`,
+    profileKey: "dinstar_8t_server",
+    label: "鼎信 8T 多卡网关",
+    trunkName: "dinstar8t",
+    maxChannels: 8,
+    sipPort: 5060,
+  };
 }
 
 function titleFromHtml(html) {

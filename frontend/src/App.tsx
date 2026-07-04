@@ -205,22 +205,22 @@ const fallbackOverview: OutboundOverview = {
 };
 
 const fallbackVoiceGatewayProfile: VoiceGatewayProfile = {
-  key: "uc100_sip_volte",
-  label: "语音网关（UC100 测试档案）",
-  vendor: "ZHY",
-  model: "UC100",
-  category: "sip_volte_gateway",
+  key: "managed_voice_line",
+  label: "线路服务",
+  vendor: "Managed",
+  model: "Voice Line",
+  category: "managed_voice_line",
   transport: "sip_udp_server_registered",
   host: "",
   sipPort: 5060,
-  trunkName: "uc100",
-  maxChannels: 1,
-  lineType: "sim_volte",
+  trunkName: "managed-line",
+  maxChannels: 8,
+  lineType: "multi_sim_cellular",
   adminUrl: "",
   discoveryMode: "gateway_registers_to_server",
   tested: false,
-  capabilities: ["sip_registration_to_server", "single_sim", "asterisk_audiosocket"],
-  notes: ["让 UC100 主动注册到云端 Asterisk；客户电脑不需要本机 Asterisk。"],
+  capabilities: ["sip_registration_to_server", "multi_sim", "8_channel_pool", "asterisk_audiosocket"],
+  notes: ["由交付人员在后台接入真实线路；客户电脑不需要填写线路参数。"],
 };
 
 const fallbackTelephonyConfig: TelephonyConfig = {
@@ -233,8 +233,8 @@ const fallbackTelephonyConfig: TelephonyConfig = {
   asteriskHost: "127.0.0.1",
   asteriskAmiPort: 5038,
   asteriskUsernameConfigured: false,
-  asteriskTrunkName: "uc100",
-  asteriskMaxChannels: 1,
+  asteriskTrunkName: "managed-line",
+  asteriskMaxChannels: 8,
   asteriskLiveCallEnabled: false,
   asteriskBulkCallEnabled: false,
 };
@@ -255,7 +255,7 @@ const fallbackTelephonyHealth: TelephonyHealth = {
   trunkStatus: "待配置",
   maxChannels: 8,
   readyForTestCall: false,
-  errors: ["Asterisk AMI 账号或密码未配置"],
+  errors: ["后台线路账号未配置"],
 };
 
 const fallbackTelephonyPreflight: TelephonyPreflight = {
@@ -264,22 +264,22 @@ const fallbackTelephonyPreflight: TelephonyPreflight = {
   readyForDeviceTest: false,
   readyForSingleNumberTest: false,
   readyForBulkTasks: false,
-  nextStep: "先配置 AMI 账号、语音网关 trunk，并切到 Asterisk 真实线路模式。",
+  nextStep: "等待交付人员完成后台线路配置。",
   health: fallbackTelephonyHealth,
   steps: [
     {
       key: "gateway_mode",
-      label: "网关模式",
+      label: "线路模式",
       status: "warn",
-      detail: "当前仍是模拟线路，代码不会访问语音网关。",
-      action: "实机联调时设置 TELEPHONY_GATEWAY_MODE=asterisk。",
+      detail: "当前仍是模拟线路。",
+      action: "实机联调时切换为真实线路模式。",
     },
     {
       key: "ami_credentials",
-      label: "AMI 账号",
+      label: "后台线路账号",
       status: "fail",
-      detail: "AMI 用户名或密码未配置。",
-      action: "在 backend/.env 配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。",
+      detail: "后台线路账号未配置。",
+      action: "由交付人员在后台配置线路账号。",
     },
   ],
 };
@@ -292,7 +292,7 @@ const fallbackRealtimePipeline: RealtimePipeline = {
   estimatedAiCostPerMinute: 0.04,
   readyForMockCall: true,
   readyForAsteriskMedia: false,
-  nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接 Asterisk 媒体桥。",
+  nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；线路接通后再接入实时媒体。",
   routeOptions: [
     {
       key: "omni",
@@ -318,7 +318,7 @@ const fallbackRealtimePipeline: RealtimePipeline = {
   steps: [
     {
       key: "media_bridge",
-      label: "语音网关/Asterisk 媒体桥",
+      label: "实时通话媒体桥",
       status: "warn",
       provider: "mock_media",
       latencyMs: 120,
@@ -1300,7 +1300,7 @@ const fallbackSystemSettings: SystemSetting[] = [
     value: "simulator",
     valueType: "select:simulator,asterisk",
     status: "模拟模式",
-    description: "控制外呼任务使用模拟网关还是真实 Asterisk/线路网关。",
+    description: "控制外呼任务使用模拟线路还是真实线路。",
     sensitive: false,
     updatedBy: "系统",
     createdAt: new Date().toISOString(),
@@ -1452,123 +1452,20 @@ function formatSettingOption(setting: SystemSetting, option: string) {
   return formatSettingValue({ ...setting, value: option }, option);
 }
 
-function telephonyReadinessLabel(health: TelephonyHealth, preflight?: TelephonyPreflight) {
-  if (preflight?.readyForBulkTasks) return "可批量外呼";
-  if (preflight?.readyForSingleNumberTest) return "可单号试拨";
-  if (preflight?.readyForDeviceTest) return "待单号验收";
-  if (health.readyForTestCall && health.liveCallEnabled) return "可单号试拨";
-  if (health.readyForTestCall) return "待单号验收";
-  if (health.trunkReachable === false) return "语音网关未注册";
-  if (health.amiReachable && health.authenticated) return "AMI 已连接";
-  return "待配置";
-}
-
-function apiServerHostLabel() {
-  try {
-    const url = new URL(API_BASE_URL);
-    if (["127.0.0.1", "localhost", "0.0.0.0"].includes(url.hostname)) return "服务器公网IP";
-    return url.hostname;
-  } catch {
-    return "服务器公网IP";
-  }
-}
-
-function serverSipRegistrationTarget(config: TelephonyConfig) {
-  const sipPort = config.voiceGatewayProfile.sipPort || 5060;
-  return `${apiServerHostLabel()}:${sipPort}`;
-}
-
-function serverAmiDisplay(config: TelephonyConfig) {
-  const host = config.asteriskHost || "127.0.0.1";
-  const port = config.asteriskAmiPort || 5038;
-  if (["127.0.0.1", "localhost", "0.0.0.0"].includes(host)) return `后端本机:${port}`;
-  return `${host}:${port}`;
-}
-
 function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHealth) {
   if (config.gatewayMode !== "asterisk") return "当前仍为模拟线路";
-  if (!health.configured) return "请先配置 AMI 账号和密码";
-  if (!health.amiReachable) return "后端还连不上 Asterisk AMI";
-  if (!health.pingOk) return "AMI Ping 未通过";
-  if (health.trunkReachable === false) return "服务器已连上 Asterisk，但没有收到 UC100 SIP 注册";
+  if (!health.configured) return "后台线路还未配置";
+  if (!health.amiReachable) return "线路未通";
+  if (!health.pingOk) return "后台线路预检未通过";
+  if (health.trunkReachable === false) return "线路未通";
   if (!health.liveCallEnabled) return "单号试拨开关未开启";
-  return health.trunkStatus || "语音网关线路待测试";
-}
-
-function routeHealthSummary(health: TelephonyHealth, preflight: TelephonyPreflight) {
-  const isReady = preflight.readyForSingleNumberTest || preflight.readyForBulkTasks || health.readyForTestCall;
-  const isLinked = Boolean(health.authenticated && health.trunkReachable);
-  const isPartial = Boolean(health.amiReachable || health.authenticated || preflight.readyForDeviceTest);
-  const status = isReady || isLinked ? "pass" : isPartial ? "warn" : "fail";
-  const trunkMissing = health.trunkReachable === false;
-  const title = status === "pass" ? "云端中继已注册" : trunkMissing ? "语音网关未注册" : status === "warn" ? "线路待联通" : "线路不可用";
-  const detail =
-    status === "pass"
-      ? "Asterisk/语音网关 trunk 已注册；真实可用还必须通过单号试拨确认 SIM/运营商通道、手机接听和媒体链路。"
-      : trunkMissing
-        ? "服务器 Asterisk/AMI 正常，但公网 SIP 注册还没有到达服务器。"
-      : status === "warn"
-        ? "后台正在接入线路，完成后会自动更新状态。"
-        : "后台线路未接入，请等待管理员处理。";
-  const action = status === "pass" ? "做单号验收" : trunkMissing ? "等待设备注册" : status === "warn" ? "后台验收中" : "等待后台接入";
-  return { status, title, detail, action };
-}
-
-function asteriskSidecarStatusText(status?: AiAcqDesktopAsteriskStatus | null) {
-  if (!status) return "待检测";
-  if (status.running && status.status === "running") return "已运行";
-  if (status.status === "starting") return "启动中";
-  if (status.runtimeFound) return "可启动";
-  return "缺少运行时";
-}
-
-function asteriskSidecarBadgeStatus(status?: AiAcqDesktopAsteriskStatus | null) {
-  if (!status) return "warn";
-  if (status.running && status.status === "running") return "pass";
-  if (!status.runtimeFound) return "fail";
-  return "warn";
-}
-
-function asteriskCustomerDeliveryStatus(status?: AiAcqDesktopAsteriskStatus | null) {
-  const deliveryStatus = status?.customerDelivery?.status;
-  if (deliveryStatus === "pass" || deliveryStatus === "warn" || deliveryStatus === "fail") return deliveryStatus;
-  return asteriskSidecarBadgeStatus(status);
-}
-
-function telephonyPreflightStatusText(status: string) {
-  if (status === "pass") return "PASS";
-  if (status === "fail") return "FAIL";
-  return "WARN";
+  return health.trunkStatus || "线路待测试";
 }
 
 function telephonyDiagnosticStatusText(status: string) {
   if (status === "pass") return "通过";
   if (status === "fail") return "故障";
   return "待确认";
-}
-
-function telephonyPreflightSummary(preflight: TelephonyPreflight) {
-  if (preflight.readyForBulkTasks) return "真实批量外呼已开放";
-  if (preflight.readyForSingleNumberTest) return "可做单号试拨";
-  if (preflight.readyForDeviceTest) return "设备链路可联调";
-  return "等待配置";
-}
-
-function voiceGatewayDiscoveryLabel(status?: AiAcqDesktopAsteriskStatus | null) {
-  const discovery = status?.voiceGatewayDiscovery;
-  if (!status) return "等待检测";
-  if (discovery?.status === "current") return "已发现当前设备";
-  if (discovery?.status === "updated") return "已自动切换设备";
-  if (discovery?.status === "not_found") return "未发现设备";
-  if (discovery?.status === "disabled") return "自动检测已关闭";
-  return "检测中";
-}
-
-function voiceGatewayDiscoveryDetail(status?: AiAcqDesktopAsteriskStatus | null) {
-  const discovery = status?.voiceGatewayDiscovery;
-  if (discovery?.message) return discovery.message;
-  if (!status) return "打开桌面客户端后会检测客户现场局域网里的语音网关。";
-  return status.nextStep || "请确认设备已通电、插卡、接入网络。";
 }
 
 function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
@@ -1589,8 +1486,8 @@ function telephonyTestPayloadSummary(result: TelephonyTestCallResult | null) {
 function telephonyVerificationStageText(result: TelephonyTestCallResult) {
   if (result.verificationStage === "realtime_conversation_confirmed") return "真人实时对话已验收";
   if (result.verificationStage === "realtime_media_confirmed") return "线路与实时媒体已验收";
-  if (result.verificationStage === "gateway_signaling_only") return "网关侧响应，未证明手机响铃";
-  if (result.verificationStage === "gateway_answered_no_media_proof" || result.verificationStage === "cellular_answered_no_media_proof") return "网关已呼出，待真人接听";
+  if (result.verificationStage === "gateway_signaling_only") return "线路侧响应，未证明手机响铃";
+  if (result.verificationStage === "gateway_answered_no_media_proof" || result.verificationStage === "cellular_answered_no_media_proof") return "线路已呼出，待真人接听";
   if (result.verificationStage === "originate_submitted") return "已提交拨号，待线路证据";
   return "未达到真实通话验收";
 }
@@ -1600,13 +1497,13 @@ function telephonyVerificationSummary(result: TelephonyTestCallResult) {
   if (result.callScreeningDetected && !result.humanSpeechConfirmed) return "检测到电话助理/秘书，还未确认真人接听。";
   if (result.mediaLoopConfirmed && !result.humanSpeechConfirmed) return "媒体桥已接通，但还没识别到真人客户语音。";
   if (result.humanSpeechConfirmed && !result.aiSpeechConfirmed) return "已识别真人语音，AI 首句还未确认播出。";
-  return result.acceptanceNote || "还需要语音网关线路侧、手机接听和实时媒体日志共同确认。";
+  return result.acceptanceNote || "还需要线路侧、手机接听和实时通话记录共同确认。";
 }
 
 function realtimePipelineStatusText(status: string) {
-  if (status === "pass") return "PASS";
-  if (status === "fail") return "FAIL";
-  return "WARN";
+  if (status === "pass") return "正常";
+  if (status === "fail") return "异常";
+  return "待确认";
 }
 
 function realtimeSessionStatusText(status: string) {
@@ -1809,7 +1706,7 @@ function App() {
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
   const [telephonyLineRecovery, setTelephonyLineRecovery] = useState<TelephonyLineRecovery | null>(null);
-  const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，确认语音网关/Asterisk 可用后再做单号试拨。");
+  const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，显示已通后再做单号试拨。");
   const [isCheckingTelephony, setIsCheckingTelephony] = useState(false);
   const [isTestingTelephony, setIsTestingTelephony] = useState(false);
   const [isRecoveringTelephony, setIsRecoveringTelephony] = useState(false);
@@ -2714,24 +2611,24 @@ function App() {
       const status = await window.aiAcqDesktop.getAsteriskSidecarStatus();
       setAsteriskSidecarStatus(status);
     } catch (error) {
-      setTelephonyMessage(error instanceof Error ? error.message : "内置 Asterisk 状态读取失败");
+      setTelephonyMessage(error instanceof Error ? error.message : "线路检测状态读取失败");
     }
   }
 
   async function startAsteriskSidecar() {
     if (!isDesktopClient || !window.aiAcqDesktop?.startAsteriskSidecar) {
-      setTelephonyMessage("请在客户桌面客户端中启动内置 Asterisk。");
+      setTelephonyMessage("请在客户桌面客户端中启动线路检测。");
       return;
     }
     setIsStartingAsteriskSidecar(true);
-    setTelephonyMessage("正在启动客户端内置 Asterisk...");
+    setTelephonyMessage("正在启动线路检测...");
     try {
       const status = await window.aiAcqDesktop.startAsteriskSidecar();
       setAsteriskSidecarStatus(status);
-      setTelephonyMessage(status.nextStep);
+      setTelephonyMessage(status.running ? "线路检测已启动。" : "线路检测未启动。");
       await refreshTelephonyStatus();
     } catch (error) {
-      setTelephonyMessage(error instanceof Error ? error.message : "内置 Asterisk 启动失败");
+      setTelephonyMessage(error instanceof Error ? error.message : "线路检测启动失败");
     } finally {
       setIsStartingAsteriskSidecar(false);
     }
@@ -2751,13 +2648,17 @@ function App() {
 
   async function refreshTelephonyStatus() {
     setIsCheckingTelephony(true);
-    setTelephonyMessage("正在预检语音网关/Asterisk 线路...");
+    setTelephonyMessage("正在检测线路...");
     try {
       const [config, preflight] = await Promise.all([api.telephonyConfig(), api.telephonyPreflight(telephonyTestForm.phone)]);
       setTelephonyConfig(config);
       setTelephonyHealth(preflight.health);
       setTelephonyPreflight(preflight);
-      setTelephonyMessage(preflight.nextStep || telephonyReadinessDetail(config, preflight.health));
+      setTelephonyMessage(
+        preflight.readyForSingleNumberTest || preflight.readyForBulkTasks
+          ? "线路已通，可以做单号试拨验收。"
+          : telephonyReadinessDetail(config, preflight.health),
+      );
       await refreshAsteriskSidecarStatus();
     } catch (error) {
       setTelephonyMessage(error instanceof Error ? error.message : "线路预检失败");
@@ -2783,7 +2684,7 @@ function App() {
       setTelephonyTestResult(result);
       setTelephonyLineRecovery(result.autoRecovery ?? null);
       setTelephonyMessage(
-        result.cellularDiagnostic?.title || result.message || (result.accepted ? "试拨请求已被 Asterisk 接收。" : "测试拨号失败"),
+        result.cellularDiagnostic?.title || result.message || (result.accepted ? "试拨请求已提交。" : "测试拨号失败"),
       );
       await refreshRealtimeLiveEvents(false);
       try {
@@ -2803,12 +2704,12 @@ function App() {
 
   async function recoverTelephonyLine() {
     setIsRecoveringTelephony(true);
-    setTelephonyMessage("正在恢复 Asterisk/语音网关线路...");
+    setTelephonyMessage("正在恢复线路...");
     try {
       const recovery = await api.recoverTelephonyLine();
       setTelephonyLineRecovery(recovery);
       setTelephonyHealth(recovery.health);
-      setTelephonyMessage(recovery.nextStep || recovery.summary);
+      setTelephonyMessage(recovery.status === "pass" ? "线路恢复完成。" : "线路恢复未完成，等待交付人员处理。");
       try {
         const preflight = await api.telephonyPreflight(telephonyTestForm.phone);
         setTelephonyHealth(preflight.health);
@@ -4220,7 +4121,7 @@ function App() {
           </div>
           <div>
             <span>媒体桥</span>
-            <strong>{realtimePipeline.bridgeMode === "mock_media" ? "模拟媒体" : "Asterisk媒体"}</strong>
+            <strong>{realtimePipeline.bridgeMode === "mock_media" ? "模拟媒体" : "真实媒体"}</strong>
           </div>
           <div>
             <span>目标延迟</span>
@@ -6236,20 +6137,15 @@ function App() {
     const showRecords = showOverview || activeOutboundTab === "通话记录";
     const showRules = showOverview || activeOutboundTab === "重拨规则";
     const showRealtime = showOverview || activeOutboundTab === "实时监听";
-    const routeStatus = routeHealthSummary(telephonyHealth, telephonyPreflight);
-    const serverRegistrationTarget = serverSipRegistrationTarget(telephonyConfig);
-    const deviceDiscoveryLabel = voiceGatewayDiscoveryLabel(asteriskSidecarStatus);
-    const deviceDiscoveryDetail = voiceGatewayDiscoveryDetail(asteriskSidecarStatus);
-    const discoveredGatewayAddress =
-      asteriskSidecarStatus?.voiceGatewayDiscovery?.host && asteriskSidecarStatus.voiceGatewayDiscovery.sipPort
-        ? `${asteriskSidecarStatus.voiceGatewayDiscovery.host}:${asteriskSidecarStatus.voiceGatewayDiscovery.sipPort}`
-        : asteriskSidecarStatus?.customerDelivery?.gatewayAddress || "等待自动检测";
-    const customerRouteNextStep =
-      routeStatus.status === "pass"
-        ? "线路检测通过，可以创建任务或进入实时监听。"
-        : routeStatus.status === "warn"
-          ? "后台正在处理线路联通，完成后客户工作台会自动显示可用状态。"
-          : "线路暂未接通，请等待服务人员在后台完成接入。";
+    const customerLineConnected = Boolean(
+      telephonyPreflight.readyForSingleNumberTest ||
+        telephonyPreflight.readyForBulkTasks ||
+        (telephonyHealth.readyForTestCall && telephonyConfig.asteriskLiveCallEnabled),
+    );
+    const customerLineResult = customerLineConnected ? "已通" : "未通";
+    const customerLineDetail = customerLineConnected
+      ? "线路已达到单号验收条件，可以用自己的手机号试拨确认真实通话。"
+      : "线路还没有达到验收条件，交付人员会在后台处理。";
     const routeCheckedAt = new Date(telephonyPreflight.checkedAt).toLocaleString("zh-CN", { hour12: false });
     return (
       <>
@@ -6282,323 +6178,57 @@ function App() {
                   <h2>线路是否通畅</h2>
                 </div>
               </div>
-              <div className={`route-status-card is-${routeStatus.status}`}>
+              <div className={`route-status-card is-${customerLineConnected ? "pass" : "fail"}`}>
                 <div className="route-status-main">
-                  <span className={`line-preflight-badge is-${routeStatus.status}`}>{routeStatus.status.toUpperCase()}</span>
+                  <span className={`line-preflight-badge is-${customerLineConnected ? "pass" : "fail"}`}>
+                    {customerLineResult}
+                  </span>
                   <div>
-                    <strong>{routeStatus.title}</strong>
-                    <small>{routeStatus.detail}</small>
+                    <strong>线路{customerLineResult}</strong>
+                    <small>{customerLineDetail}</small>
                   </div>
                 </div>
                 <div className="route-status-grid">
                   <div>
-                    <span>线路状态</span>
-                    <strong>{telephonyReadinessLabel(telephonyHealth, telephonyPreflight)}</strong>
+                    <span>线路结果</span>
+                    <strong>{customerLineResult}</strong>
                   </div>
                   <div>
-                    <span>后台处理</span>
-                    <strong>{routeStatus.action}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className={`customer-route-summary is-${routeStatus.status}`}>
-                <div>
-                  <span>已绑定线路</span>
-                  <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
-                  <small>客户前端只展示线路状态；设备、账号、网关和外呼策略由后台维护。</small>
-                </div>
-                <div>
                   <span>最近检测</span>
-                  <strong>{telephonyPreflightSummary(telephonyPreflight)}</strong>
-                  <small>{routeCheckedAt}</small>
-                </div>
-                <div>
-                  <span>下一步</span>
-                  <strong>{customerRouteNextStep}</strong>
-                </div>
-              </div>
-              <div className={`device-onboarding-card is-${routeStatus.status}`}>
-                <div className="device-onboarding-header">
-                  <div>
-                    <span>现场设备对接</span>
-                    <strong>{telephonyHealth.trunkReachable ? "语音网关已注册到云端" : "语音网关等待注册到云端"}</strong>
-                    <small>
-                      交付人员把现场语音网关注册到云端后，客户前端只做状态验收；未注册前不会进入真实拨号。
-                    </small>
+                  <strong>{routeCheckedAt}</strong>
                   </div>
-                  <div className="device-onboarding-actions">
-                    <button className="secondary-button" disabled={!isDesktopClient} onClick={() => void refreshAsteriskSidecarStatus()} type="button">
-                      <RefreshCw size={16} />
-                      {isDesktopClient ? "自动检测现场设备" : "桌面客户端检测"}
-                    </button>
-                    <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
-                      <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
-                      刷新线路状态
-                    </button>
+                  <div>
+                    <span>单号试拨</span>
+                    <strong>{customerLineConnected ? "可验收" : "未开放"}</strong>
                   </div>
                 </div>
-                <div className="device-onboarding-grid">
-                  <div>
-                    <span>自动检测</span>
-                    <strong>{deviceDiscoveryLabel}</strong>
-                    <small>{deviceDiscoveryDetail}</small>
-                  </div>
-                  <div>
-                    <span>本地发现地址</span>
-                    <strong>{discoveredGatewayAddress}</strong>
-                    <small>如果客户更换网络或换设备，点击自动检测重新识别。</small>
-                  </div>
-                  <div>
-                    <span>云端注册目标</span>
-                    <strong>{serverRegistrationTarget}</strong>
-                    <small>交付人员在语音网关后台把 SIP Server / Registrar 指向这个地址。</small>
-                  </div>
-                  <div>
-                    <span>SIP账号</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}</strong>
-                    <small>鉴权密码由交付人员配置，不在客户前端展示。</small>
-                  </div>
-                </div>
-                <div className="device-onboarding-steps">
-                  <span>1. 设备通电、插 SIM 卡并接入客户网络。</span>
-                  <span>2. 客户端点击自动检测，确认现场设备可被发现。</span>
-                  <span>3. 交付人员在语音网关后台填写云端注册目标和 SIP 账号。</span>
-                  <span>4. 云端收到注册后，本页显示云端中继已注册，再进入单号真实验收。</span>
-                </div>
-              </div>
-              {telephonyConfig.asteriskDeploymentMode === "server" ? (
-                <div className={`asterisk-sidecar-strip is-${telephonyHealth.authenticated ? "pass" : telephonyHealth.amiReachable ? "warn" : "fail"}`}>
-                  <div className="asterisk-sidecar-main">
-                    <span className={`line-preflight-badge is-${telephonyHealth.authenticated ? "pass" : telephonyHealth.amiReachable ? "warn" : "fail"}`}>
-                      {telephonyHealth.authenticated ? "PASS" : telephonyHealth.amiReachable ? "WARN" : "FAIL"}
-                    </span>
-                    <div>
-                      <strong>服务器 Asterisk：{telephonyHealth.authenticated ? "AMI 已登录" : telephonyHealth.amiReachable ? "AMI 可达" : "待连接"}</strong>
-                      <small>{telephonyConfig.voiceGatewayProfile.label} 主动注册到云端 Asterisk；客户电脑不再依赖本机 Asterisk runtime。</small>
-                    </div>
-                  </div>
-                  <div className="asterisk-sidecar-meta">
-                    <div>
-                      <span>后端 AMI</span>
-                      <strong>{serverAmiDisplay(telephonyConfig)}</strong>
-                    </div>
-                    <div>
-                      <span>SIP 注册</span>
-                      <strong>{serverSipRegistrationTarget(telephonyConfig)}</strong>
-                    </div>
-                    <div>
-                      <span>交付设备</span>
-                      <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
-                    </div>
-                    <div>
-                      <span>通道池</span>
-                      <strong>{telephonyConfig.voiceGatewayProfile.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
-                    </div>
-                  </div>
-                  <div className="asterisk-sidecar-actions">
-                    <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
-                      <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
-                      刷新服务器线路
-                    </button>
-                  </div>
-                </div>
-              ) : (
-              <div className={`asterisk-sidecar-strip is-${asteriskSidecarBadgeStatus(asteriskSidecarStatus)}`}>
-                <div className="asterisk-sidecar-main">
-                  <span className={`line-preflight-badge is-${asteriskSidecarBadgeStatus(asteriskSidecarStatus)}`}>
-                    {asteriskSidecarStatus?.running ? "PASS" : asteriskSidecarStatus?.runtimeFound ? "WARN" : "FAIL"}
-                  </span>
-                  <div>
-                    <strong>客户端内置 Asterisk：{isDesktopClient ? asteriskSidecarStatusText(asteriskSidecarStatus) : "仅桌面客户端可用"}</strong>
-                    <small>
-                      {isDesktopClient
-                        ? asteriskSidecarStatus?.nextStep ?? "正在等待客户端侧线路运行时检测。"
-                        : "网页预览只用于查看功能；客户交付时由桌面客户端管理 Asterisk 和本机 AMI 配置。"}
-                    </small>
-                  </div>
-                </div>
-                <div className="asterisk-sidecar-meta">
-                  <div>
-                    <span>AMI</span>
-                    <strong>
-                      {asteriskSidecarStatus ? `${asteriskSidecarStatus.amiHost}:${asteriskSidecarStatus.amiPort}` : "127.0.0.1:5038"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>语音网关</span>
-                    <strong>
-                      {asteriskSidecarStatus
-                        ? `${asteriskSidecarStatus.voiceGatewayHost ?? asteriskSidecarStatus.uc100Host}:${
-                            asteriskSidecarStatus.voiceGatewaySipPort ?? asteriskSidecarStatus.uc100SipPort
-                          }`
-                        : `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>档案</span>
-                    <strong>{asteriskSidecarStatus?.voiceGatewayLabel ?? telephonyConfig.voiceGatewayProfile.label}</strong>
-                  </div>
-                  <div>
-                    <span>配置</span>
-                    <strong>{asteriskSidecarStatus?.backendEnvReady ? "已生成" : "待生成"}</strong>
-                  </div>
-                </div>
-                <div className="asterisk-sidecar-actions">
-                  <button
-                    className="primary-button"
-                    disabled={
-                      !isDesktopClient ||
-                      isStartingAsteriskSidecar ||
-                      Boolean(asteriskSidecarStatus?.running) ||
-                      Boolean(asteriskSidecarStatus && !asteriskSidecarStatus.runtimeFound)
-                    }
-                    onClick={startAsteriskSidecar}
-                    type="button"
-                  >
-                    <Zap size={16} />
-                    {asteriskSidecarStatus?.running
-                      ? "已启动"
-                      : isStartingAsteriskSidecar
-                        ? "启动中"
-                        : asteriskSidecarStatus && !asteriskSidecarStatus.runtimeFound
-                          ? "缺少运行时"
-                          : "启动内置Asterisk"}
+                <div className="button-row">
+                  <button className="secondary-button" disabled={isCheckingTelephony} onClick={refreshTelephonyStatus} type="button">
+                    <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
+                    重新检测线路
                   </button>
-                  <button
-                    className="secondary-button icon-only"
-                    disabled={!isDesktopClient || isStartingAsteriskSidecar}
-                    onClick={() => void refreshAsteriskSidecarStatus()}
-                    title="刷新内置 Asterisk 状态"
-                    type="button"
-                  >
-                    <RefreshCw size={16} />
-                  </button>
-                </div>
-              </div>
-              )}
-              <div className={`customer-delivery-card is-${
-                telephonyConfig.asteriskDeploymentMode === "server"
-                  ? telephonyHealth.authenticated && telephonyHealth.trunkReachable
-                    ? "pass"
-                    : telephonyHealth.amiReachable
-                      ? "warn"
-                      : "fail"
-                  : isDesktopClient
-                    ? asteriskCustomerDeliveryStatus(asteriskSidecarStatus)
-                    : "warn"
-              }`}>
-                <div className="customer-delivery-copy">
-                  <span>客户交付状态</span>
-                  <strong>
-                    {telephonyConfig.asteriskDeploymentMode === "server"
-                      ? telephonyHealth.readyForTestCall
-                        ? "云端中继已注册"
-                        : "线路待现场联通"
-                      : isDesktopClient
-                      ? asteriskSidecarStatus?.customerDelivery?.title ?? "等待客户端检测语音网关"
-                      : "网页预览不能作为客户现场运行方式"}
-                  </strong>
-                  <small>
-                    {telephonyConfig.asteriskDeploymentMode === "server"
-                      ? "语音网关、Asterisk 和媒体桥由交付人员预置；客户工作台只展示云端注册状态、预检和单号真实验收。"
-                      : isDesktopClient
-                      ? asteriskSidecarStatus?.customerDelivery?.message ??
-                        "桌面客户端会负责发现语音网关、生成 Asterisk 配置并输出后端环境。"
-                      : "交付给客户时必须安装桌面客户端；设备发现、Asterisk、AMI 和本机媒体桥都在客户端内完成。"}
-                  </small>
-                </div>
-                <div className="customer-delivery-meta">
-                  <div>
-                    <span>{telephonyConfig.asteriskDeploymentMode === "server" ? "UC100 注册目标" : "当前绑定"}</span>
-                    <strong>
-                      {telephonyConfig.asteriskDeploymentMode === "server"
-                        ? serverSipRegistrationTarget(telephonyConfig)
-                        : asteriskSidecarStatus?.customerDelivery?.gatewayAddress ||
-                          `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>自动匹配</span>
-                    <strong>
-                      {telephonyConfig.asteriskDeploymentMode === "server"
-                        ? telephonyHealth.trunkReachable
-                          ? "已注册"
-                          : "待注册"
-                        : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "updated"
-                        ? "已重绑"
-                        : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "current"
-                          ? "已确认"
-                          : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "not_found"
-                            ? "未发现"
-                            : isDesktopClient
-                              ? "待检测"
-                              : "桌面端执行"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>{telephonyConfig.asteriskDeploymentMode === "server" ? "设备注册状态" : "上一地址"}</span>
-                    <strong>
-                      {telephonyConfig.asteriskDeploymentMode === "server"
-                        ? telephonyHealth.trunkReachable
-                          ? "已注册到云端"
-                          : "未收到注册"
-                        : asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}
-                    </strong>
-                  </div>
-                </div>
-                <div className="customer-delivery-actions">
-                  {(telephonyConfig.asteriskDeploymentMode === "server"
-                    ? [
-                        `在 ${telephonyConfig.voiceGatewayProfile.label} 后台把 SIP Server/Registrar 指向 ${serverSipRegistrationTarget(telephonyConfig)}。`,
-                        `SIP 用户名/鉴权账号使用 ${telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}；密码由交付人员在服务器端配置。`,
-                        "单号试拨必须确认蜂窝侧、媒体链路和 AI 首句。",
-                        "批量真实外呼保持关闭，直到单号验证稳定。",
-                      ]
-                    : isDesktopClient
-                    ? asteriskSidecarStatus?.customerDelivery?.actionItems ?? ["刷新客户端线路状态，确认设备绑定和 Asterisk 运行状态。"]
-                    : ["安装并打开桌面客户端。", "让客户电脑和语音网关接入同一局域网。", "在客户端中刷新/启动内置 Asterisk。"]
-                  ).map((item) => (
-                    <span key={item}>{item}</span>
-                  ))}
-                </div>
-              </div>
-              {telephonyConfig.asteriskDeploymentMode !== "server" && asteriskSidecarStatus && (
-                <div className="asterisk-sidecar-checks">
-                  {asteriskSidecarStatus.checks.map((check) => (
-                    <div className="asterisk-sidecar-check" key={check.key}>
-                      <span className={`line-preflight-badge is-${check.status}`}>{telephonyPreflightStatusText(check.status)}</span>
-                      <div>
-                        <strong>{check.label}</strong>
-                        <small>{check.detail}</small>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="line-health-grid">
-                <div>
-                  <span>线路模式</span>
-                  <strong>{telephonyConfig.gatewayMode === "asterisk" ? "真实线路" : "模拟线路"}</strong>
-                </div>
-                <div>
-                  <span>线路状态</span>
-                  <strong>{telephonyReadinessLabel(telephonyHealth, telephonyPreflight)}</strong>
-                </div>
-                <div>
-                  <span>AMI</span>
-                  <strong>{telephonyHealth.authenticated ? "已登录" : telephonyHealth.amiReachable ? "已连接" : "未连接"}</strong>
-                </div>
-                <div>
-                  <span>Trunk</span>
-                  <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName || "待配置"}</strong>
-                </div>
-                <div>
-                  <span>通道上限</span>
-                  <strong>{telephonyConfig.voiceGatewayProfile.maxChannels || telephonyHealth.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
-                </div>
-                <div>
-                  <span>拨号开关</span>
-                  <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨" : "未开启"}</strong>
+                  {telephonyConfig.asteriskDeploymentMode !== "server" && (
+                    <button
+                      className="primary-button"
+                      disabled={
+                        !isDesktopClient ||
+                        isStartingAsteriskSidecar ||
+                        Boolean(asteriskSidecarStatus?.running) ||
+                        Boolean(asteriskSidecarStatus && !asteriskSidecarStatus.runtimeFound)
+                      }
+                      onClick={startAsteriskSidecar}
+                      type="button"
+                    >
+                      <Zap size={16} />
+                      {asteriskSidecarStatus?.running
+                        ? "检测已启动"
+                        : isStartingAsteriskSidecar
+                          ? "启动中"
+                          : asteriskSidecarStatus && !asteriskSidecarStatus.runtimeFound
+                            ? "等待后台处理"
+                            : "启动线路检测"}
+                    </button>
+                  )}
                 </div>
               </div>
               <form className="telephony-test-form" onSubmit={submitTelephonyTestCall}>
@@ -6629,72 +6259,14 @@ function App() {
                 </button>
                 <p className="telephony-test-message">{telephonyMessage}</p>
               </form>
-              <div className="line-preflight gateway-profile-strip">
-                <div className="line-preflight-header">
-                  <div>
-                    <span>已绑定线路档案</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.label}</strong>
-                  </div>
-                  <small>{telephonyHealth.readyForTestCall ? "可单号试拨" : "待线路联通"}</small>
-                </div>
-                <div className="line-health-grid">
-                  <div>
-                    <span>设备</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.model}</strong>
-                  </div>
-                  <div>
-                    <span>线路池</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.maxChannels || telephonyConfig.asteriskMaxChannels} 路</strong>
-                  </div>
-                  <div>
-                    <span>拨号</span>
-                    <strong>{telephonyConfig.asteriskLiveCallEnabled ? "单号试拨开启" : "待验收开启"}</strong>
-                  </div>
-                  <div>
-                    <span>批量外呼</span>
-                    <strong>{telephonyConfig.asteriskBulkCallEnabled ? "已开启" : "关闭"}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className="line-preflight">
-                <div className="line-preflight-header">
-                  <div>
-                    <span>预检结论</span>
-                    <strong>{telephonyPreflightSummary(telephonyPreflight)}</strong>
-                  </div>
-                  <small>{new Date(telephonyPreflight.checkedAt).toLocaleString("zh-CN", { hour12: false })}</small>
-                </div>
-                <p>{telephonyPreflight.nextStep}</p>
-                <div className="line-preflight-steps">
-                  {telephonyPreflight.steps.map((step) => (
-                    <div className="line-preflight-step" key={step.key}>
-                      <span className={`line-preflight-badge is-${step.status}`}>{telephonyPreflightStatusText(step.status)}</span>
-                      <div>
-                        <strong>{step.label}</strong>
-                        <small>{step.detail}</small>
-                        {step.action && <em>{step.action}</em>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
               {telephonyTestResult?.cellularDiagnostic && (
                 <div className={`cellular-diagnostic is-${telephonyTestResult.cellularDiagnostic.status}`}>
                   <div>
-                    <span>蜂窝线路诊断</span>
-                    <strong>{telephonyTestResult.cellularDiagnostic.title}</strong>
-                    <small>{telephonyDiagnosticStatusText(telephonyTestResult.cellularDiagnostic.status)} · {telephonyTestResult.cellularDiagnostic.stage}</small>
+                    <span>试拨结果</span>
+                    <strong>{telephonyTestResult.cellularDiagnostic.status === "pass" ? "已通" : "未通"}</strong>
+                    <small>{telephonyDiagnosticStatusText(telephonyTestResult.cellularDiagnostic.status)}</small>
                   </div>
-                  <p>{telephonyTestResult.cellularDiagnostic.summary}</p>
-                  <p>{telephonyTestResult.cellularDiagnostic.detail}</p>
-                  <div className="cellular-action-list">
-                    {telephonyTestResult.cellularDiagnostic.actionItems.slice(0, 4).map((item) => (
-                      <span key={item}>{item}</span>
-                    ))}
-                  </div>
-                  {telephonyTestResult.cellularDiagnostic.technicalDetail && (
-                    <code>{telephonyTestResult.cellularDiagnostic.technicalDetail}</code>
-                  )}
+                  <p>{telephonyTestResult.cellularDiagnostic.status === "pass" ? "单号试拨达到验收条件。" : "单号试拨还没有达到验收条件，请等待交付人员后台处理。"}</p>
                   <div className="button-row cellular-actions">
                     <button className="secondary-button" disabled={isRecoveringTelephony} onClick={() => void recoverTelephonyLine()} type="button">
                       <RefreshCw size={16} className={isRecoveringTelephony ? "spin" : ""} />
@@ -6707,15 +6279,8 @@ function App() {
                 <div className={`cellular-recovery-result is-${telephonyLineRecovery.status}`}>
                   <div>
                     <span>恢复结果</span>
-                    <strong>{telephonyLineRecovery.summary}</strong>
-                    <small>{telephonyLineRecovery.nextStep}</small>
-                  </div>
-                  <div className="cellular-command-list">
-                    {telephonyLineRecovery.commands.slice(0, 5).map((command) => (
-                      <span key={command.command}>
-                        {command.ok ? "PASS" : "WARN"} · {command.command}
-                      </span>
-                    ))}
+                    <strong>{telephonyLineRecovery.status === "pass" ? "已恢复" : "未恢复"}</strong>
+                    <small>{telephonyLineRecovery.status === "pass" ? "请重新检测线路。" : "请等待交付人员后台处理。"}</small>
                   </div>
                 </div>
               )}

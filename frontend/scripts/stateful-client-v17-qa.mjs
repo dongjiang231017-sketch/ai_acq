@@ -611,12 +611,15 @@ async function runPlaywright(report, options, artifactDir, urls, credentials) {
     await fillPanelField(outboundPanel, "任务名称", taskName);
     await fillPanelField(outboundPanel, "并发数量", "1");
     try {
-      const outboundTaskResponse = page.waitForResponse(
-        (response) => response.url() === `${urls.apiBase}/outbound/tasks` && response.request().method() === "POST",
-        { timeout: 20000 },
-      );
+      const outboundTaskResponse = page
+        .waitForResponse(
+          (response) => response.url() === `${urls.apiBase}/outbound/tasks` && response.request().method() === "POST",
+          { timeout: 20000 },
+        )
+        .catch((error) => ({ error }));
       await outboundPanel.getByRole("button", { name: /创建外呼任务/ }).click();
-      await outboundTaskResponse;
+      const response = await outboundTaskResponse;
+      if (response?.error) throw response.error;
     } catch (error) {
       if (!createdLead?.id) throw error;
       const fallbackTask = await apiRequest(report, urls.apiBase, "/outbound/tasks", {

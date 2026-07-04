@@ -340,7 +340,7 @@ def _config_card(line: VoiceGatewayLine) -> dict[str, object]:
         _field("Password", "一次性密码 / 受控密钥别名", "设备后台 SIP 注册页", "只在生成或轮换时显示明文。"),
         _field("Codec", f"{line.codec_primary}, {line.codec_secondary}", "设备后台媒体/编码页", "优先 PCMA/alaw，兼容 PCMU/ulaw。"),
         _field("DTMF", line.dtmf_mode, "设备后台媒体/DTMF 页", "用于按键识别和部分运营商线路兼容。"),
-        _field("Route", line.route_direction, "设备后台呼叫路由页", "UC100 当前应为 SIP中继/SIP 到 VoLTE。"),
+        _field("Route", line.route_direction, "设备后台呼叫路由页", "外呼方向应为 SIP 中继/云端 trunk 到 VoLTE/GSM/SIM 通道。"),
         _field("RTP", line.rtp_port_range, "云端安全组和 Asterisk RTP", "云端必须放行 RTP UDP 端口范围，否则接通后听不到/说不出。"),
     ]
     return {
