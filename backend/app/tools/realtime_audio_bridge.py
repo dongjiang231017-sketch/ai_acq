@@ -37,6 +37,7 @@ from app.services.realtime_sales_playbook import (
     build_omni_turn_instruction,
     build_video_group_buying_sales_instructions,
     classify_realtime_call_input,
+    extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
 from app.services.runtime_ai_config import get_runtime_ai_config
@@ -633,8 +634,17 @@ class AudioSocketCallSession:
         if not self._answer_classifier.state.done:
             answer_type = self._answer_classifier.classify_after_wait()
             self._handle_answer_classification(answer_type, text="", source="opening_wait_timeout")
-        if answer_type in {CallAnswerType.PHONE_ASSISTANT, CallAnswerType.VOICEMAIL, CallAnswerType.SYSTEM_PROMPT, CallAnswerType.HUMAN}:
+        if answer_type in {CallAnswerType.PHONE_ASSISTANT, CallAnswerType.VOICEMAIL, CallAnswerType.SYSTEM_PROMPT}:
             return False
+        if answer_type == CallAnswerType.HUMAN:
+            self.logger.emit(
+                "opening_after_human_audio",
+                callId=self.call_id,
+                mode=mode,
+                waitMs=int(wait_seconds * 1000),
+                detail="已确认对端是真人但还没有最终转写，先播短开场避免电话里长时间沉默。",
+            )
+            return True
         if saw_remote_audio:
             self.logger.emit(
                 "opening_after_unknown_remote",
@@ -658,7 +668,6 @@ class AudioSocketCallSession:
             self.stop_event.is_set()
             or self.speaking_event.is_set()
             or self._opening_started
-            or self._human_speech_confirmed
             or self._call_screening_seen
             or self._system_prompt_seen
         )
@@ -682,23 +691,37 @@ class AudioSocketCallSession:
                 continue
             signal = classify_realtime_call_input(text)
             if signal == "system_prompt":
-                if classify_answer_text(text) == CallAnswerType.VOICEMAIL:
+                human_tail = extract_human_text_after_system_prompt(text)
+                if human_tail:
                     self.logger.emit(
-                        "voicemail_detected",
+                        "system_prompt_stripped",
                         callId=self.call_id,
                         text=text,
-                        detail="识别到语音信箱/留言提示，直接挂断不留言。",
+                        strippedText=human_tail,
+                        detail="ASR 同一句里包含系统提示和真人客户语音，已只剥离系统提示并继续回复真人内容。",
                     )
-                    self.stop_event.set()
+                    text = human_tail
+                    signal = classify_realtime_call_input(text)
+                    if signal == "system_prompt":
+                        signal = "human_speech"
+                else:
+                    if classify_answer_text(text) == CallAnswerType.VOICEMAIL:
+                        self.logger.emit(
+                            "voicemail_detected",
+                            callId=self.call_id,
+                            text=text,
+                            detail="识别到语音信箱/留言提示，直接挂断不留言。",
+                        )
+                        self.stop_event.set()
+                        continue
+                    self._system_prompt_seen = True
+                    self.logger.emit(
+                        "system_prompt_ignored",
+                        callId=self.call_id,
+                        text=text,
+                        detail="识别到运营商、手机系统或语音留言提示，已忽略，不触发销售回复。",
+                    )
                     continue
-                self._system_prompt_seen = True
-                self.logger.emit(
-                    "system_prompt_ignored",
-                    callId=self.call_id,
-                    text=text,
-                    detail="识别到运营商、手机系统或语音留言提示，已忽略，不触发销售回复。",
-                )
-                continue
             if signal == "call_screening":
                 if self._call_screening_answered:
                     self.logger.emit(
@@ -1284,6 +1307,23 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if not clean:
             return
         self.customer_activity_event.set()
+        raw_clean = clean
+        signal = classify_realtime_call_input(clean)
+        if signal == "system_prompt":
+            human_tail = extract_human_text_after_system_prompt(clean)
+            if human_tail:
+                self.logger.emit(
+                    "system_prompt_stripped",
+                    callId=self.call_id,
+                    text=raw_clean,
+                    strippedText=human_tail,
+                    provider="qwen_omni",
+                    detail="ASR 同一句里包含系统提示和真人客户语音，已只剥离系统提示并继续回复真人内容。",
+                )
+                clean = human_tail
+                signal = classify_realtime_call_input(clean)
+                if signal == "system_prompt":
+                    signal = "human_speech"
         human_confirmed_before = self._human_speech_confirmed
         self.handle_answer_text(clean, is_final=True)
         skip_response_after_forced_barge = False
@@ -1295,8 +1335,10 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     skip_response_after_forced_barge = True
                 else:
                     replace_forced_barge_response = True
-        signal = classify_realtime_call_input(clean)
-        self.logger.emit("asr_final", callId=self.call_id, text=clean, provider="qwen_omni", signal=signal)
+        asr_fields: dict[str, Any] = {"callId": self.call_id, "text": clean, "provider": "qwen_omni", "signal": signal}
+        if raw_clean != clean:
+            asr_fields["rawText"] = raw_clean
+        self.logger.emit("asr_final", **asr_fields)
         if signal == "system_prompt":
             if classify_answer_text(clean) == CallAnswerType.VOICEMAIL:
                 self.logger.emit(

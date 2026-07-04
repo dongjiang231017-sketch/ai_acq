@@ -260,6 +260,55 @@ def classify_realtime_call_input(text: str) -> str:
     return "human_speech"
 
 
+_SYSTEM_PROMPT_TAIL_MARKERS = [
+    "录音完成后挂断即可",
+    "錄音完成後掛斷即可",
+    "挂断即可",
+    "掛斷即可",
+    "提示音后录制留言",
+    "提示音後錄製留言",
+    "请在提示音后",
+    "請在提示音後",
+    "提示音后",
+    "提示音後",
+    "若要留言",
+    "请留言",
+    "請留言",
+    "用户无法接听",
+    "暫時無法接聽",
+    "暂时无法接听",
+    "無法接聽",
+    "无法接听",
+    "无法接通",
+]
+
+
+def extract_human_text_after_system_prompt(text: str) -> str:
+    """Keep the human tail when ASR merges a voicemail/system prompt with customer speech."""
+    clean = " ".join(text.strip().split())
+    if classify_realtime_call_input(clean) != "system_prompt":
+        return ""
+    best_tail = ""
+    best_idx = -1
+    for marker in _SYSTEM_PROMPT_TAIL_MARKERS:
+        idx = clean.rfind(marker)
+        if idx < 0 or idx < best_idx:
+            continue
+        tail = clean[idx + len(marker) :]
+        tail = re.sub(r"^[\s。！？?!，,、.；;：:]+", "", tail).strip()
+        if _looks_like_human_tail(tail):
+            best_tail = tail
+            best_idx = idx
+    return best_tail
+
+
+def _looks_like_human_tail(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.；;：:]+", "", text)
+    if len(compact) < 2:
+        return False
+    return classify_realtime_call_input(text) != "system_prompt"
+
+
 def _format_omni_recent_history(recent_history: list[dict[str, str]] | None) -> str:
     rows: list[str] = []
     for turn in (recent_history or [])[-6:]:

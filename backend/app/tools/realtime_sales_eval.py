@@ -12,6 +12,7 @@ from app.services.realtime_sales_playbook import (
     build_barge_recovery_instruction,
     build_omni_turn_instruction,
     classify_realtime_call_input,
+    extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
 
@@ -347,6 +348,15 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "answer_classifier_voicemail",
             "score": 100 if voicemail_type == CallAnswerType.VOICEMAIL else 35,
             "issues": [] if voicemail_type == CallAnswerType.VOICEMAIL else [f"type:{voicemail_type}"],
+        }
+    )
+    merged_system_prompt = "您好，用户无法接听，请在提示音后录制留言，录音完成后挂断即可。喂，你好。"
+    merged_tail = extract_human_text_after_system_prompt(merged_system_prompt)
+    gates.append(
+        {
+            "text": "system_prompt_with_human_tail_stripped",
+            "score": 100 if merged_tail == "喂，你好。" else 35,
+            "issues": [] if merged_tail == "喂，你好。" else [f"tail:{merged_tail}"],
         }
     )
     human_classifier = AnswerClassifier()
