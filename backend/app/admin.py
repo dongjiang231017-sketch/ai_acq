@@ -354,6 +354,8 @@ class RegistrationRequestAdmin(ModelView, model=RegistrationRequest):
     ]
     column_sortable_list = [RegistrationRequest.created_at, RegistrationRequest.updated_at, RegistrationRequest.status]
     column_default_sort = [(RegistrationRequest.created_at, True)]
+    column_details_exclude_list = [RegistrationRequest.password_hash]
+    form_excluded_columns = [RegistrationRequest.password_hash]
     column_labels = {
         RegistrationRequest.project_name: "客户/项目",
         RegistrationRequest.company_name: "公司名称",
@@ -425,7 +427,10 @@ class RegistrationRequestAdmin(ModelView, model=RegistrationRequest):
             with SessionLocal() as db:
                 try:
                     account = approve_registration_request(db, request_id, actor_username)
-                    approved_accounts.append(f"{account.username}（初始密码：{account.initial_password}）")
+                    if account.used_requested_password:
+                        approved_accounts.append(f"{account.username}（使用客户申请时设置的密码）")
+                    else:
+                        approved_accounts.append(f"{account.username}（初始密码：{account.initial_password}）")
                 except RegistrationReviewError as exc:
                     errors.append(str(exc))
 

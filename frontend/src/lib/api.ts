@@ -49,10 +49,11 @@ export type RegistrationRequestCreate = {
   contactPhone: string;
   contactEmail?: string | null;
   desiredUsername?: string | null;
+  password: string;
   note?: string | null;
 };
 
-export type RegistrationRequestRead = RegistrationRequestCreate & {
+export type RegistrationRequestRead = Omit<RegistrationRequestCreate, "password"> & {
   id: string;
   status: string;
   createdAt: string;

@@ -1562,6 +1562,8 @@ function App() {
     contactPhone: "",
     contactEmail: "",
     desiredUsername: "",
+    password: "",
+    confirmPassword: "",
     note: "",
   });
   const [modules, setModules] = useState<ModuleSummary[]>(fallbackModules);
@@ -2425,6 +2427,14 @@ function App() {
   async function submitRegistrationRequest(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!registrationForm.companyName.trim() || !registrationForm.contactPhone.trim()) return;
+    if (registrationForm.password.length < 8) {
+      setAuthMessage("请设置至少 8 位登录密码。");
+      return;
+    }
+    if (registrationForm.password !== registrationForm.confirmPassword) {
+      setAuthMessage("两次输入的登录密码不一致。");
+      return;
+    }
     setIsSubmittingAuth(true);
     setAuthMessage("正在提交开通申请...");
     try {
@@ -2435,10 +2445,22 @@ function App() {
         contactPhone: registrationForm.contactPhone.trim(),
         contactEmail: registrationForm.contactEmail.trim() || null,
         desiredUsername: registrationForm.desiredUsername.trim() || null,
+        password: registrationForm.password,
         note: registrationForm.note.trim() || null,
       });
-      setAuthMessage("申请已提交，管理员审核并开通账号后即可登录。");
+      setAuthMessage("申请已提交，审核通过后可使用登录账号和刚设置的密码登录。");
       setAuthMode("login");
+      setRegistrationForm({
+        projectName: "",
+        companyName: "",
+        contactName: "",
+        contactPhone: "",
+        contactEmail: "",
+        desiredUsername: "",
+        password: "",
+        confirmPassword: "",
+        note: "",
+      });
     } catch (error) {
       setAuthMessage(error instanceof Error ? error.message : "提交失败，请稍后再试。");
     } finally {
@@ -5743,6 +5765,26 @@ function App() {
                 <input
                   value={registrationForm.contactEmail}
                   onChange={(event) => setRegistrationForm({ ...registrationForm, contactEmail: event.target.value })}
+                />
+              </label>
+              <label>
+                登录密码
+                <input
+                  autoComplete="new-password"
+                  minLength={8}
+                  type="password"
+                  value={registrationForm.password}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, password: event.target.value })}
+                />
+              </label>
+              <label>
+                确认密码
+                <input
+                  autoComplete="new-password"
+                  minLength={8}
+                  type="password"
+                  value={registrationForm.confirmPassword}
+                  onChange={(event) => setRegistrationForm({ ...registrationForm, confirmPassword: event.target.value })}
                 />
               </label>
               <button className="primary-button" disabled={isSubmittingAuth} type="submit">
