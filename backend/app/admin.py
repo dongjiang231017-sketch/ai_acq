@@ -1520,6 +1520,7 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         VoiceGatewayLine.customer_name,
         VoiceGatewayLine.line_name,
         VoiceGatewayLine.gateway_label,
+        VoiceGatewayLine.device_admin_url,
         VoiceGatewayLine.sip_server_host,
         VoiceGatewayLine.sip_server_port,
         VoiceGatewayLine.sip_transport,
@@ -1536,12 +1537,36 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         VoiceGatewayLine.line_name,
         VoiceGatewayLine.sip_username,
         VoiceGatewayLine.trunk_name,
+        VoiceGatewayLine.device_admin_url,
+        VoiceGatewayLine.device_mac,
         VoiceGatewayLine.device_serial,
     ]
     column_sortable_list = [VoiceGatewayLine.created_at, VoiceGatewayLine.updated_at, VoiceGatewayLine.status]
     column_default_sort = [(VoiceGatewayLine.updated_at, True)]
     column_details_exclude_list = [VoiceGatewayLine.sip_password_hash]
     form_excluded_columns = [VoiceGatewayLine.sip_password_hash, VoiceGatewayLine.events]
+    form_args = {
+        "device_admin_url": {
+            "label": "设备后台地址",
+            "description": "客户现场局域网地址，例如 http://192.168.x.x/。云端不能自动知道；由交付电脑/客户端扫描、路由器 DHCP 列表、设备屏幕或说明书默认地址确认后填写。",
+        },
+        "device_mac": {
+            "label": "设备MAC",
+            "description": "用于多客户/多设备时绑定具体硬件，避免换网络后只靠 IP 认错设备。",
+        },
+        "device_serial": {
+            "label": "设备序列号",
+            "description": "建议提前录入设备标签或采购台账里的序列号，现场发现后与设备核对。",
+        },
+        "network_note": {
+            "label": "网络说明",
+            "description": "记录客户现场网段、交换机/路由器 DHCP 线索、固定 IP 或保留地址等交付信息。",
+        },
+        "sip_password_secret_alias": {
+            "label": "密码密钥别名",
+            "description": "这里不是明文密码。明文 SIP 密码只在生成或轮换时一次性显示。",
+        },
+    }
     column_labels = {
         VoiceGatewayLine.owner_user_id: "客户账号",
         VoiceGatewayLine.created_by_user_id: "创建人",

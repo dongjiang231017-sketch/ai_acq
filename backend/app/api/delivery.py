@@ -16,8 +16,11 @@ from app.models.audit import AuditLog
 from app.models.delivery import VoiceGatewayLine, VoiceGatewayLineEvent
 from app.models.user import User
 from app.schemas.delivery import (
+    VoiceGatewayBulkLineCreate,
+    VoiceGatewayBulkLineCreated,
     VoiceGatewayConfigCard,
     VoiceGatewayCredentialRotation,
+    VoiceGatewayDeviceDiscoveryUpdate,
     VoiceGatewayLineCreate,
     VoiceGatewayLineCreated,
     VoiceGatewayLineEventCreate,
@@ -80,43 +83,7 @@ def create_voice_gateway_line(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
     owner = _resolve_owner(payload.owner_user_id, db, current_user)
-    profile = _profile_defaults(payload.gateway_profile_key)
-    password = _generate_sip_password()
-    suffix = token_hex(4)
-    owner_slug = _slug(owner.username or owner.id)
-    sip_username = f"sip_{owner_slug}_{suffix}"
-    trunk_name = f"tg_{owner_slug}_{suffix}"
-    line = VoiceGatewayLine(
-        owner_user_id=owner.id,
-        created_by_user_id=current_user.id,
-        line_name=payload.line_name.strip(),
-        customer_name=(payload.customer_name or owner.display_name or owner.username).strip(),
-        gateway_profile_key=payload.gateway_profile_key,
-        gateway_label=(payload.gateway_label or str(profile["label"])).strip(),
-        gateway_vendor=(payload.gateway_vendor or str(profile["vendor"])).strip(),
-        gateway_model=(payload.gateway_model or str(profile["model"])).strip(),
-        gateway_category=(payload.gateway_category or str(profile["category"])).strip(),
-        deployment_mode="server",
-        sip_server_host=payload.sip_server_host.strip(),
-        sip_server_port=payload.sip_server_port,
-        sip_transport=payload.sip_transport,
-        sip_username=sip_username,
-        sip_auth_username=sip_username,
-        sip_password_hash=hash_password(password),
-        sip_password_secret_alias=f"voice-gateway/{owner.id}/{trunk_name}/sip-password",
-        trunk_name=trunk_name,
-        channel_count=payload.channel_count,
-        codec_primary=DEFAULT_CODEC_PRIMARY,
-        codec_secondary=DEFAULT_CODEC_SECONDARY,
-        dtmf_mode=DEFAULT_DTMF_MODE,
-        rtp_port_range=DEFAULT_RTP_RANGE,
-        route_direction=DEFAULT_ROUTE_DIRECTION,
-        device_admin_url=(payload.device_admin_url or "").strip(),
-        device_serial=(payload.device_serial or "").strip(),
-        device_mac=(payload.device_mac or "").strip(),
-        network_note=(payload.network_note or "").strip(),
-        notes=(payload.notes or "").strip(),
-    )
+    line, password = _build_line(payload, owner, current_user)
     db.add(line)
     db.flush()
     _add_event(
@@ -139,6 +106,48 @@ def create_voice_gateway_line(
     data["sipPasswordOneTime"] = password
     data["oneTimeWarning"] = ONE_TIME_WARNING
     return data
+
+
+@router.post(
+    "/voice-gateway-lines/bulk-provision",
+    response_model=VoiceGatewayBulkLineCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+def bulk_provision_voice_gateway_lines(
+    payload: VoiceGatewayBulkLineCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    created: list[dict[str, object]] = []
+    lines: list[tuple[VoiceGatewayLine, str]] = []
+    for item in payload.items:
+        owner = _resolve_owner(item.owner_user_id, db, current_user)
+        line, password = _build_line(item, owner, current_user)
+        db.add(line)
+        db.flush()
+        _add_event(
+            db,
+            line,
+            current_user,
+            event_type="line_created",
+            status="created",
+            summary="批量预生成客户语音网关配置卡",
+            detail=f"{line.gateway_label} / {line.sip_server_host}:{line.sip_server_port}/{line.sip_transport}",
+        )
+        _add_audit(db, current_user, "voice_gateway_line.bulk_create", line.id, f"预生成语音网关线路：{line.line_name}")
+        lines.append((line, password))
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="批量预生成失败：客户线路名称、SIP账号或 trunk 名称与已有数据冲突") from exc
+    for line, password in lines:
+        db.refresh(line)
+        data = _read_line(line)
+        data["sipPasswordOneTime"] = password
+        data["oneTimeWarning"] = ONE_TIME_WARNING
+        created.append(data)
+    return {"count": len(created), "created": created, "oneTimeWarning": ONE_TIME_WARNING}
 
 
 @router.get("/voice-gateway-lines/{line_id}", response_model=VoiceGatewayLineRead)
@@ -183,6 +192,46 @@ def get_voice_gateway_config_card(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
     return _config_card(_get_line(line_id, db, current_user))
+
+
+@router.post("/voice-gateway-lines/{line_id}/device-discovery", response_model=VoiceGatewayLineRead)
+def report_voice_gateway_device_discovery(
+    line_id: str,
+    payload: VoiceGatewayDeviceDiscoveryUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    line = _get_line(line_id, db, current_user)
+    admin_url = _normalise_device_admin_url(payload.device_admin_url, payload.device_ip)
+    if admin_url:
+        line.device_admin_url = admin_url
+    if payload.device_mac:
+        line.device_mac = payload.device_mac.strip()
+    if payload.device_serial:
+        line.device_serial = payload.device_serial.strip()
+    discovery_note = _device_discovery_note(payload, admin_url)
+    if discovery_note:
+        line.network_note = _append_note(line.network_note, discovery_note)
+    if _is_fail_status(payload.status):
+        line.status = "设备未发现"
+    elif _is_pass_status(payload.status) or payload.status in {"found", "current", "updated", "已发现", "已绑定"}:
+        line.status = "待设备注册" if not _is_pass_status(line.registration_status) else _line_status(line)
+    line.updated_at = datetime.utcnow()
+    event = _add_event(
+        db,
+        line,
+        current_user,
+        event_type="device_discovery",
+        status=payload.status,
+        summary=payload.summary or ("已记录现场设备后台地址" if admin_url else "记录现场设备发现结果"),
+        detail=payload.detail or discovery_note,
+        evidence_json=payload.evidence_json,
+    )
+    _add_audit(db, current_user, "voice_gateway_line.device_discovery", line.id, f"记录设备发现结果：{line.line_name}")
+    db.commit()
+    db.refresh(event)
+    db.refresh(line)
+    return _read_line(line)
 
 
 @router.post("/voice-gateway-lines/{line_id}/rotate-credential", response_model=VoiceGatewayCredentialRotation)
@@ -285,6 +334,47 @@ def _profile_defaults(key: str) -> dict[str, object]:
     return PROFILE_DEFAULTS.get(key, PROFILE_DEFAULTS["sip_volte_gateway"])
 
 
+def _build_line(payload: VoiceGatewayLineCreate, owner: User, current_user: User) -> tuple[VoiceGatewayLine, str]:
+    profile = _profile_defaults(payload.gateway_profile_key)
+    password = _generate_sip_password()
+    suffix = token_hex(4)
+    owner_slug = _slug(owner.username or owner.id)
+    sip_username = f"sip_{owner_slug}_{suffix}"
+    trunk_name = f"tg_{owner_slug}_{suffix}"
+    line = VoiceGatewayLine(
+        owner_user_id=owner.id,
+        created_by_user_id=current_user.id,
+        line_name=payload.line_name.strip(),
+        customer_name=(payload.customer_name or owner.display_name or owner.username).strip(),
+        gateway_profile_key=payload.gateway_profile_key,
+        gateway_label=(payload.gateway_label or str(profile["label"])).strip(),
+        gateway_vendor=(payload.gateway_vendor or str(profile["vendor"])).strip(),
+        gateway_model=(payload.gateway_model or str(profile["model"])).strip(),
+        gateway_category=(payload.gateway_category or str(profile["category"])).strip(),
+        deployment_mode="server",
+        sip_server_host=payload.sip_server_host.strip(),
+        sip_server_port=payload.sip_server_port,
+        sip_transport=payload.sip_transport,
+        sip_username=sip_username,
+        sip_auth_username=sip_username,
+        sip_password_hash=hash_password(password),
+        sip_password_secret_alias=f"voice-gateway/{owner.id}/{trunk_name}/sip-password",
+        trunk_name=trunk_name,
+        channel_count=payload.channel_count,
+        codec_primary=DEFAULT_CODEC_PRIMARY,
+        codec_secondary=DEFAULT_CODEC_SECONDARY,
+        dtmf_mode=DEFAULT_DTMF_MODE,
+        rtp_port_range=DEFAULT_RTP_RANGE,
+        route_direction=DEFAULT_ROUTE_DIRECTION,
+        device_admin_url=(payload.device_admin_url or "").strip(),
+        device_serial=(payload.device_serial or "").strip(),
+        device_mac=(payload.device_mac or "").strip(),
+        network_note=(payload.network_note or "").strip(),
+        notes=(payload.notes or "").strip(),
+    )
+    return line, password
+
+
 def _read_line(line: VoiceGatewayLine) -> dict[str, object]:
     return {
         "id": line.id,
@@ -332,7 +422,14 @@ def _read_line(line: VoiceGatewayLine) -> dict[str, object]:
 
 
 def _config_card(line: VoiceGatewayLine) -> dict[str, object]:
+    device_admin_value = line.device_admin_url or "现场客户端自动发现后回写；也可查路由器 DHCP、设备屏幕或默认地址"
     field_mapping = [
+        _field(
+            "设备后台地址",
+            device_admin_value,
+            "交付电脑浏览器 / 客户现场局域网",
+            "这是客户本地管理地址，通常是 192.168.x.x；云端不能直接访问，只能由现场客户端或交付人员发现后记录。",
+        ),
         _field("Registrar / SIP Server", line.sip_server_host, "设备后台 SIP 注册页", "填云端公网域名或 IP，不填客户本地 192.168 地址。"),
         _field("Port / Transport", f"{line.sip_server_port}/{line.sip_transport}", "设备后台 SIP 注册页", "协议必须和云端 Asterisk 监听一致。"),
         _field("Account / SIP User", line.sip_username, "设备后台 SIP 注册页", "每个客户独立账号，不能复用测试 trunk。"),
@@ -366,6 +463,12 @@ def _config_card(line: VoiceGatewayLine) -> dict[str, object]:
         "fieldMapping": field_mapping,
         "deliverySteps": [
             _step("cloud_trunk", "云端生成 trunk", f"Asterisk endpoint/trunk 使用 {line.trunk_name}", "云端可看到 endpoint 和鉴权账号。"),
+            _step(
+                "device_discovery",
+                "发现设备后台",
+                "交付电脑和语音网关接同一局域网；客户端自动扫描 HTTP/80、常见网关指纹和 SIP 端口。未发现时查路由器 DHCP 列表、设备屏幕、设备标签或说明书默认地址。",
+                "线路记录里出现当前设备后台地址、MAC 或序列号。",
+            ),
             _step("device_sip", "设备 SIP 注册", "按配置卡填写 SIP Server、账号、鉴权和密码。", "Asterisk contacts 显示已注册/可达。"),
             _step("device_route", "设备外呼路由", f"设置 {line.route_direction}。", "设备话单来源为 SIP中继/SIP，目的地为 VoLTE/GSM/SIM。"),
             _step("sim_voice", "SIM/VoLTE 语音", "在设备诊断页确认 SIM 语音正常。", "语音通道注册且不是仅上网正常。"),
@@ -381,6 +484,39 @@ def _field(label: str, value: str, target: str, note: str = "") -> dict[str, str
 
 def _step(key: str, label: str, detail: str, expected_result: str) -> dict[str, str]:
     return {"key": key, "label": label, "detail": detail, "expectedResult": expected_result}
+
+
+def _normalise_device_admin_url(admin_url: str | None, device_ip: str | None) -> str:
+    value = (admin_url or "").strip()
+    if not value and device_ip:
+        value = device_ip.strip()
+    if not value:
+        return ""
+    if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+        value = f"http://{value}"
+    return value.rstrip("/") + "/"
+
+
+def _device_discovery_note(payload: VoiceGatewayDeviceDiscoveryUpdate, admin_url: str) -> str:
+    parts = [f"source={payload.source}", f"status={payload.status}"]
+    if admin_url:
+        parts.append(f"admin={admin_url}")
+    if payload.device_ip:
+        parts.append(f"ip={payload.device_ip.strip()}")
+    if payload.device_mac:
+        parts.append(f"mac={payload.device_mac.strip()}")
+    if payload.device_serial:
+        parts.append(f"serial={payload.device_serial.strip()}")
+    if payload.summary:
+        parts.append(payload.summary.strip())
+    return "；".join(part for part in parts if part)
+
+
+def _append_note(current: str, note: str) -> str:
+    if not note:
+        return current
+    line = f"{datetime.utcnow().isoformat(timespec='seconds')} {note}"
+    return f"{current.strip()}\n{line}".strip() if current else line
 
 
 def _add_event(

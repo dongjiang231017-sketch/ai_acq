@@ -136,16 +136,41 @@ class VoiceGatewayLineCreated(VoiceGatewayLineRead):
     one_time_warning: Annotated[str, Field(alias="oneTimeWarning")]
 
 
+class VoiceGatewayBulkLineCreate(BaseModel):
+    items: Annotated[list[VoiceGatewayLineCreate], Field(min_length=1, max_length=100)]
+
+
+class VoiceGatewayBulkLineCreated(BaseModel):
+    count: int
+    created: list[VoiceGatewayLineCreated]
+    one_time_warning: Annotated[str, Field(alias="oneTimeWarning")]
+
+
 class VoiceGatewayCredentialRotation(BaseModel):
     line: VoiceGatewayLineRead
     sip_password_one_time: Annotated[str, Field(alias="sipPasswordOneTime")]
     one_time_warning: Annotated[str, Field(alias="oneTimeWarning")]
 
 
+class VoiceGatewayDeviceDiscoveryUpdate(BaseModel):
+    device_admin_url: Annotated[str | None, Field(alias="deviceAdminUrl", max_length=240)] = None
+    device_ip: Annotated[str | None, Field(alias="deviceIp", max_length=80)] = None
+    device_mac: Annotated[str | None, Field(alias="deviceMac", max_length=80)] = None
+    device_serial: Annotated[str | None, Field(alias="deviceSerial", max_length=120)] = None
+    source: Annotated[str, Field(max_length=80)] = "onsite_discovery"
+    status: Annotated[str, Field(max_length=40)] = "found"
+    summary: Annotated[str, Field(max_length=240)] = ""
+    detail: str = ""
+    evidence_json: Annotated[str, Field(alias="evidenceJson")] = ""
+
+
 class VoiceGatewayLineEventCreate(BaseModel):
     event_type: Annotated[
         str,
-        Field(alias="eventType", pattern="^(sip_registration|gateway_route|sim_voice|rtp_media|single_call|asr_tts|live_monitor|note)$"),
+        Field(
+            alias="eventType",
+            pattern="^(device_discovery|sip_registration|gateway_route|sim_voice|rtp_media|single_call|asr_tts|live_monitor|note)$",
+        ),
     ]
     status: Annotated[str, Field(min_length=1, max_length=40)]
     summary: Annotated[str, Field(max_length=240)] = ""
