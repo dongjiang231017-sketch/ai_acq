@@ -171,7 +171,7 @@ const fallbackTasks: OutreachTask[] = [
     connectedCount: 91,
     intentCount: 28,
     failedCount: 32,
-    concurrency: 10,
+    concurrency: 8,
     scriptId: null,
     scheduledAt: null,
     startedAt: null,
@@ -196,7 +196,7 @@ const fallbackTasks: OutreachTask[] = [
 ];
 
 const fallbackOverview: OutboundOverview = {
-  aiSeats: 10,
+  aiSeats: 8,
   activeCalls: 7,
   needsHandoff: 2,
   silentAlerts: 1,
@@ -1745,7 +1745,7 @@ function App() {
   });
   const [outboundForm, setOutboundForm] = useState({
     name: "南昌本地商家首轮外呼",
-    concurrency: 10,
+    concurrency: 8,
     scheduledAt: "",
   });
   const [outboundTaskMessage, setOutboundTaskMessage] = useState("选择线索后创建任务，再从任务列表启动。");
@@ -1871,6 +1871,15 @@ function App() {
   );
   const activeScript = scripts.find((script) => script.isActive) ?? scripts[0];
   const activeRule = recallRules[0];
+  const outboundConcurrencyLimit = Math.max(
+    1,
+    Number(
+      telephonyHealth.maxChannels
+        || telephonyConfig.asteriskMaxChannels
+        || telephonyConfig.voiceGatewayProfile?.maxChannels
+        || 1,
+    ),
+  );
   const callableLeadIds = useMemo(() => callableLeads.map((lead) => lead.id), [callableLeads]);
   const selectedCallableLeadIds = useMemo(
     () => selectedLeadIds.filter((leadId) => callableLeadIds.includes(leadId)),
@@ -2152,6 +2161,12 @@ function App() {
       return groups;
     }, {});
   }, [clientSettings]);
+
+  useEffect(() => {
+    setOutboundForm((current) =>
+      current.concurrency > outboundConcurrencyLimit ? { ...current, concurrency: outboundConcurrencyLimit } : current,
+    );
+  }, [outboundConcurrencyLimit]);
 
   useEffect(() => {
     setScriptDraft(scriptDraftFrom(activeScript));
@@ -2645,12 +2660,17 @@ function App() {
       setOutboundTaskMessage("请先选择要拨打的线索。");
       return;
     }
+    const concurrency = Math.max(1, Math.min(Number(outboundForm.concurrency) || 1, outboundConcurrencyLimit));
+    if (concurrency !== Number(outboundForm.concurrency)) {
+      setOutboundForm((current) => ({ ...current, concurrency }));
+      setOutboundTaskMessage(`当前线路最多支持 ${outboundConcurrencyLimit} 路并发，已自动调整。`);
+    }
 
     try {
       const created = await api.createOutboundTask({
         name: outboundForm.name,
         leadIds,
-        concurrency: Number(outboundForm.concurrency),
+        concurrency,
         scriptId: persistedScriptId(activeScript),
         scheduledAt: outboundForm.scheduledAt || null,
       });
@@ -6580,11 +6600,17 @@ function App() {
                   并发数量
                   <input
                     min={1}
-                    max={50}
+                    max={outboundConcurrencyLimit}
                     type="number"
                     value={outboundForm.concurrency}
-                    onChange={(event) => setOutboundForm({ ...outboundForm, concurrency: Number(event.target.value) })}
+                    onChange={(event) =>
+                      setOutboundForm({
+                        ...outboundForm,
+                        concurrency: Math.max(1, Math.min(Number(event.target.value) || 1, outboundConcurrencyLimit)),
+                      })
+                    }
                   />
+                  <small>当前线路最多 {outboundConcurrencyLimit} 路</small>
                 </label>
                 <label>
                   日期

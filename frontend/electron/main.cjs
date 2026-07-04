@@ -67,6 +67,14 @@ function runCommand(command, args, options = {}) {
   });
 }
 
+function quitForUpdate() {
+  setTimeout(() => {
+    app.quit();
+    const forcedExit = setTimeout(() => app.exit(0), 3000);
+    forcedExit.unref?.();
+  }, 500);
+}
+
 function selectUpdateFile(manifest) {
   return selectUpdateAsset(manifest)?.path || "";
 }
@@ -119,11 +127,39 @@ async function downloadUpdateAsset(asset, version) {
   await fs.promises.mkdir(updatesDir, { recursive: true });
   const fileName = path.basename(new URL(asset.url).pathname) || `ai-acq-client-update-${Date.now()}`;
   const filePath = path.join(updatesDir, fileName);
-  const response = await fetch(`${asset.url}?t=${Date.now()}`, {
-    headers: { "Cache-Control": "no-cache" },
-  });
-  if (!response.ok || !response.body) throw new Error(`客户端下载失败：HTTP ${response.status}`);
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+  try {
+    const response = await fetch(`${asset.url}?t=${Date.now()}`, {
+      headers: { "Cache-Control": "no-cache" },
+    });
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+  } catch (error) {
+    await fs.promises.rm(filePath, { force: true });
+    if (process.platform !== "darwin") {
+      const reason = error instanceof Error ? error.message : "网络错误";
+      throw new Error(`客户端下载失败：${reason}`);
+    }
+    try {
+      await runCommand("/usr/bin/curl", [
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        "900",
+        "--retry",
+        "2",
+        "--output",
+        filePath,
+        asset.url,
+      ]);
+    } catch (curlError) {
+      const reason = curlError instanceof Error ? curlError.message : "网络错误";
+      throw new Error(`客户端下载失败，fetch/curl 都没有成功：${reason}`);
+    }
+  }
   const digest = await sha256File(filePath);
   if (asset.sha256 && digest !== asset.sha256) {
     await fs.promises.rm(filePath, { force: true });
@@ -240,7 +276,7 @@ LOG=${shellQuote(logPath)}
       stdio: "ignore",
     }).unref();
   }
-  setTimeout(() => app.quit(), 500);
+  quitForUpdate();
   return {
     status: "installing",
     message: writable
@@ -262,7 +298,7 @@ async function installDownloadedUpdate(downloaded, asset, version) {
   }
   if (process.platform === "win32") {
     spawn(downloaded.filePath, ["/S"], { detached: true, stdio: "ignore" }).unref();
-    setTimeout(() => app.quit(), 500);
+    quitForUpdate();
     return { status: "installing", message: "更新包已校验，正在启动 Windows 安装程序。", installerPath: downloaded.filePath };
   }
   await shell.openPath(downloaded.filePath || asset.url);

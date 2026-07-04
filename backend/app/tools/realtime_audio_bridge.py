@@ -28,7 +28,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.growth import VoiceCloneRecord
-from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType
+from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
@@ -682,6 +682,15 @@ class AudioSocketCallSession:
                 continue
             signal = classify_realtime_call_input(text)
             if signal == "system_prompt":
+                if classify_answer_text(text) == CallAnswerType.VOICEMAIL:
+                    self.logger.emit(
+                        "voicemail_detected",
+                        callId=self.call_id,
+                        text=text,
+                        detail="识别到语音信箱/留言提示，直接挂断不留言。",
+                    )
+                    self.stop_event.set()
+                    continue
                 self._system_prompt_seen = True
                 self.logger.emit(
                     "system_prompt_ignored",
@@ -1289,6 +1298,15 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         signal = classify_realtime_call_input(clean)
         self.logger.emit("asr_final", callId=self.call_id, text=clean, provider="qwen_omni", signal=signal)
         if signal == "system_prompt":
+            if classify_answer_text(clean) == CallAnswerType.VOICEMAIL:
+                self.logger.emit(
+                    "voicemail_detected",
+                    callId=self.call_id,
+                    text=clean,
+                    detail="识别到语音信箱/留言提示，直接挂断不留言。",
+                )
+                self.stop_event.set()
+                return
             self._system_prompt_seen = True
             self.logger.emit(
                 "system_prompt_ignored",

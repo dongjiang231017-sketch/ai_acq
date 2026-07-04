@@ -232,6 +232,28 @@ class AsteriskAmiClient:
     def command(self, command: str) -> AmiResponse:
         return self.send_action({"Action": "Command", "Command": command})
 
+    def active_outbound_channel_count(self, trunk_name: str | None = None) -> int:
+        response = self.command("core show channels concise")
+        return active_outbound_channel_count_from_output(response.field_text("Output") or response.message, trunk_name)
+
+    def wait_for_outbound_capacity(
+        self,
+        *,
+        max_active_channels: int,
+        trunk_name: str | None = None,
+        timeout_seconds: float = 120.0,
+        poll_seconds: float = 1.0,
+    ) -> int:
+        capacity = max(1, int(max_active_channels or 1))
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            active = self.active_outbound_channel_count(trunk_name)
+            if active < capacity:
+                return active
+            if time.monotonic() >= deadline:
+                raise AsteriskAmiError(f"当前线路已有 {active} 路通话，占满 {capacity} 路并发容量，等待释放超时")
+            time.sleep(max(0.2, poll_seconds))
+
     def originate(
         self,
         phone: str,
@@ -470,6 +492,24 @@ def render_originate_channel(phone: str) -> str:
         trunk=profile.trunk_name or telephony_str("ASTERISK_TRUNK_NAME", fallback=settings.asterisk_trunk_name),
     )
     return clean_ami_field_value(channel, "AMI Channel")
+
+
+def active_outbound_channel_count_from_output(output: str, trunk_name: str | None = None) -> int:
+    trunk = (trunk_name or "").strip()
+    active_channels: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("--") or "active channel" in line.lower():
+            continue
+        channel = line.split("!", 1)[0].strip()
+        if not channel:
+            continue
+        if trunk:
+            if channel.startswith(f"PJSIP/{trunk}-") or channel.startswith(f"SIP/{trunk}-"):
+                active_channels.add(channel)
+        elif channel.startswith(("PJSIP/", "SIP/")):
+            active_channels.add(channel)
+    return len(active_channels)
 
 
 def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:

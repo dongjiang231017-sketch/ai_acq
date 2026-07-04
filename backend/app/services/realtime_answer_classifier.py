@@ -41,11 +41,13 @@ class AnswerClassifier:
         voice_rms_threshold: int = 500,
         long_speech_threshold: float = 2.5,
         short_speech_max: float = 1.5,
+        short_speech_fast_seconds: float = 0.9,
     ) -> None:
         self.max_wait_seconds = max_wait_seconds
         self.voice_rms_threshold = voice_rms_threshold
         self.long_speech_threshold = long_speech_threshold
         self.short_speech_max = short_speech_max
+        self.short_speech_fast_seconds = short_speech_fast_seconds
         self.state = AnswerDetectionState()
 
     def on_audio_frame(self, rms: int, now: float | None = None) -> CallAnswerType | None:
@@ -106,6 +108,12 @@ class AnswerClassifier:
             self.state.longest_speech = max(self.state.longest_speech, current_duration)
         if current_duration > self.long_speech_threshold and self.state.speech_count == 1:
             return self._classify(CallAnswerType.PHONE_ASSISTANT, "audio:long_single_speech")
+        if (
+            self.state.speech_count >= 2
+            and self.state.longest_speech < self.short_speech_max
+            and now - self.state.first_audio_at >= min(self.max_wait_seconds, self.short_speech_fast_seconds)
+        ):
+            return self._classify(CallAnswerType.HUMAN, "audio:multiple_short_speech_fast")
         if now - self.state.first_audio_at >= self.max_wait_seconds:
             return self.classify_after_wait(now)
         return None

@@ -78,6 +78,11 @@ def _seed_default_script(db: Session) -> CallScript:
     return script
 
 
+def _current_call_channel_limit() -> int:
+    profile = current_voice_gateway_profile()
+    return max(1, telephony_int("ASTERISK_MAX_CHANNELS", "VOICE_GATEWAY_MAX_CHANNELS", fallback=profile.max_channels))
+
+
 @router.get("/overview", response_model=OutboundOverview)
 def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -93,9 +98,10 @@ def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     intent_count = db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.intent_level.in_(["A", "B"]))) or 0
     needs_handoff = db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.need_handoff.is_(True))) or 0
     active_tasks = db.scalar(select(func.count()).select_from(OutreachTask).where(OutreachTask.status == "运行中")) or 0
-    active_calls = min(int(active_tasks) * 5, 12)
+    channel_limit = _current_call_channel_limit()
+    active_calls = min(int(active_tasks) * channel_limit, channel_limit)
     return {
-        "aiSeats": 10,
+        "aiSeats": channel_limit,
         "activeCalls": active_calls,
         "needsHandoff": int(needs_handoff),
         "silentAlerts": 1 if active_calls > 0 else 0,
@@ -322,6 +328,9 @@ def list_outbound_tasks(db: Session = Depends(get_db)) -> list[OutreachTask]:
 
 @router.post("/tasks", response_model=TaskRead)
 def create_outbound_task(payload: OutboundTaskCreate, db: Session = Depends(get_db)) -> OutreachTask:
+    channel_limit = _current_call_channel_limit()
+    if payload.concurrency > channel_limit:
+        raise HTTPException(status_code=400, detail=f"当前语音网关最多支持 {channel_limit} 路并发，请把并发数量调到 {channel_limit} 或以下。")
     unique_lead_ids = list(dict.fromkeys(payload.lead_ids))
     leads = list(db.scalars(select(MerchantLead).where(MerchantLead.id.in_(unique_lead_ids))).all())
     if len(leads) != len(unique_lead_ids):

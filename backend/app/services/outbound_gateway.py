@@ -7,8 +7,8 @@ from app.core.config import settings
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
 from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, render_originate_channel
-from app.services.telephony_runtime_config import telephony_bool, telephony_str
-from app.services.voice_gateway_profiles import voice_gateway_label
+from app.services.telephony_runtime_config import telephony_bool, telephony_int, telephony_str
+from app.services.voice_gateway_profiles import current_voice_gateway_profile, voice_gateway_label
 
 
 class OutboundGatewayConfigurationError(RuntimeError):
@@ -117,6 +117,7 @@ class SimulatorGateway:
 class AsteriskGateway:
     def place_call(self, attempt: CallAttempt) -> CallResult:
         gateway = voice_gateway_label()
+        profile = current_voice_gateway_profile()
         if not telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled):
             raise OutboundGatewayConfigurationError("真实线路拨号开关未启用，请先完成语音网关单号试拨。")
         if not telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled):
@@ -139,12 +140,24 @@ class AsteriskGateway:
         try:
             render_originate_channel(attempt.lead.phone)
             with AsteriskAmiClient() as client:
+                channel_limit = min(
+                    max(1, int(attempt.task.concurrency or 1)),
+                    max(1, telephony_int("ASTERISK_MAX_CHANNELS", "VOICE_GATEWAY_MAX_CHANNELS", fallback=profile.max_channels)),
+                )
+                active_before_submit = client.wait_for_outbound_capacity(
+                    max_active_channels=channel_limit,
+                    trunk_name=profile.trunk_name,
+                    timeout_seconds=settings.asterisk_channel_capacity_wait_seconds,
+                    poll_seconds=settings.asterisk_channel_capacity_poll_seconds,
+                )
                 result = client.originate(
                     attempt.lead.phone,
                     variables={
                         "AI_ACQ_TASK_ID": attempt.task.id,
                         "AI_ACQ_LEAD_ID": attempt.lead.id,
                         "AI_ACQ_SEAT": attempt.ai_seat,
+                        "AI_ACQ_CHANNEL_LIMIT": str(channel_limit),
+                        "AI_ACQ_ACTIVE_CHANNELS_BEFORE_SUBMIT": str(active_before_submit),
                     },
                 )
         except AsteriskAmiError as exc:
