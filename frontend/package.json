@@ -1,7 +1,7 @@
 {
   "name": "ai-acq-qian-frontend",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -145,6 +145,7 @@
   "build": {
     "appId": "com.aiacq.qian",
     "productName": "商家AI获客客户端",
+    "afterPack": "scripts/sign-mac-ad-hoc.cjs",
     "directories": {
       "output": "release"
     },
