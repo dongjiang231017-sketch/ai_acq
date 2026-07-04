@@ -76,6 +76,7 @@ type AiAcqDesktopAsteriskStatus = {
   voiceGatewayProfile: string;
   voiceGatewayLabel: string;
   voiceGatewayHost: string;
+  voiceGatewayAdminUrl?: string;
   voiceGatewaySipPort: number;
   voiceGatewayRegisterEnabled: boolean;
   uc100Host: string;
@@ -91,6 +92,7 @@ type AiAcqDesktopAsteriskStatus = {
     status: "current" | "updated" | "not_found" | "disabled" | string;
     host?: string;
     sipPort?: number;
+    adminUrl?: string;
     previousHost?: string;
     previousSipPort?: number;
     source?: string;
@@ -106,6 +108,7 @@ type AiAcqDesktopAsteriskStatus = {
     title: string;
     message: string;
     gatewayAddress: string;
+    gatewayAdminUrl?: string;
     previousGatewayAddress?: string;
     discoveryStatus?: string;
     discoverySource?: string;

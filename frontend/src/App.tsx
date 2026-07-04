@@ -891,7 +891,13 @@ function isPositiveGatewayDiscovery(status?: string | null) {
 }
 
 function selectVoiceGatewayLine(lines: VoiceGatewayLine[], status: AiAcqDesktopAsteriskStatus) {
-  const discoveredHost = hostFromDeviceAdminUrl(status.customerDelivery?.gatewayAddress || status.voiceGatewayHost);
+  const discoveredHost = hostFromDeviceAdminUrl(
+    status.customerDelivery?.gatewayAdminUrl ||
+      status.voiceGatewayDiscovery?.adminUrl ||
+      status.voiceGatewayDiscovery?.host ||
+      status.voiceGatewayHost ||
+      status.customerDelivery?.gatewayAddress,
+  );
   const discoveredLabel = String(status.voiceGatewayLabel || "").toLowerCase();
   return (
     lines.find((line) => discoveredHost && hostFromDeviceAdminUrl(line.deviceAdminUrl) === discoveredHost) ??
@@ -2687,9 +2693,10 @@ function App() {
     if (!auth?.accessToken) return;
     const delivery = status.customerDelivery;
     const discovery = status.voiceGatewayDiscovery;
-    const rawGatewayAddress = delivery?.gatewayAddress || status.voiceGatewayHost || discovery?.host || "";
-    const deviceAdminUrl = normalizeDeviceAdminUrl(rawGatewayAddress);
-    const deviceHost = hostFromDeviceAdminUrl(deviceAdminUrl || rawGatewayAddress);
+    const rawAdminAddress = delivery?.gatewayAdminUrl || discovery?.adminUrl || status.voiceGatewayAdminUrl || "";
+    const rawGatewayHost = discovery?.host || status.voiceGatewayHost || delivery?.gatewayAddress || "";
+    const deviceAdminUrl = normalizeDeviceAdminUrl(rawAdminAddress);
+    const deviceHost = hostFromDeviceAdminUrl(deviceAdminUrl || rawGatewayHost);
     const discoveryStatus = discovery?.status || delivery?.discoveryStatus || delivery?.status || "";
     const hasDiscoverySignal = Boolean(delivery || discovery || deviceAdminUrl || deviceHost);
     if (!hasDiscoverySignal) return;

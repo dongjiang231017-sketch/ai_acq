@@ -63,6 +63,7 @@ class AsteriskSidecar {
       voiceGatewayProfile: layout.state.voiceGatewayProfile,
       voiceGatewayLabel: layout.state.voiceGatewayLabel,
       voiceGatewayHost: layout.state.voiceGatewayHost,
+      voiceGatewayAdminUrl: layout.state.voiceGatewayAdminUrl || "",
       voiceGatewaySipPort: layout.state.voiceGatewaySipPort,
       voiceGatewayRegisterEnabled: Boolean(layout.state.voiceGatewaySipUsername && layout.state.voiceGatewaySipPassword),
       uc100Host: layout.state.uc100Host,
@@ -183,6 +184,7 @@ class AsteriskSidecar {
       voiceGatewayProfile: process.env.AI_ACQ_VOICE_GATEWAY_PROFILE || DEFAULTS.voiceGatewayProfile,
       voiceGatewayLabel: process.env.AI_ACQ_VOICE_GATEWAY_LABEL || DEFAULTS.voiceGatewayLabel,
       voiceGatewayHost: process.env.AI_ACQ_VOICE_GATEWAY_HOST || process.env.AI_ACQ_UC100_HOST || DEFAULTS.voiceGatewayHost,
+      voiceGatewayAdminUrl: process.env.AI_ACQ_VOICE_GATEWAY_ADMIN_URL || "",
       voiceGatewaySipPort: Number(process.env.AI_ACQ_VOICE_GATEWAY_SIP_PORT || process.env.AI_ACQ_UC100_SIP_PORT || DEFAULTS.voiceGatewaySipPort),
       voiceGatewaySipUsername: process.env.AI_ACQ_VOICE_GATEWAY_SIP_USERNAME || process.env.AI_ACQ_UC100_SIP_USERNAME || "",
       voiceGatewaySipPassword: process.env.AI_ACQ_VOICE_GATEWAY_SIP_PASSWORD || process.env.AI_ACQ_UC100_SIP_PASSWORD || "",
@@ -209,6 +211,7 @@ class AsteriskSidecar {
     if (process.env.AI_ACQ_VOICE_GATEWAY_HOST || process.env.AI_ACQ_UC100_HOST) {
       state.voiceGatewayHost = process.env.AI_ACQ_VOICE_GATEWAY_HOST || process.env.AI_ACQ_UC100_HOST;
     }
+    if (process.env.AI_ACQ_VOICE_GATEWAY_ADMIN_URL) state.voiceGatewayAdminUrl = process.env.AI_ACQ_VOICE_GATEWAY_ADMIN_URL;
     if (process.env.AI_ACQ_VOICE_GATEWAY_SIP_PORT || process.env.AI_ACQ_UC100_SIP_PORT) {
       state.voiceGatewaySipPort = Number(process.env.AI_ACQ_VOICE_GATEWAY_SIP_PORT || process.env.AI_ACQ_UC100_SIP_PORT);
     }
@@ -271,16 +274,19 @@ class AsteriskSidecar {
           voiceGatewaySipPort: state.voiceGatewaySipPort,
           voiceGatewayProfile: state.voiceGatewayProfile,
           voiceGatewayLabel: state.voiceGatewayLabel,
+          voiceGatewayAdminUrl: state.voiceGatewayAdminUrl || "",
           trunkName: state.trunkName,
           maxChannels: state.maxChannels,
         });
         state.voiceGatewaySipPort = currentGateway.sipPort;
+        if (currentGateway.adminUrl) state.voiceGatewayAdminUrl = currentGateway.adminUrl;
         state.uc100SipPort = currentGateway.sipPort;
         applyDiscoveredVoiceGatewayProfile(state, currentGateway);
         const stateAfter = JSON.stringify({
           voiceGatewaySipPort: state.voiceGatewaySipPort,
           voiceGatewayProfile: state.voiceGatewayProfile,
           voiceGatewayLabel: state.voiceGatewayLabel,
+          voiceGatewayAdminUrl: state.voiceGatewayAdminUrl || "",
           trunkName: state.trunkName,
           maxChannels: state.maxChannels,
         });
@@ -292,6 +298,7 @@ class AsteriskSidecar {
           status: "current",
           host: currentHost,
           sipPort: currentGateway.sipPort,
+          adminUrl: currentGateway.adminUrl || state.voiceGatewayAdminUrl || "",
           source: currentGateway.source,
           message: `当前语音网关 ${currentHost}:${currentGateway.sipPort} 可达，无需重新匹配。`,
         };
@@ -321,6 +328,7 @@ class AsteriskSidecar {
         status: "current",
         host: discovery.host,
         sipPort: discovery.sipPort,
+        adminUrl: discovery.adminUrl || state.voiceGatewayAdminUrl || "",
         source: discovery.source,
         message: `当前语音网关 ${discovery.host}:${discovery.sipPort} 已重新确认可达。`,
       };
@@ -330,6 +338,7 @@ class AsteriskSidecar {
     const previousSipPort = sipPort;
     state.voiceGatewayHost = discovery.host;
     state.voiceGatewaySipPort = discovery.sipPort;
+    state.voiceGatewayAdminUrl = discovery.adminUrl || "";
     state.uc100Host = discovery.host;
     state.uc100SipPort = discovery.sipPort;
     applyDiscoveredVoiceGatewayProfile(state, discovery);
@@ -345,6 +354,7 @@ class AsteriskSidecar {
       status: "updated",
       host: discovery.host,
       sipPort: discovery.sipPort,
+      adminUrl: discovery.adminUrl || "",
       previousHost,
       previousSipPort,
       source: discovery.source,
@@ -636,6 +646,7 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
 
   buildCustomerDelivery({ layout, runtime, running, amiReachable, audioSocketReachable, voiceGatewayDiscovery }) {
     const gatewayAddress = `${layout.state.voiceGatewayHost}:${layout.state.voiceGatewaySipPort}`;
+    const gatewayAdminUrl = voiceGatewayDiscovery?.adminUrl || layout.state.voiceGatewayAdminUrl || "";
     const actionItems = [];
     let status = "pass";
     let title = "客户现场可单号试拨";
@@ -692,6 +703,7 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
       title,
       message,
       gatewayAddress,
+      gatewayAdminUrl,
       previousGatewayAddress:
         voiceGatewayDiscovery?.previousHost && voiceGatewayDiscovery?.previousSipPort
           ? `${voiceGatewayDiscovery.previousHost}:${voiceGatewayDiscovery.previousSipPort}`
@@ -823,6 +835,7 @@ async function discoverVoiceGateway({ currentHost, sipPort, httpPort, timeoutMs,
       return {
         host,
         sipPort: sipOpenPort || httpSignature.sipPort || preferredSipPort(sipPorts),
+        adminUrl: httpSignature.adminUrl || httpGatewayAdminUrl(host, httpPort),
         source: httpSignature.source || (httpSignature.title ? `http:${httpSignature.title}` : "http:voice-gateway"),
         profileKey: httpSignature.profileKey,
         label: httpSignature.label,
@@ -912,6 +925,7 @@ async function confirmVoiceGatewayHost(host, sipPort, httpPort, timeoutMs) {
       host: normalized,
       sipPort: sipOpenPort || httpSignature.sipPort || preferredSipPort(sipPorts),
       source: httpSignature.source || "http:voice-gateway",
+      adminUrl: httpSignature.adminUrl || httpGatewayAdminUrl(normalized, httpPort),
       profileKey: httpSignature.profileKey,
       label: httpSignature.label,
       trunkName: httpSignature.trunkName,
@@ -963,12 +977,20 @@ function readVoiceGatewayHttpSignature(host, port, timeoutMs) {
         resolve({
           ...signature,
           title,
+          adminUrl: signature.matched ? httpGatewayAdminUrl(host, port) : "",
         });
       });
     });
     request.setTimeout(timeoutMs, () => request.destroy());
     request.on("error", () => resolve({ matched: false, title: "" }));
   });
+}
+
+function httpGatewayAdminUrl(host, port) {
+  const normalizedHost = String(host || "").trim();
+  const normalizedPort = Number(port);
+  if (!normalizedHost) return "";
+  return normalizedPort && normalizedPort !== 80 ? `http://${normalizedHost}:${normalizedPort}/` : `http://${normalizedHost}/`;
 }
 
 function classifyVoiceGatewayHttpSignature({ title, server, authenticate, cookies, body, statusCode }) {

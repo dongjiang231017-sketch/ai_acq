@@ -580,8 +580,6 @@ def _step(key: str, label: str, detail: str, expected_result: str) -> dict[str, 
 
 def _normalise_device_admin_url(admin_url: str | None, device_ip: str | None) -> str:
     value = (admin_url or "").strip()
-    if not value and device_ip:
-        value = device_ip.strip()
     if not value:
         return ""
     if not re.match(r"^https?://", value, flags=re.IGNORECASE):
@@ -724,7 +722,7 @@ def _line_payload_from_discovery(
             "sipServerPort": 5060,
             "sipTransport": "UDP",
             "channelCount": PROFILE_CHANNEL_DEFAULTS.get(profile_key, 1),
-            "deviceAdminUrl": discovery.device_admin_url or discovery.device_ip or None,
+            "deviceAdminUrl": discovery.device_admin_url or None,
             "deviceSerial": discovery.device_serial or None,
             "deviceMac": discovery.device_mac or None,
             "networkNote": _device_discovery_note_from_record(discovery),
@@ -796,8 +794,6 @@ def _apply_device_discovery_to_line(
 ) -> None:
     if discovery.device_admin_url and (overwrite_device_address or not line.device_admin_url):
         line.device_admin_url = discovery.device_admin_url
-    elif discovery.device_ip and (overwrite_device_address or not line.device_admin_url):
-        line.device_admin_url = _normalise_device_admin_url("", discovery.device_ip)
     if discovery.device_mac and (overwrite_device_address or not line.device_mac):
         line.device_mac = discovery.device_mac
     if discovery.device_serial and (overwrite_device_address or not line.device_serial):
