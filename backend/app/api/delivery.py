@@ -303,9 +303,10 @@ def report_voice_gateway_device_discovery(
     discovery_note = _device_discovery_note(payload, admin_url)
     if discovery_note:
         line.network_note = _append_note(line.network_note, discovery_note)
-    if _is_fail_status(payload.status):
+    has_device_identity = _payload_has_device_identity(payload, admin_url)
+    if _is_fail_status(payload.status) and not has_device_identity:
         line.status = "设备未发现"
-    elif _is_pass_status(payload.status) or payload.status in {"found", "current", "updated", "已发现", "已绑定"}:
+    elif has_device_identity or _is_pass_status(payload.status) or payload.status in {"found", "current", "updated", "已发现", "已绑定"}:
         line.status = "待设备注册" if not _is_pass_status(line.registration_status) else _line_status(line)
     _record_device_discovery(db, line.owner_user_id, current_user, payload, matched_line_id=line.id)
     line.updated_at = datetime.utcnow()
@@ -647,10 +648,10 @@ def _device_discovery_can_bind(discovery: VoiceGatewayDeviceDiscovery) -> bool:
     status_value = (discovery.status or "").strip()
     if status_value.lower() in {"not_found", "missing", "none", "unavailable"} or status_value in {"未发现", "无设备"}:
         return False
-    if _is_fail_status(status_value):
-        return False
     if discovery.device_admin_url or discovery.device_ip or discovery.device_mac or discovery.device_serial:
         return True
+    if _is_fail_status(status_value):
+        return False
     return status_value.lower() in {"found", "current", "updated", "pass", "passed", "ready", "ok"} or status_value in {
         "已发现",
         "已绑定",
@@ -844,6 +845,15 @@ def _device_discovery_note(payload: VoiceGatewayDeviceDiscoveryUpdate, admin_url
     if payload.summary:
         parts.append(payload.summary.strip())
     return "；".join(part for part in parts if part)
+
+
+def _payload_has_device_identity(payload: VoiceGatewayDeviceDiscoveryUpdate, admin_url: str) -> bool:
+    return bool(
+        admin_url
+        or (payload.device_ip or "").strip()
+        or (payload.device_mac or "").strip()
+        or (payload.device_serial or "").strip()
+    )
 
 
 def _append_note(current: str, note: str) -> str:

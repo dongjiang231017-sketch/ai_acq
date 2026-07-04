@@ -890,6 +890,10 @@ function isPositiveGatewayDiscovery(status?: string | null) {
   return ["current", "updated", "found", "pass", "已发现", "已绑定"].includes(String(status || ""));
 }
 
+function isNegativeGatewayDiscovery(status?: string | null) {
+  return ["not_found", "missing", "none", "unavailable", "disabled", "未发现", "无设备"].includes(String(status || ""));
+}
+
 function selectVoiceGatewayLine(lines: VoiceGatewayLine[], status: AiAcqDesktopAsteriskStatus) {
   const discoveredHost = hostFromDeviceAdminUrl(
     status.customerDelivery?.gatewayAdminUrl ||
@@ -2701,8 +2705,15 @@ function App() {
     const hasDiscoverySignal = Boolean(delivery || discovery || deviceAdminUrl || deviceHost);
     if (!hasDiscoverySignal) return;
     const source = discovery?.source || delivery?.discoverySource || "desktop_client_discovery";
-    const reportStatus = isPositiveGatewayDiscovery(discoveryStatus) || deviceAdminUrl || deviceHost
-      ? discoveryStatus || "found"
+    const hasDetectedGateway = !isNegativeGatewayDiscovery(discoveryStatus) && Boolean(
+      discovery?.adminUrl || discovery?.host || deviceAdminUrl || deviceHost || isPositiveGatewayDiscovery(discoveryStatus),
+    );
+    const detectedDeviceAdminUrl = hasDetectedGateway ? deviceAdminUrl : "";
+    const detectedDeviceHost = hasDetectedGateway ? deviceHost : "";
+    const reportStatus = hasDetectedGateway
+      ? isPositiveGatewayDiscovery(discoveryStatus)
+        ? discoveryStatus
+        : "found"
       : "not_found";
     const evidence = {
       source,
@@ -2717,11 +2728,15 @@ function App() {
       previousGatewayAddress: delivery?.previousGatewayAddress,
     };
     const discoveryPayload = {
-      deviceAdminUrl: deviceAdminUrl || null,
-      deviceIp: deviceHost || null,
+      deviceAdminUrl: detectedDeviceAdminUrl || null,
+      deviceIp: detectedDeviceHost || null,
       source,
       status: reportStatus,
-      summary: deviceAdminUrl ? "客户端现场检测到语音网关后台地址" : "客户端现场检测到语音网关状态",
+      summary: hasDetectedGateway
+        ? detectedDeviceAdminUrl
+          ? "客户端现场检测到语音网关后台地址"
+          : "客户端现场检测到语音网关状态"
+        : "客户端现场未发现语音网关",
       detail: delivery?.message || discovery?.message || status.nextStep || "",
       evidenceJson: JSON.stringify(evidence),
     };
@@ -2737,7 +2752,7 @@ function App() {
     }
 
     if (lines.length === 0) {
-      const reportKey = `unmatched|${deviceAdminUrl}|${deviceHost}|${reportStatus}|${source}`;
+      const reportKey = `unmatched|${detectedDeviceAdminUrl}|${detectedDeviceHost}|${reportStatus}|${source}`;
       if (reportedVoiceGatewayDiscoveryRef.current === reportKey) return;
       try {
         const createdDiscovery = await api.createVoiceGatewayDeviceDiscovery({
@@ -2764,7 +2779,7 @@ function App() {
 
     const line = selectVoiceGatewayLine(lines, status);
     if (!line) return;
-    const reportKey = `${line.id}|${deviceAdminUrl}|${deviceHost}|${reportStatus}|${source}`;
+    const reportKey = `${line.id}|${detectedDeviceAdminUrl}|${detectedDeviceHost}|${reportStatus}|${source}`;
     if (reportedVoiceGatewayDiscoveryRef.current === reportKey) return;
 
     try {
@@ -2775,7 +2790,7 @@ function App() {
         return exists ? current.map((item) => (item.id === updatedLine.id ? updatedLine : item)) : [updatedLine, ...current];
       });
       setVoiceGatewayDiscoverySyncMessage(
-        deviceAdminUrl ? "现场设备地址已同步到后台配置卡。" : "现场设备检测结果已同步到后台。",
+        detectedDeviceAdminUrl ? "现场设备地址已同步到后台配置卡。" : "现场设备检测结果已同步到后台。",
       );
     } catch (error) {
       setVoiceGatewayDiscoverySyncMessage(error instanceof Error ? error.message : "现场设备同步到后台失败。");
