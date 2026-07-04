@@ -266,6 +266,100 @@ export type VoiceGatewayProfile = {
   notes: string[];
 };
 
+export type VoiceGatewayConfigField = {
+  label: string;
+  value: string;
+  target: string;
+  note: string;
+};
+
+export type VoiceGatewayDeliveryStep = {
+  key: string;
+  label: string;
+  detail: string;
+  expectedResult: string;
+};
+
+export type VoiceGatewayConfigCard = {
+  lineId: string;
+  customerName: string;
+  lineName: string;
+  gatewayProfileKey: string;
+  gatewayLabel: string;
+  sipServer: string;
+  sipPort: number;
+  sipTransport: string;
+  sipUsername: string;
+  sipAuthUsername: string;
+  sipPasswordSecretAlias: string;
+  sipPasswordDisplay: string;
+  trunkName: string;
+  channelCount: number;
+  codecPrimary: string;
+  codecSecondary: string;
+  dtmfMode: string;
+  rtpPortRange: string;
+  routeDirection: string;
+  fieldMapping: VoiceGatewayConfigField[];
+  deliverySteps: VoiceGatewayDeliveryStep[];
+};
+
+export type VoiceGatewayLine = {
+  id: string;
+  ownerUserId: string;
+  createdByUserId?: string | null;
+  lineName: string;
+  customerName: string;
+  status: string;
+  gatewayProfileKey: string;
+  gatewayLabel: string;
+  gatewayVendor: string;
+  gatewayModel: string;
+  gatewayCategory: string;
+  deploymentMode: string;
+  sipServerHost: string;
+  sipServerPort: number;
+  sipTransport: string;
+  sipUsername: string;
+  sipAuthUsername: string;
+  sipPasswordSecretAlias: string;
+  sipPasswordDisplay: string;
+  trunkName: string;
+  channelCount: number;
+  codecPrimary: string;
+  codecSecondary: string;
+  dtmfMode: string;
+  rtpPortRange: string;
+  routeDirection: string;
+  deviceAdminUrl: string;
+  deviceSerial: string;
+  deviceMac: string;
+  networkNote: string;
+  registrationStatus: string;
+  routeStatus: string;
+  simStatus: string;
+  rtpStatus: string;
+  acceptanceStatus: string;
+  lastRegisteredAt?: string | null;
+  lastPreflightAt?: string | null;
+  notes: string;
+  configCard: VoiceGatewayConfigCard;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VoiceGatewayDeviceDiscoveryUpdate = {
+  deviceAdminUrl?: string | null;
+  deviceIp?: string | null;
+  deviceMac?: string | null;
+  deviceSerial?: string | null;
+  source?: string;
+  status?: string;
+  summary?: string;
+  detail?: string;
+  evidenceJson?: string;
+};
+
 export type TelephonyConfig = {
   gatewayMode: string;
   asteriskDeploymentMode: string;
@@ -1250,6 +1344,12 @@ export const api = {
     const query = phone?.trim() ? `?phone=${encodeURIComponent(phone.trim())}` : "";
     return request<TelephonyPreflight>(`/outbound/telephony/preflight${query}`);
   },
+  voiceGatewayLines: () => request<VoiceGatewayLine[]>("/delivery/voice-gateway-lines"),
+  reportVoiceGatewayDeviceDiscovery: (lineId: string, payload: VoiceGatewayDeviceDiscoveryUpdate) =>
+    request<VoiceGatewayLine>(`/delivery/voice-gateway-lines/${lineId}/device-discovery`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   createTelephonyTestCall: (payload: { phone: string; callerId?: string | null }) =>
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",

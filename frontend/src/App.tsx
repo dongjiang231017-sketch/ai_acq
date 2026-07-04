@@ -73,6 +73,7 @@ import {
   TelephonyLineRecovery,
   TelephonyPreflight,
   TelephonyTestCallResult,
+  VoiceGatewayLine,
   VoiceGatewayProfile,
   VoiceCloneRecord,
   VoiceOverview,
@@ -862,6 +863,45 @@ function commentAutomationStatusText(status: string) {
 
 function compactDateTime(value?: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "现在";
+}
+
+function normalizeDeviceAdminUrl(value?: string | null) {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+    return `${parsed.protocol}//${parsed.host}/`;
+  } catch {
+    return trimmed;
+  }
+}
+
+function hostFromDeviceAdminUrl(value?: string | null) {
+  const normalized = normalizeDeviceAdminUrl(value);
+  if (!normalized) return "";
+  try {
+    return new URL(normalized).hostname;
+  } catch {
+    return normalized.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").split(":")[0] ?? "";
+  }
+}
+
+function isPositiveGatewayDiscovery(status?: string | null) {
+  return ["current", "updated", "found", "pass", "已发现", "已绑定"].includes(String(status || ""));
+}
+
+function selectVoiceGatewayLine(lines: VoiceGatewayLine[], status: AiAcqDesktopAsteriskStatus) {
+  const discoveredHost = hostFromDeviceAdminUrl(status.customerDelivery?.gatewayAddress || status.voiceGatewayHost);
+  const discoveredLabel = String(status.voiceGatewayLabel || "").toLowerCase();
+  return (
+    lines.find((line) => discoveredHost && hostFromDeviceAdminUrl(line.deviceAdminUrl) === discoveredHost) ??
+    lines.find((line) => {
+      const label = `${line.gatewayLabel} ${line.gatewayVendor} ${line.gatewayModel} ${line.gatewayProfileKey}`.toLowerCase();
+      return discoveredLabel && (label.includes(discoveredLabel) || discoveredLabel.includes(label));
+    }) ??
+    lines.find((line) => !line.deviceAdminUrl && ["待设备发现", "设备未发现", "待设备注册", "待配置", "待下发"].includes(line.status)) ??
+    lines[0]
+  );
 }
 
 const defaultDmPlatformForm: Omit<DmPlatformConfig, "id" | "createdAt"> = {
@@ -1776,6 +1816,8 @@ function App() {
   const [isDesktopClient, setIsDesktopClient] = useState(false);
   const [asteriskSidecarStatus, setAsteriskSidecarStatus] = useState<AiAcqDesktopAsteriskStatus | null>(null);
   const [isStartingAsteriskSidecar, setIsStartingAsteriskSidecar] = useState(false);
+  const [voiceGatewayLines, setVoiceGatewayLines] = useState<VoiceGatewayLine[]>([]);
+  const [voiceGatewayDiscoverySyncMessage, setVoiceGatewayDiscoverySyncMessage] = useState("");
   const [selectedDmLoginAccountId, setSelectedDmLoginAccountId] = useState<string | null>(null);
   const [editingDmPlatformConfigId, setEditingDmPlatformConfigId] = useState<string | null>(null);
   const [dmPlatformForm, setDmPlatformForm] = useState(defaultDmPlatformForm);
@@ -1798,6 +1840,7 @@ function App() {
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
   const nativeLoginViewportRef = useRef<HTMLDivElement | null>(null);
   const nativeLoginWebviewRef = useRef<DmLoginWebviewElement | null>(null);
+  const reportedVoiceGatewayDiscoveryRef = useRef("");
 
   const active = useMemo(
     () => modules.find((module) => module.key === activeModule) ?? modules[0],
@@ -2255,6 +2298,7 @@ function App() {
       api.collectionTasks(),
       api.collectionRuns(),
       api.rawLeadRecords(),
+      api.voiceGatewayLines(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -2387,6 +2431,7 @@ function App() {
     if (results[40].status === "fulfilled") setCollectionTasks(results[40].value);
     if (results[41].status === "fulfilled") setCollectionRuns(results[41].value);
     if (results[42].status === "fulfilled") setRawLeadRecords(results[42].value);
+    if (results[43].status === "fulfilled") setVoiceGatewayLines(results[43].value);
     setIsLoading(false);
   }
 
@@ -2632,8 +2677,79 @@ function App() {
     try {
       const status = await window.aiAcqDesktop.getAsteriskSidecarStatus();
       setAsteriskSidecarStatus(status);
+      await syncVoiceGatewayDeviceDiscovery(status);
     } catch (error) {
       setTelephonyMessage(error instanceof Error ? error.message : "线路检测状态读取失败");
+    }
+  }
+
+  async function syncVoiceGatewayDeviceDiscovery(status: AiAcqDesktopAsteriskStatus) {
+    if (!auth?.accessToken) return;
+    const delivery = status.customerDelivery;
+    const discovery = status.voiceGatewayDiscovery;
+    const rawGatewayAddress = delivery?.gatewayAddress || status.voiceGatewayHost || discovery?.host || "";
+    const deviceAdminUrl = normalizeDeviceAdminUrl(rawGatewayAddress);
+    const deviceHost = hostFromDeviceAdminUrl(deviceAdminUrl || rawGatewayAddress);
+    const discoveryStatus = discovery?.status || delivery?.discoveryStatus || delivery?.status || "";
+    const hasDiscoverySignal = Boolean(delivery || discovery || deviceAdminUrl || deviceHost);
+    if (!hasDiscoverySignal) return;
+
+    let lines = voiceGatewayLines;
+    if (lines.length === 0) {
+      try {
+        lines = await api.voiceGatewayLines();
+        setVoiceGatewayLines(lines);
+      } catch {
+        return;
+      }
+    }
+
+    if (lines.length === 0) {
+      if (deviceAdminUrl || deviceHost) setVoiceGatewayDiscoverySyncMessage("已发现现场设备，等待后台生成客户交付线路后自动绑定。");
+      return;
+    }
+
+    const line = selectVoiceGatewayLine(lines, status);
+    if (!line) return;
+    const source = discovery?.source || delivery?.discoverySource || "desktop_client_discovery";
+    const reportStatus = isPositiveGatewayDiscovery(discoveryStatus) || deviceAdminUrl || deviceHost
+      ? discoveryStatus || "found"
+      : "not_found";
+    const reportKey = `${line.id}|${deviceAdminUrl}|${deviceHost}|${reportStatus}|${source}`;
+    if (reportedVoiceGatewayDiscoveryRef.current === reportKey) return;
+
+    const evidence = {
+      source,
+      deliveryMode: status.deliveryMode,
+      runtimeMode: status.runtimeMode,
+      voiceGatewayLabel: status.voiceGatewayLabel,
+      voiceGatewayHost: status.voiceGatewayHost,
+      voiceGatewaySipPort: status.voiceGatewaySipPort,
+      discoveryStatus,
+      discoverySource: delivery?.discoverySource,
+      previousGatewayAddress: delivery?.previousGatewayAddress,
+    };
+
+    try {
+      const updatedLine = await api.reportVoiceGatewayDeviceDiscovery(line.id, {
+        deviceAdminUrl: deviceAdminUrl || null,
+        deviceIp: deviceHost || null,
+        source,
+        status: reportStatus,
+        summary: deviceAdminUrl ? "客户端现场检测到语音网关后台地址" : "客户端现场检测到语音网关状态",
+        detail: delivery?.message || discovery?.message || status.nextStep || "",
+        evidenceJson: JSON.stringify(evidence),
+      });
+      reportedVoiceGatewayDiscoveryRef.current = reportKey;
+      setVoiceGatewayLines((current) => {
+        const exists = current.some((item) => item.id === updatedLine.id);
+        return exists ? current.map((item) => (item.id === updatedLine.id ? updatedLine : item)) : [updatedLine, ...current];
+      });
+      setVoiceGatewayDiscoverySyncMessage(
+        deviceAdminUrl ? "现场设备地址已同步到后台配置卡。" : "现场设备检测结果已同步到后台。",
+      );
+    } catch (error) {
+      setVoiceGatewayDiscoverySyncMessage(error instanceof Error ? error.message : "现场设备同步到后台失败。");
     }
   }
 
@@ -6272,6 +6388,9 @@ function App() {
                     </button>
                   )}
                 </div>
+                {voiceGatewayDiscoverySyncMessage && (
+                  <p className="route-sync-message">{voiceGatewayDiscoverySyncMessage}</p>
+                )}
               </div>
               <form className="telephony-test-form" onSubmit={submitTelephonyTestCall}>
                 <label>
