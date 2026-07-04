@@ -1,4 +1,6 @@
+import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from secrets import choice, compare_digest, token_hex
@@ -72,6 +74,9 @@ DEFAULT_DTMF_MODE = "RFC2833/RFC4733"
 DEFAULT_RTP_RANGE = "10000-20000/UDP"
 DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
 SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+ASTERISK_DYNAMIC_PJSIP_PATH = Path(
+    os.getenv("AI_ACQ_ASTERISK_DYNAMIC_PJSIP_PATH", "/etc/asterisk/pjsip_ai_acq_delivery_dynamic.conf")
+)
 PROFILE_CHANNEL_DEFAULTS = {
     "dinstar_8t_server": 8,
     "multi_sim_lte_gateway": 8,
@@ -1758,6 +1763,92 @@ def _admin_mark_latest_discovery_matched(line: VoiceGatewayLine) -> None:
         db.commit()
 
 
+def _admin_selected_ids(request: Request) -> list[str]:
+    return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+
+
+def _admin_action_redirect(request: Request, identity: str) -> RedirectResponse:
+    return RedirectResponse(request.url_for("admin:list", identity=identity), status_code=302)
+
+
+def _admin_safe_pjsip_token(value: str, label: str) -> str:
+    token = _admin_text(value)
+    if not token or not re.fullmatch(r"[0-9A-Za-z_.@-]+", token):
+        raise ValueError(f"{label} 只能包含字母、数字、下划线、点、@ 或短横线")
+    return token
+
+
+def _admin_render_pjsip_line(line: VoiceGatewayLine, password: str) -> str:
+    trunk_name = _admin_safe_pjsip_token(line.trunk_name, "云端 Trunk")
+    sip_username = _admin_safe_pjsip_token(line.sip_username, "SIP 账号")
+    sip_auth_username = _admin_safe_pjsip_token(line.sip_auth_username or line.sip_username, "鉴权账号")
+    max_contacts = max(1, int(line.channel_count or 1))
+    context = "from-dinstar8t" if line.gateway_profile_key != "uc100_sip_volte" else "from-uc100"
+    return f"""; BEGIN AI_ACQ_LINE {line.id}
+[{trunk_name}]
+type = endpoint
+transport = transport-udp
+context = {context}
+disallow = all
+allow = alaw
+allow = ulaw
+direct_media = no
+force_rport = yes
+rewrite_contact = yes
+rtp_symmetric = yes
+timers = no
+auth = {trunk_name}-auth
+aors = {trunk_name}-aor
+from_user = {sip_username}
+callerid = AI获客 <{sip_username}>
+
+[{trunk_name}-auth]
+type = auth
+auth_type = userpass
+username = {sip_auth_username}
+password = {password}
+
+[{trunk_name}-aor]
+type = aor
+max_contacts = {max_contacts}
+remove_existing = no
+qualify_frequency = 30
+; END AI_ACQ_LINE {line.id}
+"""
+
+
+def _admin_upsert_asterisk_dynamic_pjsip(line: VoiceGatewayLine, password: str) -> None:
+    path = ASTERISK_DYNAMIC_PJSIP_PATH
+    marker_start = f"; BEGIN AI_ACQ_LINE {line.id}"
+    marker_end = f"; END AI_ACQ_LINE {line.id}"
+    next_block = _admin_render_pjsip_line(line, password)
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    pattern = re.compile(
+        rf"^; BEGIN AI_ACQ_LINE {re.escape(line.id)}\n.*?^; END AI_ACQ_LINE {re.escape(line.id)}\n?",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if marker_start in current and marker_end in current:
+        updated = pattern.sub(next_block, current).strip() + "\n"
+    else:
+        updated = (current.rstrip() + "\n\n" + next_block).lstrip()
+    path.write_text(updated, encoding="utf-8")
+
+
+def _admin_reload_asterisk_pjsip() -> str:
+    commands = [
+        ["asterisk", "-rx", "pjsip reload"],
+        ["asterisk", "-rx", "dialplan reload"],
+    ]
+    outputs: list[str] = []
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=12)
+        output = (result.stdout or result.stderr or "").strip()
+        outputs.append(output)
+        if result.returncode != 0:
+            raise RuntimeError(output or f"{' '.join(command)} 执行失败")
+    return "；".join(item for item in outputs if item) or "Asterisk 已重新加载"
+
+
 class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
     name = "语音网关线路"
     name_plural = "语音网关线路"
@@ -1935,6 +2026,73 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         request: Request,
     ) -> None:
         _admin_mark_latest_discovery_matched(model)
+
+    @action(
+        name="rotate-sip-password",
+        label="生成一次性 SIP 密码",
+        confirmation_message="确认为选中的语音网关线路生成新 SIP 密码？旧密码会失效，并会写入云端 Asterisk。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def rotate_sip_password(self, request: Request) -> RedirectResponse:
+        selected_ids = _admin_selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要生成密码的语音网关线路")
+            return _admin_action_redirect(request, self.identity)
+
+        actor_username = request.session.get("admin_user")
+        results: list[str] = []
+        errors: list[str] = []
+        with SessionLocal() as db:
+            for line_id in selected_ids:
+                line = db.get(VoiceGatewayLine, line_id)
+                if line is None:
+                    errors.append(f"未找到线路：{line_id}")
+                    continue
+                try:
+                    password = _admin_generate_sip_password()
+                    _admin_upsert_asterisk_dynamic_pjsip(line, password)
+                    reload_message = _admin_reload_asterisk_pjsip()
+                    line.sip_password_hash = hash_password(password)
+                    line.status = "待重新下发"
+                    line.registration_status = "待重新注册"
+                    line.updated_at = datetime.utcnow()
+                    db.add(
+                        VoiceGatewayLineEvent(
+                            line_id=line.id,
+                            owner_user_id=line.owner_user_id,
+                            actor_user_id=None,
+                            event_type="credential_rotated",
+                            status="rotated",
+                            summary="SQLAdmin 生成一次性 SIP 密码",
+                            detail="已写入云端 Asterisk；交付人员需要立刻同步填写到现场语音网关后台。",
+                        )
+                    )
+                    db.add(
+                        AuditLog(
+                            actor_user_id=None,
+                            actor_username=actor_username,
+                            action="voice_gateway_line.rotate_credential",
+                            resource_type="voice_gateway_line",
+                            resource_id=line.id,
+                            summary=f"SQLAdmin 生成语音网关一次性 SIP 密码：{line.line_name}",
+                        )
+                    )
+                    db.commit()
+                    results.append(
+                        f"{line.customer_name or line.line_name}：SIP账号 {line.sip_username}，"
+                        f"鉴权账号 {line.sip_auth_username}，一次性密码 {password}，Asterisk：{reload_message}"
+                    )
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(f"{line.line_name if line else line_id}：{exc}")
+                    continue
+
+        if results:
+            Flash.success(request, "只显示本次，请马上复制到设备后台。 " + "；".join(results))
+        if errors:
+            Flash.error(request, "部分线路生成失败：" + "；".join(errors))
+        return _admin_action_redirect(request, self.identity)
 
 
 class VoiceGatewayDeviceDiscoveryAdmin(ModelView, model=VoiceGatewayDeviceDiscovery):
