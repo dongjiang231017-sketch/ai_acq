@@ -359,6 +359,19 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": [] if merged_tail == "喂，你好。" else [f"tail:{merged_tail}"],
         }
     )
+    real_mixed_prompt = "尝试联系的用户无法接听，请在提示音后录制留言。录音完成后挂断即可。喂喂，不会说话啊。"
+    real_mixed_tail = extract_human_text_after_system_prompt(real_mixed_prompt)
+    real_mixed_signal = classify_realtime_call_input(real_mixed_tail)
+    gates.append(
+        {
+            "text": "real_mixed_system_prompt_keeps_audio_issue",
+            "score": 100 if "不会说话" in real_mixed_tail and real_mixed_signal == "audio_issue" else 35,
+            "reply": real_mixed_tail,
+            "issues": []
+            if "不会说话" in real_mixed_tail and real_mixed_signal == "audio_issue"
+            else [f"tail:{real_mixed_tail}", f"signal:{real_mixed_signal}"],
+        }
+    )
     human_classifier = AnswerClassifier()
     human_type = human_classifier.on_asr_text("你好。")
     gates.append(

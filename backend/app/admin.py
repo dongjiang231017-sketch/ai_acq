@@ -1785,8 +1785,14 @@ def _admin_render_pjsip_line(line: VoiceGatewayLine, password: str) -> str:
     sip_auth_username = _admin_safe_pjsip_token(line.sip_auth_username or line.sip_username, "鉴权账号")
     max_contacts = max(1, int(line.channel_count or 1))
     context = "from-dinstar8t" if line.gateway_profile_key != "uc100_sip_volte" else "from-uc100"
-    return f"""; BEGIN AI_ACQ_LINE {line.id}
-[{trunk_name}]
+    auth_name = f"{sip_username}-auth"
+    aor_name = sip_username
+    endpoint_names = [sip_username]
+    if trunk_name != sip_username:
+        endpoint_names.append(trunk_name)
+
+    endpoint_blocks = "\n".join(
+        f"""[{endpoint_name}]
 type = endpoint
 transport = transport-udp
 context = {context}
@@ -1798,18 +1804,22 @@ force_rport = yes
 rewrite_contact = yes
 rtp_symmetric = yes
 timers = no
-auth = {trunk_name}-auth
-aors = {trunk_name}-aor
+auth = {auth_name}
+aors = {aor_name}
 from_user = {sip_username}
 callerid = AI获客 <{sip_username}>
-
-[{trunk_name}-auth]
+"""
+        for endpoint_name in endpoint_names
+    )
+    return f"""; BEGIN AI_ACQ_LINE {line.id}
+{endpoint_blocks}
+[{auth_name}]
 type = auth
 auth_type = userpass
 username = {sip_auth_username}
 password = {password}
 
-[{trunk_name}-aor]
+[{aor_name}]
 type = aor
 max_contacts = {max_contacts}
 remove_existing = no
