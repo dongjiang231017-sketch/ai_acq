@@ -1,5 +1,11 @@
 const { app, BrowserWindow, dialog, ipcMain, shell, webContents } = require("electron");
+const crypto = require("crypto");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { spawn } = require("child_process");
+const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
 const packageJson = require("../package.json");
 const { createAsteriskSidecar } = require("./asterisk-sidecar.cjs");
 
@@ -38,15 +44,61 @@ function absoluteDownloadUrl(pathname) {
   return new URL(pathname, UPDATE_MANIFEST_URL).toString();
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "pipe", ...options });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${command} exited ${code}: ${stderr || stdout}`));
+    });
+  });
+}
+
 function selectUpdateFile(manifest) {
+  return selectUpdateAsset(manifest)?.path || "";
+}
+
+function selectUpdateAsset(manifest, { preferAutoInstall = false } = {}) {
   const files = manifest?.files || {};
+  const candidates = [];
   if (process.platform === "darwin") {
-    return process.arch === "arm64"
-      ? files.stableMacArm64Dmg || files.macArm64Dmg || files.stableMacArm64Zip || files.macArm64Zip
-      : files.stableMacX64Dmg || files.macX64Dmg || files.stableMacArm64Dmg || files.macArm64Dmg;
+    if (process.arch === "arm64") {
+      if (preferAutoInstall) {
+        candidates.push({ key: "macArm64Zip", path: files.stableMacArm64Zip || files.macArm64Zip });
+        candidates.push({ key: "macArm64Dmg", path: files.stableMacArm64Dmg || files.macArm64Dmg });
+      } else {
+        candidates.push({ key: "macArm64Dmg", path: files.stableMacArm64Dmg || files.macArm64Dmg });
+        candidates.push({ key: "macArm64Zip", path: files.stableMacArm64Zip || files.macArm64Zip });
+      }
+    } else {
+      candidates.push({ key: "macX64Dmg", path: files.stableMacX64Dmg || files.macX64Dmg });
+      candidates.push({ key: "macX64Zip", path: files.stableMacX64Zip || files.macX64Zip });
+    }
+  } else if (process.platform === "win32") {
+    candidates.push({ key: "windowsX64Setup", path: files.stableWindowsX64Setup || files.windowsX64Setup });
+  } else {
+    candidates.push({ key: "linuxAppImage", path: files.stableLinuxAppImage || files.linuxAppImage });
   }
-  if (process.platform === "win32") return files.stableWindowsX64Setup || files.windowsX64Setup;
-  return files.linuxAppImage || files.stableLinuxAppImage || "";
+  const selected = candidates.find((candidate) => candidate.path);
+  if (!selected) return null;
+  return {
+    ...selected,
+    url: absoluteDownloadUrl(selected.path),
+    sha256: manifest?.sha256?.[selected.key] || "",
+  };
 }
 
 async function fetchUpdateManifest() {
@@ -57,10 +109,182 @@ async function fetchUpdateManifest() {
   return response.json();
 }
 
+async function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function downloadUpdateAsset(asset, version) {
+  if (!asset?.url) throw new Error("缺少客户端更新下载地址");
+  const updatesDir = path.join(userDataDir, "updates", String(version || Date.now()));
+  await fs.promises.mkdir(updatesDir, { recursive: true });
+  const fileName = path.basename(new URL(asset.url).pathname) || `ai-acq-client-update-${Date.now()}`;
+  const filePath = path.join(updatesDir, fileName);
+  const response = await fetch(`${asset.url}?t=${Date.now()}`, {
+    headers: { "Cache-Control": "no-cache" },
+  });
+  if (!response.ok || !response.body) throw new Error(`客户端下载失败：HTTP ${response.status}`);
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+  const digest = await sha256File(filePath);
+  if (asset.sha256 && digest !== asset.sha256) {
+    await fs.promises.rm(filePath, { force: true });
+    throw new Error("客户端下载校验失败，已停止安装。");
+  }
+  return {
+    filePath,
+    sha256: digest,
+    bytes: (await fs.promises.stat(filePath)).size,
+  };
+}
+
+function currentMacAppBundlePath() {
+  const executable = process.execPath || "";
+  const marker = ".app/Contents/MacOS/";
+  const index = executable.indexOf(marker);
+  return index >= 0 ? executable.slice(0, index + ".app".length) : "";
+}
+
+async function findFirstAppBundle(rootDir) {
+  const entries = await fs.promises.readdir(rootDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const itemPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory() && entry.name.endsWith(".app")) return itemPath;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.endsWith(".app")) continue;
+    const nested = await findFirstAppBundle(path.join(rootDir, entry.name));
+    if (nested) return nested;
+  }
+  return "";
+}
+
+async function canWriteDirectory(dir) {
+  try {
+    await fs.promises.access(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function installMacZipUpdate(zipPath, version) {
+  const targetApp = currentMacAppBundlePath();
+  if (!targetApp) throw new Error("无法定位当前客户端 App，不能自动替换。");
+  const stagingDir = path.join(path.dirname(zipPath), `staged-${version || Date.now()}`);
+  await fs.promises.rm(stagingDir, { recursive: true, force: true });
+  await fs.promises.mkdir(stagingDir, { recursive: true });
+  await runCommand("/usr/bin/ditto", ["-x", "-k", zipPath, stagingDir]);
+  const sourceApp = await findFirstAppBundle(stagingDir);
+  if (!sourceApp) throw new Error("更新包内没有找到客户端 App。");
+
+  const scriptPath = path.join(path.dirname(zipPath), "install-ai-acq-update.sh");
+  const logPath = path.join(path.dirname(zipPath), "install-ai-acq-update.log");
+  const script = `#!/bin/bash
+set -euo pipefail
+TARGET=${shellQuote(targetApp)}
+SOURCE=${shellQuote(sourceApp)}
+STAGING=${shellQuote(stagingDir)}
+ZIP=${shellQuote(zipPath)}
+LOG=${shellQuote(logPath)}
+{
+  echo "AI ACQ update start $(date)"
+  sleep 2
+  BACKUP="$TARGET.backup-$(date +%Y%m%d%H%M%S)"
+  if [ -d "$TARGET" ]; then
+    mv "$TARGET" "$BACKUP"
+  fi
+  /usr/bin/ditto "$SOURCE" "$TARGET"
+  /usr/bin/xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+  /usr/bin/open "$TARGET"
+  rm -rf "$BACKUP" "$STAGING" "$ZIP" "$0" 2>/dev/null || true
+  echo "AI ACQ update done $(date)"
+} >> "$LOG" 2>&1
+`;
+  await fs.promises.writeFile(scriptPath, script, { mode: 0o755 });
+  const targetParent = path.dirname(targetApp);
+  const writable = await canWriteDirectory(targetParent);
+  if (writable) {
+    spawn("/bin/bash", [scriptPath], { detached: true, stdio: "ignore" }).unref();
+  } else {
+    const command = `/bin/bash ${shellQuote(scriptPath)}`;
+    spawn("/usr/bin/osascript", ["-e", `do shell script ${JSON.stringify(command)} with administrator privileges`], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  }
+  setTimeout(() => app.quit(), 500);
+  return {
+    status: "installing",
+    message: writable
+      ? "更新包已校验，客户端将自动重启完成升级。"
+      : "更新包已校验，系统可能会要求输入本机密码以替换应用。",
+    installerPath: scriptPath,
+    logPath,
+  };
+}
+
+async function installDownloadedUpdate(downloaded, asset, version) {
+  const lowerPath = downloaded.filePath.toLowerCase();
+  if (process.platform === "darwin") {
+    if (lowerPath.endsWith(".zip")) return installMacZipUpdate(downloaded.filePath, version);
+    await shell.openPath(downloaded.filePath);
+    return { status: "manual", message: "已打开更新包，请按系统提示完成升级。", installerPath: downloaded.filePath };
+  }
+  if (process.platform === "win32") {
+    spawn(downloaded.filePath, ["/S"], { detached: true, stdio: "ignore" }).unref();
+    setTimeout(() => app.quit(), 500);
+    return { status: "installing", message: "更新包已校验，正在启动 Windows 安装程序。", installerPath: downloaded.filePath };
+  }
+  await shell.openPath(downloaded.filePath || asset.url);
+  return { status: "manual", message: "已打开更新包，请按系统提示完成升级。", installerPath: downloaded.filePath };
+}
+
+async function installClientUpdate({ owner = null } = {}) {
+  const currentVersion = app.getVersion();
+  const manifest = await fetchUpdateManifest();
+  const updateAvailable = compareVersions(manifest.version, currentVersion) > 0;
+  if (!updateAvailable) {
+    return {
+      status: "up-to-date",
+      currentVersion,
+      latestVersion: manifest.version || "",
+      message: "当前客户端已是最新版本。",
+    };
+  }
+  const asset = selectUpdateAsset(manifest, { preferAutoInstall: true });
+  if (!asset?.url) throw new Error("更新清单里没有适合当前系统的安装包。");
+  const downloaded = await downloadUpdateAsset(asset, manifest.version);
+  const installResult = await installDownloadedUpdate(downloaded, asset, manifest.version);
+  if (owner && installResult.status === "manual") {
+    await dialog.showMessageBox(owner, {
+      type: "info",
+      title: "更新包已打开",
+      message: "请按系统提示完成升级",
+      detail: installResult.message,
+    });
+  }
+  return {
+    ...installResult,
+    currentVersion,
+    latestVersion: manifest.version || "",
+    latestRevision: manifest.revision || "",
+    updateUrl: asset.url,
+    sha256: downloaded.sha256,
+    bytes: downloaded.bytes,
+  };
+}
+
 async function checkClientUpdate({ prompt = false, owner = null } = {}) {
   const currentVersion = app.getVersion();
   const manifest = await fetchUpdateManifest();
-  const updateUrl = absoluteDownloadUrl(selectUpdateFile(manifest));
+  const asset = selectUpdateAsset(manifest);
+  const autoInstallAsset = selectUpdateAsset(manifest, { preferAutoInstall: true });
+  const updateUrl = asset?.url || "";
   const updateAvailable = compareVersions(manifest.version, currentVersion) > 0;
   const result = {
     currentVersion,
@@ -68,6 +292,7 @@ async function checkClientUpdate({ prompt = false, owner = null } = {}) {
     latestRevision: manifest.revision || "",
     updateAvailable,
     updateUrl,
+    autoInstallSupported: Boolean(autoInstallAsset?.url),
     manifestUrl: UPDATE_MANIFEST_URL,
     remoteFrontendUrl: REMOTE_FRONTEND_URL,
     onlineFrontendEnabled: true,
@@ -82,15 +307,43 @@ async function checkClientUpdate({ prompt = false, owner = null } = {}) {
       type: "info",
       title: "发现新版本",
       message: "发现新版本客户端",
-      detail: `${result.message}\n\n本版本已支持前端在线更新；如需要更新桌面壳，请打开下载地址。`,
-      buttons: ["打开下载", "稍后"],
+      detail: `${result.message}\n\n可以在客户端内下载并校验更新包，安装完成后会自动重启客户端。`,
+      buttons: ["立即在线升级", "打开下载", "稍后"],
       defaultId: 0,
-      cancelId: 1,
+      cancelId: 2,
     };
     const { response } = owner
       ? await dialog.showMessageBox(owner, dialogOptions)
       : await dialog.showMessageBox(dialogOptions);
-    if (response === 0) await shell.openExternal(updateUrl);
+    if (response === 0) {
+      try {
+        await installClientUpdate({ owner });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "在线升级失败。";
+        const fallback = owner
+          ? await dialog.showMessageBox(owner, {
+              type: "error",
+              title: "在线升级失败",
+              message,
+              detail: "可以打开下载地址手动完成本次更新。",
+              buttons: ["打开下载", "稍后"],
+              defaultId: 0,
+              cancelId: 1,
+            })
+          : await dialog.showMessageBox({
+              type: "error",
+              title: "在线升级失败",
+              message,
+              detail: "可以打开下载地址手动完成本次更新。",
+              buttons: ["打开下载", "稍后"],
+              defaultId: 0,
+              cancelId: 1,
+            });
+        if (fallback.response === 0) await shell.openExternal(updateUrl);
+      }
+    } else if (response === 1) {
+      await shell.openExternal(updateUrl);
+    }
   }
 
   return result;
@@ -1027,6 +1280,12 @@ ipcMain.handle("app-info:get", async () => ({
 ipcMain.handle("app-update:check", async (event, payload = {}) =>
   checkClientUpdate({
     prompt: Boolean(payload?.prompt),
+    owner: BrowserWindow.fromWebContents(event.sender),
+  }),
+);
+
+ipcMain.handle("app-update:install", async (event) =>
+  installClientUpdate({
     owner: BrowserWindow.fromWebContents(event.sender),
   }),
 );

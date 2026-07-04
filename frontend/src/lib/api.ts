@@ -360,6 +360,33 @@ export type VoiceGatewayDeviceDiscoveryUpdate = {
   evidenceJson?: string;
 };
 
+export type VoiceGatewayDeviceDiscoveryCreate = VoiceGatewayDeviceDiscoveryUpdate & {
+  gatewayProfileKey?: string | null;
+  gatewayLabel?: string | null;
+  sipPort?: number | null;
+};
+
+export type VoiceGatewayDeviceDiscovery = {
+  id: string;
+  ownerUserId: string;
+  reporterUserId?: string | null;
+  matchedLineId?: string | null;
+  status: string;
+  source: string;
+  gatewayProfileKey: string;
+  gatewayLabel: string;
+  deviceAdminUrl: string;
+  deviceIp: string;
+  deviceMac: string;
+  deviceSerial: string;
+  sipPort: number;
+  summary: string;
+  detail: string;
+  evidenceJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type TelephonyConfig = {
   gatewayMode: string;
   asteriskDeploymentMode: string;
@@ -1345,6 +1372,12 @@ export const api = {
     return request<TelephonyPreflight>(`/outbound/telephony/preflight${query}`);
   },
   voiceGatewayLines: () => request<VoiceGatewayLine[]>("/delivery/voice-gateway-lines"),
+  voiceGatewayDeviceDiscoveries: () => request<VoiceGatewayDeviceDiscovery[]>("/delivery/voice-gateway-device-discoveries"),
+  createVoiceGatewayDeviceDiscovery: (payload: VoiceGatewayDeviceDiscoveryCreate) =>
+    request<VoiceGatewayDeviceDiscovery>("/delivery/voice-gateway-device-discoveries", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   reportVoiceGatewayDeviceDiscovery: (lineId: string, payload: VoiceGatewayDeviceDiscoveryUpdate) =>
     request<VoiceGatewayLine>(`/delivery/voice-gateway-lines/${lineId}/device-discovery`, {
       method: "POST",

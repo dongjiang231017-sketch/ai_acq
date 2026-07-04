@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld("aiAcqDesktop", {
   stopAsteriskSidecar: () => ipcRenderer.invoke("asterisk-sidecar:stop"),
   getAppInfo: () => ipcRenderer.invoke("app-info:get"),
   checkForClientUpdate: (payload) => ipcRenderer.invoke("app-update:check", payload),
+  installClientUpdate: (payload) => ipcRenderer.invoke("app-update:install", payload),
   openClientUpdate: (url) => ipcRenderer.invoke("app-update:open", url),
 });

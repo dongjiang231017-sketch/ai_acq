@@ -13,13 +13,15 @@ from app.api.auth import get_current_user
 from app.core.security import hash_password
 from app.db.session import get_db
 from app.models.audit import AuditLog
-from app.models.delivery import VoiceGatewayLine, VoiceGatewayLineEvent
+from app.models.delivery import VoiceGatewayDeviceDiscovery, VoiceGatewayLine, VoiceGatewayLineEvent
 from app.models.user import User
 from app.schemas.delivery import (
     VoiceGatewayBulkLineCreate,
     VoiceGatewayBulkLineCreated,
     VoiceGatewayConfigCard,
     VoiceGatewayCredentialRotation,
+    VoiceGatewayDeviceDiscoveryCreate,
+    VoiceGatewayDeviceDiscoveryRead,
     VoiceGatewayDeviceDiscoveryUpdate,
     VoiceGatewayLineCreate,
     VoiceGatewayLineCreated,
@@ -72,6 +74,45 @@ def list_voice_gateway_lines(
     return [_read_line(line) for line in lines]
 
 
+@router.get("/voice-gateway-device-discoveries", response_model=list[VoiceGatewayDeviceDiscoveryRead])
+def list_voice_gateway_device_discoveries(
+    include_all: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[VoiceGatewayDeviceDiscovery]:
+    statement = select(VoiceGatewayDeviceDiscovery)
+    if not (include_all and current_user.is_superuser):
+        statement = statement.where(VoiceGatewayDeviceDiscovery.owner_user_id == current_user.id)
+    return list(
+        db.scalars(
+            statement.order_by(VoiceGatewayDeviceDiscovery.updated_at.desc(), VoiceGatewayDeviceDiscovery.created_at.desc())
+        ).all()
+    )
+
+
+@router.post(
+    "/voice-gateway-device-discoveries",
+    response_model=VoiceGatewayDeviceDiscoveryRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_voice_gateway_device_discovery(
+    payload: VoiceGatewayDeviceDiscoveryCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> VoiceGatewayDeviceDiscovery:
+    discovery = _record_device_discovery(db, current_user.id, current_user, payload, matched_line_id=None)
+    _add_audit(
+        db,
+        current_user,
+        "voice_gateway_device_discovery.create",
+        discovery.id,
+        f"记录待匹配语音网关设备：{discovery.device_admin_url or discovery.device_ip or discovery.gateway_label}",
+    )
+    db.commit()
+    db.refresh(discovery)
+    return discovery
+
+
 @router.post(
     "/voice-gateway-lines",
     response_model=VoiceGatewayLineCreated,
@@ -84,17 +125,35 @@ def create_voice_gateway_line(
 ) -> dict[str, object]:
     owner = _resolve_owner(payload.owner_user_id, db, current_user)
     line, password = _build_line(payload, owner, current_user)
+    discovery = _latest_unmatched_device_discovery(db, owner.id)
+    if discovery is not None:
+        _apply_device_discovery_to_line(line, discovery)
     db.add(line)
     db.flush()
+    if discovery is not None:
+        discovery.matched_line_id = line.id
+        discovery.status = "matched"
+        discovery.updated_at = datetime.utcnow()
     _add_event(
         db,
         line,
         current_user,
-        event_type="line_created",
+        event_type="note",
         status="created",
         summary="生成客户语音网关配置卡",
         detail=f"{line.gateway_label} / {line.sip_server_host}:{line.sip_server_port}/{line.sip_transport}",
     )
+    if discovery is not None:
+        _add_event(
+            db,
+            line,
+            current_user,
+            event_type="device_discovery",
+            status="matched",
+            summary="自动匹配客户客户端发现的语音网关",
+            detail=_device_discovery_note_from_record(discovery),
+            evidence_json=discovery.evidence_json,
+        )
     _add_audit(db, current_user, "voice_gateway_line.create", line.id, f"生成语音网关线路：{line.line_name}")
     try:
         db.commit()
@@ -123,17 +182,35 @@ def bulk_provision_voice_gateway_lines(
     for item in payload.items:
         owner = _resolve_owner(item.owner_user_id, db, current_user)
         line, password = _build_line(item, owner, current_user)
+        discovery = _latest_unmatched_device_discovery(db, owner.id)
+        if discovery is not None:
+            _apply_device_discovery_to_line(line, discovery)
         db.add(line)
         db.flush()
+        if discovery is not None:
+            discovery.matched_line_id = line.id
+            discovery.status = "matched"
+            discovery.updated_at = datetime.utcnow()
         _add_event(
             db,
             line,
             current_user,
-            event_type="line_created",
+            event_type="note",
             status="created",
             summary="批量预生成客户语音网关配置卡",
             detail=f"{line.gateway_label} / {line.sip_server_host}:{line.sip_server_port}/{line.sip_transport}",
         )
+        if discovery is not None:
+            _add_event(
+                db,
+                line,
+                current_user,
+                event_type="device_discovery",
+                status="matched",
+                summary="自动匹配客户客户端发现的语音网关",
+                detail=_device_discovery_note_from_record(discovery),
+                evidence_json=discovery.evidence_json,
+            )
         _add_audit(db, current_user, "voice_gateway_line.bulk_create", line.id, f"预生成语音网关线路：{line.line_name}")
         lines.append((line, password))
     try:
@@ -216,6 +293,7 @@ def report_voice_gateway_device_discovery(
         line.status = "设备未发现"
     elif _is_pass_status(payload.status) or payload.status in {"found", "current", "updated", "已发现", "已绑定"}:
         line.status = "待设备注册" if not _is_pass_status(line.registration_status) else _line_status(line)
+    _record_device_discovery(db, line.owner_user_id, current_user, payload, matched_line_id=line.id)
     line.updated_at = datetime.utcnow()
     event = _add_event(
         db,
@@ -495,6 +573,93 @@ def _normalise_device_admin_url(admin_url: str | None, device_ip: str | None) ->
     if not re.match(r"^https?://", value, flags=re.IGNORECASE):
         value = f"http://{value}"
     return value.rstrip("/") + "/"
+
+
+def _latest_unmatched_device_discovery(db: Session, owner_user_id: str) -> VoiceGatewayDeviceDiscovery | None:
+    return db.scalar(
+        select(VoiceGatewayDeviceDiscovery)
+        .where(
+            VoiceGatewayDeviceDiscovery.owner_user_id == owner_user_id,
+            VoiceGatewayDeviceDiscovery.matched_line_id.is_(None),
+        )
+        .order_by(VoiceGatewayDeviceDiscovery.updated_at.desc(), VoiceGatewayDeviceDiscovery.created_at.desc())
+    )
+
+
+def _record_device_discovery(
+    db: Session,
+    owner_user_id: str,
+    actor: User,
+    payload: VoiceGatewayDeviceDiscoveryUpdate,
+    *,
+    matched_line_id: str | None,
+) -> VoiceGatewayDeviceDiscovery:
+    admin_url = _normalise_device_admin_url(payload.device_admin_url, payload.device_ip)
+    device_ip = (payload.device_ip or _ip_from_admin_url(admin_url)).strip()
+    statement = select(VoiceGatewayDeviceDiscovery).where(
+        VoiceGatewayDeviceDiscovery.owner_user_id == owner_user_id,
+        VoiceGatewayDeviceDiscovery.matched_line_id.is_(None) if matched_line_id is None else VoiceGatewayDeviceDiscovery.matched_line_id == matched_line_id,
+    )
+    if admin_url:
+        statement = statement.where(VoiceGatewayDeviceDiscovery.device_admin_url == admin_url)
+    elif device_ip:
+        statement = statement.where(VoiceGatewayDeviceDiscovery.device_ip == device_ip)
+    discovery = db.scalar(statement.order_by(VoiceGatewayDeviceDiscovery.updated_at.desc()))
+    if discovery is None:
+        discovery = VoiceGatewayDeviceDiscovery(owner_user_id=owner_user_id)
+        db.add(discovery)
+    discovery.reporter_user_id = actor.id
+    discovery.matched_line_id = matched_line_id
+    discovery.status = (payload.status or "found").strip()
+    discovery.source = (payload.source or "desktop_client_discovery").strip()
+    discovery.gateway_profile_key = (getattr(payload, "gateway_profile_key", None) or "").strip()
+    discovery.gateway_label = (getattr(payload, "gateway_label", None) or "").strip()
+    discovery.device_admin_url = admin_url
+    discovery.device_ip = device_ip
+    discovery.device_mac = (payload.device_mac or "").strip()
+    discovery.device_serial = (payload.device_serial or "").strip()
+    discovery.sip_port = int(getattr(payload, "sip_port", None) or 0)
+    discovery.summary = (payload.summary or "").strip()
+    discovery.detail = (payload.detail or "").strip()
+    discovery.evidence_json = payload.evidence_json or ""
+    discovery.updated_at = datetime.utcnow()
+    return discovery
+
+
+def _apply_device_discovery_to_line(line: VoiceGatewayLine, discovery: VoiceGatewayDeviceDiscovery) -> None:
+    if discovery.device_admin_url and not line.device_admin_url:
+        line.device_admin_url = discovery.device_admin_url
+    if discovery.device_mac and not line.device_mac:
+        line.device_mac = discovery.device_mac
+    if discovery.device_serial and not line.device_serial:
+        line.device_serial = discovery.device_serial
+    note = _device_discovery_note_from_record(discovery)
+    if note:
+        line.network_note = _append_note(line.network_note, note)
+    if line.status in {"", "待配置", "待设备发现", "设备未发现"}:
+        line.status = "待设备注册"
+
+
+def _device_discovery_note_from_record(discovery: VoiceGatewayDeviceDiscovery) -> str:
+    parts = [f"source={discovery.source}", f"status={discovery.status}"]
+    if discovery.device_admin_url:
+        parts.append(f"admin={discovery.device_admin_url}")
+    if discovery.device_ip:
+        parts.append(f"ip={discovery.device_ip}")
+    if discovery.device_mac:
+        parts.append(f"mac={discovery.device_mac}")
+    if discovery.device_serial:
+        parts.append(f"serial={discovery.device_serial}")
+    if discovery.summary:
+        parts.append(discovery.summary)
+    return "；".join(part for part in parts if part)
+
+
+def _ip_from_admin_url(admin_url: str) -> str:
+    if not admin_url:
+        return ""
+    match = re.match(r"^https?://([^/:]+)", admin_url, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
 
 
 def _device_discovery_note(payload: VoiceGatewayDeviceDiscoveryUpdate, admin_url: str) -> str:

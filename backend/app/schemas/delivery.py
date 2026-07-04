@@ -164,6 +164,35 @@ class VoiceGatewayDeviceDiscoveryUpdate(BaseModel):
     evidence_json: Annotated[str, Field(alias="evidenceJson")] = ""
 
 
+class VoiceGatewayDeviceDiscoveryCreate(VoiceGatewayDeviceDiscoveryUpdate):
+    gateway_profile_key: Annotated[str | None, Field(alias="gatewayProfileKey", max_length=80)] = None
+    gateway_label: Annotated[str | None, Field(alias="gatewayLabel", max_length=160)] = None
+    sip_port: Annotated[int | None, Field(alias="sipPort", ge=0, le=65535)] = None
+
+
+class VoiceGatewayDeviceDiscoveryRead(BaseModel):
+    id: str
+    owner_user_id: Annotated[str, Field(alias="ownerUserId")]
+    reporter_user_id: Annotated[str | None, Field(alias="reporterUserId")]
+    matched_line_id: Annotated[str | None, Field(alias="matchedLineId")]
+    status: str
+    source: str
+    gateway_profile_key: Annotated[str, Field(alias="gatewayProfileKey")]
+    gateway_label: Annotated[str, Field(alias="gatewayLabel")]
+    device_admin_url: Annotated[str, Field(alias="deviceAdminUrl")]
+    device_ip: Annotated[str, Field(alias="deviceIp")]
+    device_mac: Annotated[str, Field(alias="deviceMac")]
+    device_serial: Annotated[str, Field(alias="deviceSerial")]
+    sip_port: Annotated[int, Field(alias="sipPort")]
+    summary: str
+    detail: str
+    evidence_json: Annotated[str, Field(alias="evidenceJson")]
+    created_at: Annotated[datetime, Field(alias="createdAt")]
+    updated_at: Annotated[datetime, Field(alias="updatedAt")]
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
 class VoiceGatewayLineEventCreate(BaseModel):
     event_type: Annotated[
         str,

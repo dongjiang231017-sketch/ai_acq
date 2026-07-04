@@ -69,6 +69,40 @@ class VoiceGatewayLine(Base):
         return f"{self.customer_name or self.owner_user_id} {self.line_name}"
 
 
+class VoiceGatewayDeviceDiscovery(Base):
+    __tablename__ = "voice_gateway_device_discoveries"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    reporter_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    matched_line_id: Mapped[str | None] = mapped_column(
+        ForeignKey("voice_gateway_lines.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(40), default="found", index=True)
+    source: Mapped[str] = mapped_column(String(80), default="desktop_client_discovery", index=True)
+    gateway_profile_key: Mapped[str] = mapped_column(String(80), default="")
+    gateway_label: Mapped[str] = mapped_column(String(160), default="")
+    device_admin_url: Mapped[str] = mapped_column(String(240), default="", index=True)
+    device_ip: Mapped[str] = mapped_column(String(80), default="", index=True)
+    device_mac: Mapped[str] = mapped_column(String(80), default="", index=True)
+    device_serial: Mapped[str] = mapped_column(String(120), default="", index=True)
+    sip_port: Mapped[int] = mapped_column(Integer, default=0)
+    summary: Mapped[str] = mapped_column(String(240), default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    owner_user = relationship("User", foreign_keys=[owner_user_id])
+    reporter_user = relationship("User", foreign_keys=[reporter_user_id])
+    matched_line = relationship("VoiceGatewayLine", foreign_keys=[matched_line_id])
+
+    def __repr__(self) -> str:
+        return f"{self.device_admin_url or self.device_ip or self.gateway_label} {self.status}"
+
+
 class VoiceGatewayLineEvent(Base):
     __tablename__ = "voice_gateway_line_events"
 

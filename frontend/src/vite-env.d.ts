@@ -134,11 +134,25 @@ type AiAcqDesktopUpdateCheck = {
   latestRevision: string;
   updateAvailable: boolean;
   updateUrl: string;
+  autoInstallSupported: boolean;
   manifestUrl: string;
   remoteFrontendUrl: string;
   onlineFrontendEnabled: boolean;
   appName: string;
   message: string;
+};
+
+type AiAcqDesktopUpdateInstall = {
+  status: string;
+  currentVersion: string;
+  latestVersion: string;
+  latestRevision?: string;
+  updateUrl?: string;
+  sha256?: string;
+  bytes?: number;
+  message: string;
+  installerPath?: string;
+  logPath?: string;
 };
 
 interface Window {
@@ -173,6 +187,7 @@ interface Window {
     stopAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;
     getAppInfo: () => Promise<AiAcqDesktopAppInfo>;
     checkForClientUpdate: (payload?: { prompt?: boolean }) => Promise<AiAcqDesktopUpdateCheck>;
+    installClientUpdate: (payload?: { prompt?: boolean }) => Promise<AiAcqDesktopUpdateInstall>;
     openClientUpdate: (url: string) => Promise<{ ok: boolean; message?: string }>;
   };
 }

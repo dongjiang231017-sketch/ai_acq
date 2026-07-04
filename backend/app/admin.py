@@ -1,6 +1,7 @@
+import re
 from datetime import datetime
 from pathlib import Path
-from secrets import compare_digest
+from secrets import choice, compare_digest, token_hex
 
 from fastapi import FastAPI, Request
 from sqlalchemy import func, select
@@ -17,7 +18,7 @@ from app.core.security import hash_password, verify_password
 from app.db.session import SessionLocal, engine
 from app.models.audit import AuditLog
 from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
-from app.models.delivery import VoiceGatewayLine, VoiceGatewayLineEvent
+from app.models.delivery import VoiceGatewayDeviceDiscovery, VoiceGatewayLine, VoiceGatewayLineEvent
 from app.models.growth import (
     FollowUpWorkOrder,
     IntentCustomer,
@@ -59,9 +60,24 @@ from app.services.registration import (
     approve_registration_request,
     reject_registration_request,
 )
+from app.services.voice_gateway_profiles import PROFILE_DEFAULTS
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+DEFAULT_SIP_SERVER_HOST = "101.132.63.159"
+DEFAULT_CODEC_PRIMARY = "PCMA/alaw"
+DEFAULT_CODEC_SECONDARY = "PCMU/ulaw"
+DEFAULT_DTMF_MODE = "RFC2833/RFC4733"
+DEFAULT_RTP_RANGE = "10000-20000/UDP"
+DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
+SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+PROFILE_CHANNEL_DEFAULTS = {
+    "dinstar_8t_server": 8,
+    "multi_sim_lte_gateway": 8,
+    "uc100_sip_volte": 1,
+    "sip_volte_gateway": 1,
+    "sip_trunk": 1,
+}
 
 if not hasattr(BooleanInputWidget, "validation_attrs"):
     BooleanInputWidget.validation_attrs = ["required", "disabled"]
@@ -1511,6 +1527,212 @@ class SystemSettingAdmin(ModelView, model=SystemSetting):
     }
 
 
+def _admin_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _admin_fk_id(value: object) -> str:
+    if hasattr(value, "id"):
+        return _admin_text(getattr(value, "id"))
+    return _admin_text(value)
+
+
+def _admin_profile_defaults(key: str) -> dict[str, object]:
+    return PROFILE_DEFAULTS.get(key, PROFILE_DEFAULTS["sip_volte_gateway"])
+
+
+def _admin_slug(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", value).strip("_").lower()
+    return cleaned[:40] or token_hex(4)
+
+
+def _admin_generate_sip_password(length: int = 24) -> str:
+    return "".join(choice(SECRET_ALPHABET) for _ in range(length))
+
+
+def _admin_normalise_device_admin_url(admin_url: str | None, device_ip: str | None) -> str:
+    value = _admin_text(admin_url) or _admin_text(device_ip)
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        value = f"http://{value}"
+    return value.rstrip("/") + "/"
+
+
+def _admin_append_note(current: str | None, note: str) -> str:
+    if not note:
+        return _admin_text(current)
+    line = f"{datetime.utcnow().isoformat(timespec='seconds')} {note}"
+    return f"{_admin_text(current)}\n{line}".strip() if _admin_text(current) else line
+
+
+def _admin_device_discovery_note(discovery: VoiceGatewayDeviceDiscovery) -> str:
+    parts = [f"source={discovery.source}", f"status={discovery.status}"]
+    if discovery.device_admin_url:
+        parts.append(f"admin={discovery.device_admin_url}")
+    if discovery.device_ip:
+        parts.append(f"ip={discovery.device_ip}")
+    if discovery.device_mac:
+        parts.append(f"mac={discovery.device_mac}")
+    if discovery.device_serial:
+        parts.append(f"serial={discovery.device_serial}")
+    if discovery.summary:
+        parts.append(discovery.summary)
+    return "；".join(part for part in parts if part)
+
+
+def _admin_latest_unmatched_device_discovery(owner_user_id: str) -> VoiceGatewayDeviceDiscovery | None:
+    if not owner_user_id:
+        return None
+    with SessionLocal() as db:
+        return db.scalar(
+            select(VoiceGatewayDeviceDiscovery)
+            .where(
+                VoiceGatewayDeviceDiscovery.owner_user_id == owner_user_id,
+                VoiceGatewayDeviceDiscovery.matched_line_id.is_(None),
+            )
+            .order_by(VoiceGatewayDeviceDiscovery.updated_at.desc(), VoiceGatewayDeviceDiscovery.created_at.desc())
+        )
+
+
+def _admin_owner(owner_user_id: str) -> User | None:
+    if not owner_user_id:
+        return None
+    with SessionLocal() as db:
+        return db.get(User, owner_user_id)
+
+
+def _admin_line_identity(owner: User | None, owner_user_id: str) -> tuple[str, str]:
+    owner_slug = _admin_slug((owner.username if owner else owner_user_id) or owner_user_id)
+    with SessionLocal() as db:
+        for _ in range(20):
+            suffix = token_hex(4)
+            sip_username = f"sip_{owner_slug}_{suffix}"
+            trunk_name = f"tg_{owner_slug}_{suffix}"
+            exists = db.scalar(
+                select(VoiceGatewayLine.id).where(
+                    (VoiceGatewayLine.sip_username == sip_username) | (VoiceGatewayLine.trunk_name == trunk_name)
+                )
+            )
+            if not exists:
+                return sip_username, trunk_name
+    suffix = token_hex(8)
+    return f"sip_{owner_slug}_{suffix}", f"tg_{owner_slug}_{suffix}"
+
+
+def _admin_prepare_voice_gateway_line_data(data: dict, model: VoiceGatewayLine, is_created: bool) -> None:
+    owner_user_id = _admin_fk_id(data.get("owner_user_id") or data.get("owner_user") or getattr(model, "owner_user_id", ""))
+    owner = _admin_owner(owner_user_id)
+    profile_key = _admin_text(data.get("gateway_profile_key") or getattr(model, "gateway_profile_key", "")) or "dinstar_8t_server"
+    profile = _admin_profile_defaults(profile_key)
+    discovery = _admin_latest_unmatched_device_discovery(owner_user_id)
+
+    if not _admin_text(data.get("line_name") or getattr(model, "line_name", "")):
+        customer = _admin_text(data.get("customer_name") or (owner.display_name if owner else "") or (owner.username if owner else ""))
+        data["line_name"] = f"{customer or '客户'} 语音网关 {datetime.utcnow().strftime('%m%d-%H%M')}"
+    if not _admin_text(data.get("customer_name") or getattr(model, "customer_name", "")):
+        data["customer_name"] = _admin_text((owner.display_name if owner else "") or (owner.username if owner else ""))
+
+    data["gateway_profile_key"] = profile_key
+    if not _admin_text(data.get("gateway_label") or getattr(model, "gateway_label", "")):
+        data["gateway_label"] = discovery.gateway_label or str(profile["label"]) if discovery else str(profile["label"])
+    if not _admin_text(data.get("gateway_vendor") or getattr(model, "gateway_vendor", "")):
+        data["gateway_vendor"] = str(profile["vendor"])
+    if not _admin_text(data.get("gateway_model") or getattr(model, "gateway_model", "")):
+        data["gateway_model"] = str(profile["model"])
+    if not _admin_text(data.get("gateway_category") or getattr(model, "gateway_category", "")):
+        data["gateway_category"] = str(profile["category"])
+    if not _admin_text(data.get("deployment_mode") or getattr(model, "deployment_mode", "")):
+        data["deployment_mode"] = "server"
+    if not _admin_text(data.get("sip_server_host") or getattr(model, "sip_server_host", "")):
+        data["sip_server_host"] = DEFAULT_SIP_SERVER_HOST
+    if not data.get("sip_server_port") and not getattr(model, "sip_server_port", None):
+        data["sip_server_port"] = 5060
+    if not _admin_text(data.get("sip_transport") or getattr(model, "sip_transport", "")):
+        data["sip_transport"] = "UDP"
+
+    if is_created:
+        sip_username, trunk_name = _admin_line_identity(owner, owner_user_id)
+        if not _admin_text(data.get("sip_username") or getattr(model, "sip_username", "")):
+            data["sip_username"] = sip_username
+        if not _admin_text(data.get("sip_auth_username") or getattr(model, "sip_auth_username", "")):
+            data["sip_auth_username"] = data["sip_username"]
+        if not _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", "")):
+            data["trunk_name"] = trunk_name
+        if not _admin_text(data.get("sip_password_hash") or getattr(model, "sip_password_hash", "")):
+            data["sip_password_hash"] = hash_password(_admin_generate_sip_password())
+    else:
+        for field in ("sip_username", "sip_auth_username", "trunk_name", "sip_password_hash"):
+            if not _admin_text(data.get(field)):
+                data[field] = getattr(model, field, "")
+
+    trunk_name = _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", ""))
+    if not _admin_text(data.get("sip_auth_username") or getattr(model, "sip_auth_username", "")):
+        data["sip_auth_username"] = _admin_text(data.get("sip_username") or getattr(model, "sip_username", ""))
+    if not _admin_text(data.get("sip_password_secret_alias") or getattr(model, "sip_password_secret_alias", "")):
+        data["sip_password_secret_alias"] = f"voice-gateway/{owner_user_id}/{trunk_name}/sip-password"
+
+    if not data.get("channel_count") and not getattr(model, "channel_count", None):
+        data["channel_count"] = PROFILE_CHANNEL_DEFAULTS.get(profile_key, 1)
+    if not _admin_text(data.get("codec_primary") or getattr(model, "codec_primary", "")):
+        data["codec_primary"] = DEFAULT_CODEC_PRIMARY
+    if not _admin_text(data.get("codec_secondary") or getattr(model, "codec_secondary", "")):
+        data["codec_secondary"] = DEFAULT_CODEC_SECONDARY
+    if not _admin_text(data.get("dtmf_mode") or getattr(model, "dtmf_mode", "")):
+        data["dtmf_mode"] = DEFAULT_DTMF_MODE
+    if not _admin_text(data.get("rtp_port_range") or getattr(model, "rtp_port_range", "")):
+        data["rtp_port_range"] = DEFAULT_RTP_RANGE
+    if not _admin_text(data.get("route_direction") or getattr(model, "route_direction", "")):
+        data["route_direction"] = DEFAULT_ROUTE_DIRECTION
+
+    if discovery is not None:
+        if not _admin_text(data.get("device_admin_url") or getattr(model, "device_admin_url", "")):
+            data["device_admin_url"] = _admin_normalise_device_admin_url(discovery.device_admin_url, discovery.device_ip)
+        if not _admin_text(data.get("device_mac") or getattr(model, "device_mac", "")):
+            data["device_mac"] = discovery.device_mac
+        if not _admin_text(data.get("device_serial") or getattr(model, "device_serial", "")):
+            data["device_serial"] = discovery.device_serial
+        note = _admin_device_discovery_note(discovery)
+        data["network_note"] = _admin_append_note(data.get("network_note") or getattr(model, "network_note", ""), note)
+        if _admin_text(data.get("status") or getattr(model, "status", "")) in {"", "待配置", "待设备发现", "设备未发现"}:
+            data["status"] = "待设备注册"
+
+    if is_created and not _admin_text(data.get("notes") or getattr(model, "notes", "")):
+        data["notes"] = "SQLAdmin 自动生成线路；SIP 明文密码只通过配置卡/轮换接口一次性展示，不能从后台找回。"
+
+
+def _admin_mark_latest_discovery_matched(line: VoiceGatewayLine) -> None:
+    if not line.id or not line.owner_user_id:
+        return
+    with SessionLocal() as db:
+        discovery = db.scalar(
+            select(VoiceGatewayDeviceDiscovery)
+            .where(
+                VoiceGatewayDeviceDiscovery.owner_user_id == line.owner_user_id,
+                VoiceGatewayDeviceDiscovery.matched_line_id.is_(None),
+            )
+            .order_by(VoiceGatewayDeviceDiscovery.updated_at.desc(), VoiceGatewayDeviceDiscovery.created_at.desc())
+        )
+        if discovery is None:
+            return
+        discovery.matched_line_id = line.id
+        discovery.status = "matched"
+        discovery.updated_at = datetime.utcnow()
+        db.add(
+            VoiceGatewayLineEvent(
+                line_id=line.id,
+                owner_user_id=line.owner_user_id,
+                actor_user_id=None,
+                event_type="device_discovery",
+                status="matched",
+                summary="SQLAdmin 新增线路时自动匹配客户客户端发现的语音网关",
+                detail=_admin_device_discovery_note(discovery),
+                evidence_json=discovery.evidence_json,
+            )
+        )
+        db.commit()
+
+
 class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
     name = "语音网关线路"
     name_plural = "语音网关线路"
@@ -1546,25 +1768,88 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
     column_details_exclude_list = [VoiceGatewayLine.sip_password_hash]
     form_excluded_columns = [VoiceGatewayLine.sip_password_hash, VoiceGatewayLine.events]
     form_args = {
+        "line_name": {
+            "label": "线路名称",
+            "description": "可留空；后台会按客户账号自动生成。",
+            "validators": [Optional()],
+        },
+        "gateway_profile_key": {
+            "label": "网关档案",
+            "description": "默认鼎信 8T/通用语音网关；不要写死 UC100。",
+            "validators": [Optional()],
+        },
+        "gateway_label": {
+            "label": "网关名称",
+            "description": "可留空；后台按网关档案或客户客户端扫描结果自动生成。",
+            "validators": [Optional()],
+        },
+        "gateway_vendor": {"validators": [Optional()]},
+        "gateway_model": {"validators": [Optional()]},
+        "gateway_category": {"validators": [Optional()]},
+        "sip_server_host": {
+            "label": "SIP服务器",
+            "description": "可留空；默认生成云端公网 SIP 服务器 101.132.63.159。",
+            "validators": [Optional()],
+        },
+        "sip_server_port": {
+            "label": "SIP端口",
+            "description": "可留空；默认 5060。",
+            "validators": [Optional()],
+        },
+        "sip_transport": {
+            "label": "SIP协议",
+            "description": "可留空；默认 UDP。",
+            "validators": [Optional()],
+        },
+        "sip_username": {
+            "label": "SIP账号",
+            "description": "可留空；保存时按客户账号自动生成。",
+            "validators": [Optional()],
+        },
+        "sip_auth_username": {
+            "label": "鉴权账号",
+            "description": "可留空；默认与 SIP账号一致。",
+            "validators": [Optional()],
+        },
+        "sip_password_secret_alias": {
+            "label": "密码密钥别名",
+            "description": "这里不是明文密码。明文 SIP 密码只在生成或轮换时一次性显示；后台新增后如需交付给设备，请通过轮换/配置卡流程取得一次性密码。",
+            "validators": [Optional()],
+        },
+        "trunk_name": {
+            "label": "云端Trunk",
+            "description": "可留空；保存时按客户账号自动生成。",
+            "validators": [Optional()],
+        },
+        "channel_count": {
+            "label": "通道数",
+            "description": "可留空；鼎信 8T 默认 8 路，通用/UC100 默认 1 路。",
+            "validators": [Optional()],
+        },
+        "codec_primary": {"validators": [Optional()]},
+        "codec_secondary": {"validators": [Optional()]},
+        "dtmf_mode": {"validators": [Optional()]},
+        "rtp_port_range": {"validators": [Optional()]},
+        "route_direction": {"validators": [Optional()]},
         "device_admin_url": {
             "label": "设备后台地址",
-            "description": "客户现场局域网地址，例如 http://192.168.x.x/。云端不能自动知道；由交付电脑/客户端扫描、路由器 DHCP 列表、设备屏幕或说明书默认地址确认后填写。",
+            "description": "可留空；如果客户客户端已经扫描到现场设备，保存线路时会自动带入。否则由交付电脑/客户端扫描、路由器 DHCP 列表、设备屏幕或说明书默认地址确认后填写。",
+            "validators": [Optional()],
         },
         "device_mac": {
             "label": "设备MAC",
             "description": "用于多客户/多设备时绑定具体硬件，避免换网络后只靠 IP 认错设备。",
+            "validators": [Optional()],
         },
         "device_serial": {
             "label": "设备序列号",
             "description": "建议提前录入设备标签或采购台账里的序列号，现场发现后与设备核对。",
+            "validators": [Optional()],
         },
         "network_note": {
             "label": "网络说明",
             "description": "记录客户现场网段、交换机/路由器 DHCP 线索、固定 IP 或保留地址等交付信息。",
-        },
-        "sip_password_secret_alias": {
-            "label": "密码密钥别名",
-            "description": "这里不是明文密码。明文 SIP 密码只在生成或轮换时一次性显示。",
+            "validators": [Optional()],
         },
     }
     column_labels = {
@@ -1606,6 +1891,83 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         VoiceGatewayLine.notes: "备注",
         VoiceGatewayLine.created_at: "创建时间",
         VoiceGatewayLine.updated_at: "更新时间",
+    }
+
+    async def on_model_change(
+        self,
+        data: dict,
+        model: VoiceGatewayLine,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        _admin_prepare_voice_gateway_line_data(data, model, is_created)
+
+    async def after_model_change(
+        self,
+        data: dict,
+        model: VoiceGatewayLine,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        if is_created:
+            _admin_mark_latest_discovery_matched(model)
+
+
+class VoiceGatewayDeviceDiscoveryAdmin(ModelView, model=VoiceGatewayDeviceDiscovery):
+    name = "待匹配设备发现"
+    name_plural = "待匹配设备发现"
+    icon = "fa-solid fa-satellite-dish"
+    can_create = False
+    can_delete = False
+
+    column_list = [
+        VoiceGatewayDeviceDiscovery.owner_user_id,
+        VoiceGatewayDeviceDiscovery.status,
+        VoiceGatewayDeviceDiscovery.gateway_label,
+        VoiceGatewayDeviceDiscovery.device_admin_url,
+        VoiceGatewayDeviceDiscovery.device_ip,
+        VoiceGatewayDeviceDiscovery.device_mac,
+        VoiceGatewayDeviceDiscovery.device_serial,
+        VoiceGatewayDeviceDiscovery.matched_line_id,
+        VoiceGatewayDeviceDiscovery.updated_at,
+    ]
+    column_searchable_list = [
+        VoiceGatewayDeviceDiscovery.owner_user_id,
+        VoiceGatewayDeviceDiscovery.gateway_label,
+        VoiceGatewayDeviceDiscovery.device_admin_url,
+        VoiceGatewayDeviceDiscovery.device_ip,
+        VoiceGatewayDeviceDiscovery.device_mac,
+        VoiceGatewayDeviceDiscovery.device_serial,
+    ]
+    column_sortable_list = [
+        VoiceGatewayDeviceDiscovery.updated_at,
+        VoiceGatewayDeviceDiscovery.created_at,
+        VoiceGatewayDeviceDiscovery.status,
+    ]
+    column_default_sort = [(VoiceGatewayDeviceDiscovery.updated_at, True)]
+    form_excluded_columns = [
+        VoiceGatewayDeviceDiscovery.owner_user,
+        VoiceGatewayDeviceDiscovery.reporter_user,
+        VoiceGatewayDeviceDiscovery.matched_line,
+    ]
+    column_labels = {
+        VoiceGatewayDeviceDiscovery.owner_user_id: "客户账号",
+        VoiceGatewayDeviceDiscovery.reporter_user_id: "上报账号",
+        VoiceGatewayDeviceDiscovery.matched_line_id: "已匹配线路",
+        VoiceGatewayDeviceDiscovery.status: "状态",
+        VoiceGatewayDeviceDiscovery.source: "来源",
+        VoiceGatewayDeviceDiscovery.gateway_profile_key: "网关档案",
+        VoiceGatewayDeviceDiscovery.gateway_label: "网关名称",
+        VoiceGatewayDeviceDiscovery.device_admin_url: "设备后台地址",
+        VoiceGatewayDeviceDiscovery.device_ip: "设备IP",
+        VoiceGatewayDeviceDiscovery.device_mac: "设备MAC",
+        VoiceGatewayDeviceDiscovery.device_serial: "设备序列号",
+        VoiceGatewayDeviceDiscovery.sip_port: "SIP端口",
+        VoiceGatewayDeviceDiscovery.summary: "摘要",
+        VoiceGatewayDeviceDiscovery.detail: "详情",
+        VoiceGatewayDeviceDiscovery.evidence_json: "检测证据",
+        VoiceGatewayDeviceDiscovery.created_at: "创建时间",
+        VoiceGatewayDeviceDiscovery.updated_at: "更新时间",
     }
 
 
@@ -1752,6 +2114,7 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(VoiceUsageRecordAdmin)
     admin.add_view(ReportExportAdmin)
     admin.add_view(VoiceGatewayLineAdmin)
+    admin.add_view(VoiceGatewayDeviceDiscoveryAdmin)
     admin.add_view(VoiceGatewayLineEventAdmin)
     admin.add_view(SystemSettingAdmin)
     admin.add_view(SystemAuditLogAdmin)

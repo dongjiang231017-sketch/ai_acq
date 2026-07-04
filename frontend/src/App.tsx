@@ -2693,6 +2693,31 @@ function App() {
     const discoveryStatus = discovery?.status || delivery?.discoveryStatus || delivery?.status || "";
     const hasDiscoverySignal = Boolean(delivery || discovery || deviceAdminUrl || deviceHost);
     if (!hasDiscoverySignal) return;
+    const source = discovery?.source || delivery?.discoverySource || "desktop_client_discovery";
+    const reportStatus = isPositiveGatewayDiscovery(discoveryStatus) || deviceAdminUrl || deviceHost
+      ? discoveryStatus || "found"
+      : "not_found";
+    const evidence = {
+      source,
+      deliveryMode: status.deliveryMode,
+      runtimeMode: status.runtimeMode,
+      voiceGatewayProfile: status.voiceGatewayProfile,
+      voiceGatewayLabel: status.voiceGatewayLabel,
+      voiceGatewayHost: status.voiceGatewayHost,
+      voiceGatewaySipPort: status.voiceGatewaySipPort,
+      discoveryStatus,
+      discoverySource: delivery?.discoverySource,
+      previousGatewayAddress: delivery?.previousGatewayAddress,
+    };
+    const discoveryPayload = {
+      deviceAdminUrl: deviceAdminUrl || null,
+      deviceIp: deviceHost || null,
+      source,
+      status: reportStatus,
+      summary: deviceAdminUrl ? "客户端现场检测到语音网关后台地址" : "客户端现场检测到语音网关状态",
+      detail: delivery?.message || discovery?.message || status.nextStep || "",
+      evidenceJson: JSON.stringify(evidence),
+    };
 
     let lines = voiceGatewayLines;
     if (lines.length === 0) {
@@ -2705,41 +2730,30 @@ function App() {
     }
 
     if (lines.length === 0) {
-      if (deviceAdminUrl || deviceHost) setVoiceGatewayDiscoverySyncMessage("已发现现场设备，等待后台生成客户交付线路后自动绑定。");
+      const reportKey = `unmatched|${deviceAdminUrl}|${deviceHost}|${reportStatus}|${source}`;
+      if (reportedVoiceGatewayDiscoveryRef.current === reportKey) return;
+      try {
+        await api.createVoiceGatewayDeviceDiscovery({
+          ...discoveryPayload,
+          gatewayProfileKey: status.voiceGatewayProfile || null,
+          gatewayLabel: status.voiceGatewayLabel || null,
+          sipPort: status.voiceGatewaySipPort || discovery?.sipPort || null,
+        });
+        reportedVoiceGatewayDiscoveryRef.current = reportKey;
+        setVoiceGatewayDiscoverySyncMessage("已发现现场设备，后台生成客户交付线路后会自动绑定。");
+      } catch (error) {
+        setVoiceGatewayDiscoverySyncMessage(error instanceof Error ? error.message : "现场设备发现记录同步失败。");
+      }
       return;
     }
 
     const line = selectVoiceGatewayLine(lines, status);
     if (!line) return;
-    const source = discovery?.source || delivery?.discoverySource || "desktop_client_discovery";
-    const reportStatus = isPositiveGatewayDiscovery(discoveryStatus) || deviceAdminUrl || deviceHost
-      ? discoveryStatus || "found"
-      : "not_found";
     const reportKey = `${line.id}|${deviceAdminUrl}|${deviceHost}|${reportStatus}|${source}`;
     if (reportedVoiceGatewayDiscoveryRef.current === reportKey) return;
 
-    const evidence = {
-      source,
-      deliveryMode: status.deliveryMode,
-      runtimeMode: status.runtimeMode,
-      voiceGatewayLabel: status.voiceGatewayLabel,
-      voiceGatewayHost: status.voiceGatewayHost,
-      voiceGatewaySipPort: status.voiceGatewaySipPort,
-      discoveryStatus,
-      discoverySource: delivery?.discoverySource,
-      previousGatewayAddress: delivery?.previousGatewayAddress,
-    };
-
     try {
-      const updatedLine = await api.reportVoiceGatewayDeviceDiscovery(line.id, {
-        deviceAdminUrl: deviceAdminUrl || null,
-        deviceIp: deviceHost || null,
-        source,
-        status: reportStatus,
-        summary: deviceAdminUrl ? "客户端现场检测到语音网关后台地址" : "客户端现场检测到语音网关状态",
-        detail: delivery?.message || discovery?.message || status.nextStep || "",
-        evidenceJson: JSON.stringify(evidence),
-      });
+      const updatedLine = await api.reportVoiceGatewayDeviceDiscovery(line.id, discoveryPayload);
       reportedVoiceGatewayDiscoveryRef.current = reportKey;
       setVoiceGatewayLines((current) => {
         const exists = current.some((item) => item.id === updatedLine.id);
