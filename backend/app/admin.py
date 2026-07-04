@@ -11,8 +11,9 @@ from sqlalchemy import func, select
 from sqladmin import Admin, Flash, ModelView, action
 from sqladmin.authentication import AuthenticationBackend
 from sqladmin.forms import ModelConverter
+from sqladmin.secret import Secret
 from sqladmin.widgets import BooleanInputWidget
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from wtforms import PasswordField
 from wtforms.validators import InputRequired, Optional
 
@@ -2034,14 +2035,14 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         add_in_detail=True,
         add_in_list=True,
     )
-    async def rotate_sip_password(self, request: Request) -> RedirectResponse:
+    async def rotate_sip_password(self, request: Request) -> Response:
         selected_ids = _admin_selected_ids(request)
         if not selected_ids:
             Flash.warning(request, "请先选择要生成密码的语音网关线路")
             return _admin_action_redirect(request, self.identity)
 
         actor_username = request.session.get("admin_user")
-        results: list[str] = []
+        results: list[dict[str, str]] = []
         errors: list[str] = []
         with SessionLocal() as db:
             for line_id in selected_ids:
@@ -2080,8 +2081,19 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
                     )
                     db.commit()
                     results.append(
-                        f"{line.customer_name or line.line_name}：SIP账号 {line.sip_username}，"
-                        f"鉴权账号 {line.sip_auth_username}，一次性密码 {password}，Asterisk：{reload_message}"
+                        {
+                            "line_name": line.line_name or line.id,
+                            "customer_name": line.customer_name or line.line_name or line.id,
+                            "sip_server": line.sip_server_host,
+                            "sip_port": str(line.sip_server_port),
+                            "sip_transport": line.sip_transport,
+                            "sip_username": line.sip_username,
+                            "sip_auth_username": line.sip_auth_username or line.sip_username,
+                            "trunk_name": line.trunk_name,
+                            "channel_count": str(line.channel_count or 1),
+                            "password": password,
+                            "reload_message": reload_message,
+                        }
                     )
                 except Exception as exc:
                     db.rollback()
@@ -2089,10 +2101,57 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
                     continue
 
         if results:
-            Flash.success(request, "只显示本次，请马上复制到设备后台。 " + "；".join(results))
+            if len(results) == 1:
+                item = results[0]
+                secret_value = item["password"]
+                secret_label = (
+                    f"只显示本次，请立刻复制到设备后台的密码字段。客户：{item['customer_name']}；"
+                    f"SIP账号/鉴权账号：{item['sip_auth_username']}；服务器："
+                    f"{item['sip_server']}:{item['sip_port']}/{item['sip_transport']}。"
+                )
+            else:
+                secret_value = "\n\n".join(
+                    "\n".join(
+                        [
+                            f"客户：{item['customer_name']}",
+                            f"SIP服务器：{item['sip_server']}",
+                            f"SIP端口/协议：{item['sip_port']}/{item['sip_transport']}",
+                            f"SIP账号：{item['sip_username']}",
+                            f"鉴权账号：{item['sip_auth_username']}",
+                            f"一次性密码：{item['password']}",
+                            f"云端Trunk：{item['trunk_name']}",
+                            f"通道数：{item['channel_count']}",
+                        ]
+                    )
+                    for item in results
+                )
+                secret_label = "已为多条线路生成一次性密码。请立刻复制，逐台写入对应设备后台。"
+            Secret.reveal_once(
+                request,
+                value=secret_value,
+                title="一次性 SIP 密码已生成",
+                label=secret_label,
+            )
+            Flash.success(request, "一次性 SIP 密码已生成并写入云端 Asterisk。")
         if errors:
             Flash.error(request, "部分线路生成失败：" + "；".join(errors))
-        return _admin_action_redirect(request, self.identity)
+        if not results:
+            return _admin_action_redirect(request, self.identity)
+
+        response = await self.templates.TemplateResponse(
+            request,
+            "sqladmin/voice_gateway_secret_reveal.html",
+            {
+                "title": "一次性 SIP 密码",
+                "subtitle": "只显示本次",
+                "model_view": self,
+                "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                "generated_count": len(results),
+                "errors": errors,
+            },
+        )
+        Secret.apply_no_store_headers(response)
+        return response
 
 
 class VoiceGatewayDeviceDiscoveryAdmin(ModelView, model=VoiceGatewayDeviceDiscovery):
