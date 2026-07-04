@@ -75,18 +75,12 @@ function selectUpdateAsset(manifest, { preferAutoInstall = false } = {}) {
   const files = manifest?.files || {};
   const candidates = [];
   if (process.platform === "darwin") {
-    if (process.arch === "arm64") {
-      if (preferAutoInstall) {
-        candidates.push({ key: "macArm64Zip", path: files.stableMacArm64Zip || files.macArm64Zip });
-        candidates.push({ key: "macArm64Dmg", path: files.stableMacArm64Dmg || files.macArm64Dmg });
-      } else {
-        candidates.push({ key: "macArm64Dmg", path: files.stableMacArm64Dmg || files.macArm64Dmg });
-        candidates.push({ key: "macArm64Zip", path: files.stableMacArm64Zip || files.macArm64Zip });
-      }
-    } else {
-      candidates.push({ key: "macX64Dmg", path: files.stableMacX64Dmg || files.macX64Dmg });
-      candidates.push({ key: "macX64Zip", path: files.stableMacX64Zip || files.macX64Zip });
-    }
+    const archLabel = process.arch === "arm64" ? "MacArm64" : "MacX64";
+    const dmgKey = process.arch === "arm64" ? "macArm64Dmg" : "macX64Dmg";
+    const zipKey = process.arch === "arm64" ? "macArm64Zip" : "macX64Zip";
+    const dmgCandidate = { key: dmgKey, path: files[`stable${archLabel}Dmg`] || files[dmgKey] };
+    const zipCandidate = { key: zipKey, path: files[`stable${archLabel}Zip`] || files[zipKey] };
+    candidates.push(...(preferAutoInstall ? [zipCandidate, dmgCandidate] : [dmgCandidate, zipCandidate]));
   } else if (process.platform === "win32") {
     candidates.push({ key: "windowsX64Setup", path: files.stableWindowsX64Setup || files.windowsX64Setup });
   } else {
@@ -149,6 +143,13 @@ function currentMacAppBundlePath() {
   return index >= 0 ? executable.slice(0, index + ".app".length) : "";
 }
 
+function targetMacAppBundlePath(currentApp) {
+  if (currentApp.startsWith("/Volumes/") || currentApp.includes("/AppTranslocation/")) {
+    return path.join("/Applications", path.basename(currentApp));
+  }
+  return currentApp;
+}
+
 async function findFirstAppBundle(rootDir) {
   const entries = await fs.promises.readdir(rootDir, { withFileTypes: true });
   for (const entry of entries) {
@@ -173,8 +174,10 @@ async function canWriteDirectory(dir) {
 }
 
 async function installMacZipUpdate(zipPath, version) {
-  const targetApp = currentMacAppBundlePath();
-  if (!targetApp) throw new Error("无法定位当前客户端 App，不能自动替换。");
+  const currentApp = currentMacAppBundlePath();
+  if (!currentApp) throw new Error("无法定位当前客户端 App，不能自动替换。");
+  const targetApp = targetMacAppBundlePath(currentApp);
+  const runningFromDiskImage = currentApp !== targetApp;
   const stagingDir = path.join(path.dirname(zipPath), `staged-${version || Date.now()}`);
   await fs.promises.rm(stagingDir, { recursive: true, force: true });
   await fs.promises.mkdir(stagingDir, { recursive: true });
@@ -186,6 +189,8 @@ async function installMacZipUpdate(zipPath, version) {
   const logPath = path.join(path.dirname(zipPath), "install-ai-acq-update.log");
   const script = `#!/bin/bash
 set -euo pipefail
+APP_PID=${process.pid}
+CURRENT=${shellQuote(currentApp)}
 TARGET=${shellQuote(targetApp)}
 SOURCE=${shellQuote(sourceApp)}
 STAGING=${shellQuote(stagingDir)}
@@ -193,14 +198,32 @@ ZIP=${shellQuote(zipPath)}
 LOG=${shellQuote(logPath)}
 {
   echo "AI ACQ update start $(date)"
-  sleep 2
-  BACKUP="$TARGET.backup-$(date +%Y%m%d%H%M%S)"
+  echo "current=$CURRENT"
+  echo "target=$TARGET"
+  echo "source=$SOURCE"
+  WAITED=0
+  while /bin/kill -0 "$APP_PID" 2>/dev/null; do
+    if [ "$WAITED" -ge 60 ]; then
+      echo "Timed out waiting for old client process $APP_PID to exit"
+      exit 1
+    fi
+    sleep 1
+    WAITED=$((WAITED + 1))
+  done
+  BACKUP=""
+  restore_backup() {
+    if [ -n "$BACKUP" ] && [ -d "$BACKUP" ] && [ ! -d "$TARGET" ]; then
+      mv "$BACKUP" "$TARGET" || true
+    fi
+  }
+  trap 'CODE=$?; if [ "$CODE" -ne 0 ]; then echo "AI ACQ update failed with code $CODE at $(date)"; restore_backup; exit "$CODE"; fi' EXIT
   if [ -d "$TARGET" ]; then
+    BACKUP="$TARGET.backup-$(date +%Y%m%d%H%M%S)"
     mv "$TARGET" "$BACKUP"
   fi
   /usr/bin/ditto "$SOURCE" "$TARGET"
   /usr/bin/xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
-  /usr/bin/open "$TARGET"
+  /usr/bin/open -n "$TARGET"
   rm -rf "$BACKUP" "$STAGING" "$ZIP" "$0" 2>/dev/null || true
   echo "AI ACQ update done $(date)"
 } >> "$LOG" 2>&1
@@ -221,7 +244,9 @@ LOG=${shellQuote(logPath)}
   return {
     status: "installing",
     message: writable
-      ? "更新包已校验，客户端将自动重启完成升级。"
+      ? runningFromDiskImage
+        ? "更新包已校验，客户端将安装到“应用程序”并自动重启。"
+        : "更新包已校验，客户端将自动重启完成升级。"
       : "更新包已校验，系统可能会要求输入本机密码以替换应用。",
     installerPath: scriptPath,
     logPath,
