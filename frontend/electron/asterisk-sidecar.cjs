@@ -990,7 +990,12 @@ function httpGatewayAdminUrl(host, port) {
   const normalizedHost = String(host || "").trim();
   const normalizedPort = Number(port);
   if (!normalizedHost) return "";
+  if (isVoiceGatewaySipPort(normalizedPort)) return `http://${normalizedHost}/`;
   return normalizedPort && normalizedPort !== 80 ? `http://${normalizedHost}:${normalizedPort}/` : `http://${normalizedHost}/`;
+}
+
+function isVoiceGatewaySipPort(port) {
+  return [5060, 5080, 15060].includes(Number(port || 0));
 }
 
 function classifyVoiceGatewayHttpSignature({ title, server, authenticate, cookies, body, statusCode }) {

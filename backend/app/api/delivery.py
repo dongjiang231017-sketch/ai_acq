@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from secrets import choice, token_hex
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -585,7 +586,25 @@ def _normalise_device_admin_url(admin_url: str | None, device_ip: str | None) ->
         return ""
     if not re.match(r"^https?://", value, flags=re.IGNORECASE):
         value = f"http://{value}"
+    value = _strip_sip_port_from_admin_url(value)
     return value.rstrip("/") + "/"
+
+
+def _strip_sip_port_from_admin_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    try:
+        port = parsed.port
+    except ValueError:
+        return value
+    if port not in {5060, 5080, 15060} or not parsed.hostname:
+        return value
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{parsed.scheme or 'http'}://{host}{parsed.path or ''}"
 
 
 def _latest_unmatched_device_discovery(db: Session, owner_user_id: str) -> VoiceGatewayDeviceDiscovery | None:

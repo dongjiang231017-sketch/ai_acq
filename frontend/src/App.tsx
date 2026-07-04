@@ -870,10 +870,15 @@ function normalizeDeviceAdminUrl(value?: string | null) {
   if (!trimmed) return "";
   try {
     const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+    if (isVoiceGatewaySipPort(parsed.port)) parsed.port = "";
     return `${parsed.protocol}//${parsed.host}/`;
   } catch {
     return trimmed;
   }
+}
+
+function isVoiceGatewaySipPort(port?: string | number | null) {
+  return [5060, 5080, 15060].includes(Number(port || 0));
 }
 
 function hostFromDeviceAdminUrl(value?: string | null) {

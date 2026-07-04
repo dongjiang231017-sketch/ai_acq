@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from secrets import choice, compare_digest, token_hex
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from sqlalchemy import func, select
@@ -1556,7 +1557,25 @@ def _admin_normalise_device_admin_url(admin_url: str | None, device_ip: str | No
         return ""
     if not value.startswith(("http://", "https://")):
         value = f"http://{value}"
+    value = _admin_strip_sip_port_from_admin_url(value)
     return value.rstrip("/") + "/"
+
+
+def _admin_strip_sip_port_from_admin_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    try:
+        port = parsed.port
+    except ValueError:
+        return value
+    if port not in {5060, 5080, 15060} or not parsed.hostname:
+        return value
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{parsed.scheme or 'http'}://{host}{parsed.path or ''}"
 
 
 def _admin_append_note(current: str | None, note: str) -> str:
