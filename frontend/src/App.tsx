@@ -2733,14 +2733,22 @@ function App() {
       const reportKey = `unmatched|${deviceAdminUrl}|${deviceHost}|${reportStatus}|${source}`;
       if (reportedVoiceGatewayDiscoveryRef.current === reportKey) return;
       try {
-        await api.createVoiceGatewayDeviceDiscovery({
+        const createdDiscovery = await api.createVoiceGatewayDeviceDiscovery({
           ...discoveryPayload,
           gatewayProfileKey: status.voiceGatewayProfile || null,
           gatewayLabel: status.voiceGatewayLabel || null,
           sipPort: status.voiceGatewaySipPort || discovery?.sipPort || null,
         });
         reportedVoiceGatewayDiscoveryRef.current = reportKey;
-        setVoiceGatewayDiscoverySyncMessage("已发现现场设备，后台生成客户交付线路后会自动绑定。");
+        if (createdDiscovery.matchedLineId) {
+          const updatedLines = await api.voiceGatewayLines();
+          setVoiceGatewayLines(updatedLines);
+          setVoiceGatewayDiscoverySyncMessage("已发现现场设备，后台已自动生成客户交付线路。");
+        } else if (reportStatus === "not_found") {
+          setVoiceGatewayDiscoverySyncMessage("未发现现场语音网关，请确认电脑和网关在同一局域网。");
+        } else {
+          setVoiceGatewayDiscoverySyncMessage("已记录现场设备发现结果，等待后台生成客户交付线路。");
+        }
       } catch (error) {
         setVoiceGatewayDiscoverySyncMessage(error instanceof Error ? error.message : "现场设备发现记录同步失败。");
       }

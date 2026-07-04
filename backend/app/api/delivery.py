@@ -35,12 +35,21 @@ from app.services.voice_gateway_profiles import PROFILE_DEFAULTS
 router = APIRouter()
 
 ONE_TIME_WARNING = "SIP 密码只在本次响应展示；交付后请写入受控密钥库，丢失后只能重新轮换。"
+DEFAULT_SIP_SERVER_HOST = "101.132.63.159"
 DEFAULT_CODEC_PRIMARY = "PCMA/alaw"
 DEFAULT_CODEC_SECONDARY = "PCMU/ulaw"
 DEFAULT_DTMF_MODE = "RFC2833/RFC4733"
 DEFAULT_RTP_RANGE = "10000-20000/UDP"
 DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
 SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+PROFILE_CHANNEL_DEFAULTS = {
+    "dinstar_8t_server": 8,
+    "multi_sim_lte_gateway": 8,
+    "uc100_sip_volte": 1,
+    "sip_volte_gateway": 1,
+    "sip_trunk": 1,
+}
+AUTO_BIND_LINE_STATUSES = {"", "待配置", "待设备发现", "设备未发现", "待设备注册", "待下发"}
 
 
 @router.get("/voice-gateway-profiles")
@@ -101,14 +110,19 @@ def create_voice_gateway_device_discovery(
     current_user: User = Depends(get_current_user),
 ) -> VoiceGatewayDeviceDiscovery:
     discovery = _record_device_discovery(db, current_user.id, current_user, payload, matched_line_id=None)
+    line, created_line = _auto_bind_device_discovery(db, current_user, current_user, discovery)
     _add_audit(
         db,
         current_user,
         "voice_gateway_device_discovery.create",
         discovery.id,
-        f"记录待匹配语音网关设备：{discovery.device_admin_url or discovery.device_ip or discovery.gateway_label}",
+        f"{'自动生成语音网关线路并匹配设备' if line and created_line else '记录待匹配语音网关设备'}：{discovery.device_admin_url or discovery.device_ip or discovery.gateway_label}",
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="自动生成客户语音网关配置卡失败：线路名称、SIP账号或 trunk 名称已存在") from exc
     db.refresh(discovery)
     return discovery
 
@@ -586,6 +600,154 @@ def _latest_unmatched_device_discovery(db: Session, owner_user_id: str) -> Voice
     )
 
 
+def _auto_bind_device_discovery(
+    db: Session,
+    owner: User,
+    actor: User,
+    discovery: VoiceGatewayDeviceDiscovery,
+) -> tuple[VoiceGatewayLine | None, bool]:
+    if not _device_discovery_can_bind(discovery):
+        return None, False
+
+    line = _matching_line_for_device_discovery(db, owner.id, discovery)
+    created_line = False
+    if line is None:
+        payload = _line_payload_from_discovery(db, owner, discovery)
+        line, _password = _build_line(payload, owner, actor)
+        db.add(line)
+        db.flush()
+        created_line = True
+        _add_event(
+            db,
+            line,
+            actor,
+            event_type="note",
+            status="created",
+            summary="客户客户端发现设备后自动生成语音网关配置卡",
+            detail=f"{line.gateway_label} / {line.sip_server_host}:{line.sip_server_port}/{line.sip_transport}",
+        )
+
+    _apply_device_discovery_to_line(line, discovery, overwrite_device_address=True)
+    discovery.matched_line_id = line.id
+    discovery.status = "matched"
+    discovery.updated_at = datetime.utcnow()
+    line.updated_at = datetime.utcnow()
+    _add_event(
+        db,
+        line,
+        actor,
+        event_type="device_discovery",
+        status="matched",
+        summary="自动匹配客户客户端发现的语音网关",
+        detail=_device_discovery_note_from_record(discovery),
+        evidence_json=discovery.evidence_json,
+    )
+    return line, created_line
+
+
+def _device_discovery_can_bind(discovery: VoiceGatewayDeviceDiscovery) -> bool:
+    status_value = (discovery.status or "").strip()
+    if status_value.lower() in {"not_found", "missing", "none", "unavailable"} or status_value in {"未发现", "无设备"}:
+        return False
+    if _is_fail_status(status_value):
+        return False
+    if discovery.device_admin_url or discovery.device_ip or discovery.device_mac or discovery.device_serial:
+        return True
+    return status_value.lower() in {"found", "current", "updated", "pass", "passed", "ready", "ok"} or status_value in {
+        "已发现",
+        "已绑定",
+        "通过",
+        "正常",
+    }
+
+
+def _matching_line_for_device_discovery(
+    db: Session,
+    owner_user_id: str,
+    discovery: VoiceGatewayDeviceDiscovery,
+) -> VoiceGatewayLine | None:
+    lines = list(
+        db.scalars(
+            select(VoiceGatewayLine)
+            .where(VoiceGatewayLine.owner_user_id == owner_user_id)
+            .order_by(VoiceGatewayLine.updated_at.desc(), VoiceGatewayLine.created_at.desc())
+        ).all()
+    )
+    if not lines:
+        return None
+
+    discovery_mac = _normalise_mac(discovery.device_mac)
+    if discovery_mac:
+        for line in lines:
+            if _normalise_mac(line.device_mac) == discovery_mac:
+                return line
+
+    discovery_serial = (discovery.device_serial or "").strip().lower()
+    if discovery_serial:
+        for line in lines:
+            if (line.device_serial or "").strip().lower() == discovery_serial:
+                return line
+
+    discovery_host = discovery.device_ip or _ip_from_admin_url(discovery.device_admin_url)
+    if discovery_host:
+        for line in lines:
+            if _ip_from_admin_url(line.device_admin_url) == discovery_host:
+                return line
+
+    for line in lines:
+        if line.status in AUTO_BIND_LINE_STATUSES and not (line.device_admin_url or line.device_mac or line.device_serial):
+            return line
+
+    return lines[0] if len(lines) == 1 else None
+
+
+def _line_payload_from_discovery(
+    db: Session,
+    owner: User,
+    discovery: VoiceGatewayDeviceDiscovery,
+) -> VoiceGatewayLineCreate:
+    profile_key = discovery.gateway_profile_key if discovery.gateway_profile_key in PROFILE_DEFAULTS else "dinstar_8t_server"
+    profile = _profile_defaults(profile_key)
+    customer_name = (owner.display_name or owner.username or owner.id).strip()
+    line_name = _unique_line_name(db, owner.id, f"{customer_name or '客户'} 语音网关 {datetime.utcnow().strftime('%m%d-%H%M')}")
+    return VoiceGatewayLineCreate.model_validate(
+        {
+            "lineName": line_name,
+            "ownerUserId": owner.id,
+            "customerName": customer_name,
+            "gatewayProfileKey": profile_key,
+            "gatewayLabel": discovery.gateway_label or str(profile["label"]),
+            "gatewayVendor": str(profile["vendor"]),
+            "gatewayModel": str(profile["model"]),
+            "gatewayCategory": str(profile["category"]),
+            "sipServerHost": DEFAULT_SIP_SERVER_HOST,
+            "sipServerPort": 5060,
+            "sipTransport": "UDP",
+            "channelCount": PROFILE_CHANNEL_DEFAULTS.get(profile_key, 1),
+            "deviceAdminUrl": discovery.device_admin_url or discovery.device_ip or None,
+            "deviceSerial": discovery.device_serial or None,
+            "deviceMac": discovery.device_mac or None,
+            "networkNote": _device_discovery_note_from_record(discovery),
+            "notes": "客户客户端发现现场语音网关后自动生成；SIP 明文密码需通过凭据轮换/一次性配置卡流程获取。",
+        }
+    )
+
+
+def _unique_line_name(db: Session, owner_user_id: str, base_name: str) -> str:
+    base = base_name.strip()[:104] or "客户语音网关"
+    for index in range(20):
+        candidate = base if index == 0 else f"{base}-{index + 1}"
+        exists = db.scalar(
+            select(VoiceGatewayLine.id).where(
+                VoiceGatewayLine.owner_user_id == owner_user_id,
+                VoiceGatewayLine.line_name == candidate,
+            )
+        )
+        if not exists:
+            return candidate
+    return f"{base}-{token_hex(3)}"[:120]
+
+
 def _record_device_discovery(
     db: Session,
     owner_user_id: str,
@@ -626,17 +788,24 @@ def _record_device_discovery(
     return discovery
 
 
-def _apply_device_discovery_to_line(line: VoiceGatewayLine, discovery: VoiceGatewayDeviceDiscovery) -> None:
-    if discovery.device_admin_url and not line.device_admin_url:
+def _apply_device_discovery_to_line(
+    line: VoiceGatewayLine,
+    discovery: VoiceGatewayDeviceDiscovery,
+    *,
+    overwrite_device_address: bool = False,
+) -> None:
+    if discovery.device_admin_url and (overwrite_device_address or not line.device_admin_url):
         line.device_admin_url = discovery.device_admin_url
-    if discovery.device_mac and not line.device_mac:
+    elif discovery.device_ip and (overwrite_device_address or not line.device_admin_url):
+        line.device_admin_url = _normalise_device_admin_url("", discovery.device_ip)
+    if discovery.device_mac and (overwrite_device_address or not line.device_mac):
         line.device_mac = discovery.device_mac
-    if discovery.device_serial and not line.device_serial:
+    if discovery.device_serial and (overwrite_device_address or not line.device_serial):
         line.device_serial = discovery.device_serial
     note = _device_discovery_note_from_record(discovery)
     if note:
         line.network_note = _append_note(line.network_note, note)
-    if line.status in {"", "待配置", "待设备发现", "设备未发现"}:
+    if line.status in AUTO_BIND_LINE_STATUSES:
         line.status = "待设备注册"
 
 
@@ -660,6 +829,10 @@ def _ip_from_admin_url(admin_url: str) -> str:
         return ""
     match = re.match(r"^https?://([^/:]+)", admin_url, flags=re.IGNORECASE)
     return match.group(1) if match else ""
+
+
+def _normalise_mac(value: str) -> str:
+    return re.sub(r"[^0-9a-f]", "", (value or "").lower())
 
 
 def _device_discovery_note(payload: VoiceGatewayDeviceDiscoveryUpdate, admin_url: str) -> str:

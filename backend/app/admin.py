@@ -1651,7 +1651,13 @@ def _admin_prepare_voice_gateway_line_data(data: dict, model: VoiceGatewayLine, 
     if not _admin_text(data.get("sip_transport") or getattr(model, "sip_transport", "")):
         data["sip_transport"] = "UDP"
 
-    if is_created:
+    needs_identity = (
+        is_created
+        or not _admin_text(data.get("sip_username") or getattr(model, "sip_username", ""))
+        or not _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", ""))
+        or not _admin_text(data.get("sip_password_hash") or getattr(model, "sip_password_hash", ""))
+    )
+    if needs_identity:
         sip_username, trunk_name = _admin_line_identity(owner, owner_user_id)
         if not _admin_text(data.get("sip_username") or getattr(model, "sip_username", "")):
             data["sip_username"] = sip_username
@@ -1909,8 +1915,7 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         is_created: bool,
         request: Request,
     ) -> None:
-        if is_created:
-            _admin_mark_latest_discovery_matched(model)
+        _admin_mark_latest_discovery_matched(model)
 
 
 class VoiceGatewayDeviceDiscoveryAdmin(ModelView, model=VoiceGatewayDeviceDiscovery):
