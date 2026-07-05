@@ -546,6 +546,7 @@ function realtimeEventToMonitorMessage(event: RealtimeLiveEvent): MonitorMessage
   if (event.type === "remote_speech_started") return { speaker: "customer", label: "客户", text: "检测到客户开始说话。" };
   if (event.type === "human_speech_confirmed") return { speaker: "customer", label: "客户", text: event.text || "已确认真人客户语音。" };
   if (event.type === "asr_final") return { speaker: "customer", label: "客户", text: event.text || "客户语音已识别。" };
+  if (event.type === "asr_partial_stable") return { speaker: "customer", label: "客户", text: event.text || "客户语音已稳定，先触发回复。" };
   if (event.type === "llm_reply") return { speaker: "ai", label: "AI", text: event.reply || event.text || "AI 已生成回复。" };
   if (event.type === "tts_start") return { speaker: "system", label: "播放", text: "AI 语音开始播放。" };
   if (event.type === "tts_done") return { speaker: "system", label: "播放", text: "AI 语音播放完成，继续监听客户。" };
@@ -1598,6 +1599,8 @@ function realtimeLiveEventTitle(type: string) {
   if (type === "audio_capture_started") return "开始录音证据";
   if (type === "audio_capture_saved") return "录音证据已保存";
   if (type === "asr_final") return "客户语音";
+  if (type === "asr_partial_stable") return "客户语音稳定";
+  if (type === "no_response_hangup_cancelled") return "取消空等挂断";
   if (type === "llm_reply") return "AI 回复";
   if (type === "tts_start") return "开始播放";
   if (type === "tts_interrupted") return "播放打断";

@@ -168,6 +168,37 @@ def _replay_cases() -> list[ReplayCase]:
             max_turn_response_ms=1000,
         ),
         ReplayCase(
+            name="stable_partial_identity_question_gets_reply_before_final",
+            note="来自 2026-07-05 实测：客户问“你谁啊”时 ASR final 迟到，必须先用稳定 partial 触发回复。",
+            asr_checks=(
+                ReplayAsrCheck(
+                    text="那你谁都不说话",
+                    expected_signal="identity_handoff",
+                    expected_answer_type=CallAnswerType.HUMAN,
+                ),
+            ),
+            events=[
+                _event("call_connected", "partial", "2026-07-05T02:05:25.000Z"),
+                _event("tts_done", "partial", "2026-07-05T02:05:45.500Z", raw={"sentBytes": 960, "firstAudioMs": 480}),
+                _event("no_response_hangup_scheduled", "partial", "2026-07-05T02:05:45.520Z", waitMs=20000),
+                _event("asr_partial", "partial", "2026-07-05T02:05:52.400Z", text="那你谁都不"),
+                _event(
+                    "no_response_hangup_cancelled",
+                    "partial",
+                    "2026-07-05T02:05:52.401Z",
+                    text="那你谁都不",
+                ),
+                _event("asr_partial_stable", "partial", "2026-07-05T02:05:53.250Z", text="那你谁都不"),
+                _event("human_speech_confirmed", "partial", "2026-07-05T02:05:53.260Z", text="那你谁都不"),
+                _event("llm_reply", "partial", "2026-07-05T02:05:53.780Z", reply="我是做视频号团购到店获客的，给您来电是确认微信同城曝光需求。"),
+                _event("tts_start", "partial", "2026-07-05T02:05:54.050Z", raw={"sentBytes": 640, "firstAudioMs": 420}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("humanSpeechConfirmed", "customerSpeechConfirmed", "aiSpeechConfirmed", "autoCloseScheduled"),
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+        ),
+        ReplayCase(
             name="voicemail_is_terminal_not_sales_conversation",
             events=[
                 _event("call_connected", "voicemail", "2026-07-05T01:30:00.000Z"),

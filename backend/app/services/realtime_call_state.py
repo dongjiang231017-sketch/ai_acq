@@ -99,19 +99,23 @@ def reduce_realtime_call_events(events: list[dict[str, object]]) -> RealtimeCall
     no_response = "no_response_hangup_timeout" in event_types
     hangup = bool(event_types.intersection({"hangup_frame", "call_disconnected"}))
     ai_speech = _has_ai_speech(sorted_events)
-    customer_speech = human or any(event.get("type") in {"asr_final", "remote_speech_started"} for event in sorted_events)
+    customer_speech = human or any(
+        event.get("type") in {"asr_final", "asr_partial_stable", "remote_speech_started"}
+        for event in sorted_events
+    )
     interruption = any(
         event.get("type") in {"barge_in", "barge_recovery_ready", "barge_turn_committed", "tts_interrupted"}
         for event in sorted_events
     )
-    scheduled_auto_close = any(
+    auto_close_ever_scheduled = any(
         event.get("type") in {"call_screening_hangup_scheduled", "no_response_hangup_scheduled"}
         for event in sorted_events
     )
+    scheduled_auto_close = _active_auto_close_scheduled(sorted_events)
 
     latest_turn_response_ms = _latest_turn_response_ms(sorted_events)
     turn_taking_status = _turn_taking_status(latest_turn_response_ms, sorted_events)
-    last_customer_text = _last_text(sorted_events, {"asr_final", "human_speech_confirmed"})
+    last_customer_text = _last_text(sorted_events, {"asr_final", "asr_partial_stable", "human_speech_confirmed"})
     last_ai_reply = _last_reply(sorted_events)
     last_event_at = str(sorted_events[-1].get("at") or "") or None
 
@@ -144,7 +148,7 @@ def reduce_realtime_call_events(events: list[dict[str, object]]) -> RealtimeCall
         status=status,
         close_reason=close_reason,
         can_auto_close=call_screening or ai_speech or voicemail or silence,
-        auto_close_scheduled=scheduled_auto_close,
+        auto_close_scheduled=auto_close_ever_scheduled,
         human_speech_confirmed=human,
         call_screening_detected=call_screening,
         voicemail_detected=voicemail,
@@ -192,11 +196,11 @@ def _derive_state(
         return "phone_assistant", "电话助理/秘书", "attention", None
     if silence and not human and not ai_speech:
         return "silence", "接通后静音/无有效语音", "attention", None
-    if "no_response_hangup_scheduled" in event_types:
+    if scheduled_auto_close and "no_response_hangup_scheduled" in event_types:
         return "waiting_customer_response", "AI已回复，等待客户回应", "active", None
     if _last_event_type(events) == "tts_start":
         return "ai_speaking", "AI正在说话", "active", None
-    if _last_event_type(events) in {"asr_final", "human_speech_confirmed", "remote_speech_started"}:
+    if _last_event_type(events) in {"asr_final", "asr_partial_stable", "human_speech_confirmed", "remote_speech_started"}:
         return "customer_speaking", "客户正在说话/刚说完", "active", None
     if human:
         return "human", "真人客户已接听", "active", None
@@ -234,7 +238,7 @@ def _latest_turn_response_ms(events: list[dict[str, object]]) -> int | None:
     customer_events = [
         event
         for event in events
-        if event.get("type") in {"asr_final", "barge_turn_committed", "barge_recovery_ready"}
+        if event.get("type") in {"asr_final", "asr_partial_stable", "barge_turn_committed", "barge_recovery_ready"}
     ]
     response_types = {"llm_reply", "tts_start", "omni_response_slow_fallback"}
     for customer_event in reversed(customer_events):
@@ -306,6 +310,28 @@ def _has_event(events: list[dict[str, object]], event_type: str) -> bool:
 
 def _has_terminal_event(events: list[dict[str, object]]) -> bool:
     return any(event.get("type") in TERMINAL_EVENT_TYPES for event in events)
+
+
+def _active_auto_close_scheduled(events: list[dict[str, object]]) -> bool:
+    active = False
+    for event in events:
+        event_type = event.get("type")
+        if event_type in {"call_screening_hangup_scheduled", "no_response_hangup_scheduled"}:
+            active = True
+        elif event_type in {
+            "no_response_hangup_cancelled",
+            "human_speech_confirmed",
+            "asr_partial_stable",
+            "asr_final",
+            "call_screening_hangup_timeout",
+            "no_response_hangup_timeout",
+            "voicemail_detected",
+            "hangup_frame",
+            "call_disconnected",
+            "call_error",
+        }:
+            active = False
+    return active
 
 
 def _raw(event: dict[str, object]) -> dict[str, Any]:
