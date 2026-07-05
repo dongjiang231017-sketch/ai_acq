@@ -1785,6 +1785,30 @@ button:disabled {
   gap: 10px;
 }
 
+.realtime-ab-board,
+.realtime-learning-board {
+  border: 1px solid #dfe9f6;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.realtime-ab-board {
+  grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.6fr);
+}
+
+.realtime-ab-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.realtime-learning-board {
+  grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.6fr);
+}
+
 .realtime-state-board {
   border: 1px solid #dfe9f6;
   border-radius: 12px;
@@ -4047,6 +4071,9 @@ button:disabled {
 
   .realtime-pipeline-summary,
   .realtime-pipeline-steps,
+  .realtime-ab-board,
+  .realtime-ab-grid,
+  .realtime-learning-board,
   .realtime-state-grid,
   .realtime-score-board,
   .realtime-score-grid,

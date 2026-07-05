@@ -11,6 +11,8 @@ from uuid import uuid4
 from app.core.config import settings
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
 from app.services.realtime_call_state import summarize_realtime_call_state
+from app.services.realtime_call_learning import summarize_realtime_learning
+from app.services.realtime_route_benchmark import build_realtime_route_benchmark
 from app.services.realtime_sales_brain import score_realtime_events
 from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 from app.services.runtime_ai_config import get_runtime_ai_config
@@ -221,6 +223,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             ),
         ]
         estimated_latency = sum(int(step["latencyMs"]) for step in steps)
+        route_options = _conversation_route_options(conversation_mode, bridge_ready)
         return {
             "mode": "omni_realtime_interruptible",
             "bridgeMode": "mock_media" if not bridge_ready else "asterisk_audiosocket",
@@ -234,7 +237,13 @@ def build_realtime_pipeline() -> dict[str, object]:
                 if bridge_ready and dashscope_ready
                 else "先启动 AudioSocket bridge 的 omni 模式，并确认 DashScope key 与 Asterisk 单号试拨开关。"
             ),
-            "routeOptions": _conversation_route_options(conversation_mode, bridge_ready),
+            "routeOptions": route_options,
+            "routeBenchmark": build_realtime_route_benchmark(
+                current_route=conversation_mode,
+                bridge_ready=bridge_ready,
+                route_options=route_options,
+            ),
+            "learning": summarize_realtime_learning(),
             "steps": steps,
         }
     llm_ready = deepseek_configured()
@@ -284,6 +293,7 @@ def build_realtime_pipeline() -> dict[str, object]:
         _pipeline_step("barge_in", "打断处理", "pass", "VAD + playback queue cancel", 80, "AI 说话时收到客户插话会停止当前 TTS 并重新进入 listening。"),
     ]
     estimated_latency = sum(int(step["latencyMs"]) for step in steps)
+    route_options = _conversation_route_options(conversation_mode, bridge_ready)
     return {
         "mode": "half_duplex_interruptible",
         "bridgeMode": "mock_media" if not bridge_ready else "asterisk_audiosocket",
@@ -297,7 +307,13 @@ def build_realtime_pipeline() -> dict[str, object]:
             if bridge_ready
             else "先启动 AudioSocket bridge，再打开 ASTERISK_LIVE_CALL_ENABLED=true，并从前端做单号试拨。"
         ),
-        "routeOptions": _conversation_route_options(conversation_mode, bridge_ready),
+        "routeOptions": route_options,
+        "routeBenchmark": build_realtime_route_benchmark(
+            current_route=conversation_mode,
+            bridge_ready=bridge_ready,
+            route_options=route_options,
+        ),
+        "learning": summarize_realtime_learning(),
         "steps": steps,
     }
 

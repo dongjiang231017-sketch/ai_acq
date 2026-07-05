@@ -509,6 +509,41 @@ export type RealtimeRouteOption = {
   isActive: boolean;
 };
 
+export type RealtimeRouteBenchmark = {
+  key: "pipeline" | "omni" | string;
+  label: string;
+  status: "pass" | "warn" | "fail" | string;
+  qualityScore: number;
+  readinessScore: number;
+  estimatedLatencyMs: number;
+  estimatedAiCostPerMinute: number;
+  costRank: number;
+  riskLevel: "low" | "medium" | "high" | string;
+  strengths: string[];
+  risks: string[];
+  nextAction: string;
+};
+
+export type RealtimeRouteBenchmarkReport = {
+  recommendedRoute: "pipeline" | "omni" | string;
+  status: "pass" | "warn" | "fail" | string;
+  summary: string;
+  lowCostFirst: boolean;
+  latestScore?: number | null;
+  latestTurnResponseMs?: number | null;
+  benchmarks: RealtimeRouteBenchmark[];
+};
+
+export type RealtimeLearningSummary = {
+  recentLessonCount: number;
+  activeGuidanceCount: number;
+  avoidPhraseCount: number;
+  qualityTags: string[];
+  latestGuidance: string[];
+  avoidPhrases: string[];
+  summary: string;
+};
+
 export type RealtimePipeline = {
   mode: string;
   bridgeMode: string;
@@ -519,6 +554,8 @@ export type RealtimePipeline = {
   readyForAsteriskMedia: boolean;
   nextStep: string;
   routeOptions: RealtimeRouteOption[];
+  routeBenchmark?: RealtimeRouteBenchmarkReport | null;
+  learning?: RealtimeLearningSummary | null;
   steps: RealtimePipelineStep[];
 };
 

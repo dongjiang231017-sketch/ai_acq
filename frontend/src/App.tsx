@@ -318,6 +318,53 @@ const fallbackRealtimePipeline: RealtimePipeline = {
       isActive: true,
     },
   ],
+  routeBenchmark: {
+    recommendedRoute: "pipeline",
+    status: "warn",
+    summary: "暂无真实通话样本，默认低成本 Pipeline，下一步用同一号码做 Pipeline/Omni 单号对照。",
+    lowCostFirst: true,
+    latestScore: null,
+    latestTurnResponseMs: null,
+    benchmarks: [
+      {
+        key: "pipeline",
+        label: "低成本分段 Pipeline",
+        status: "warn",
+        qualityScore: 78,
+        readinessScore: 72,
+        estimatedLatencyMs: 1055,
+        estimatedAiCostPerMinute: 0.04,
+        costRank: 1,
+        riskLevel: "medium",
+        strengths: ["成本最低，适合默认批量外呼预算控制。", "ASR、销售脑、TTS 分层可观测，便于定位问题。"],
+        risks: ["真实媒体桥未就绪，不能证明真实电话低延迟。"],
+        nextAction: "先处理风险项，再做真实单号回归。",
+      },
+      {
+        key: "omni",
+        label: "极速人声 Omni",
+        status: "warn",
+        qualityScore: 84,
+        readinessScore: 45,
+        estimatedLatencyMs: 720,
+        estimatedAiCostPerMinute: 0.09,
+        costRank: 2,
+        riskLevel: "medium",
+        strengths: ["端到端实时语音，天然更利于打断和轮次衔接。"],
+        risks: ["真实媒体桥未就绪，不能证明真实电话低延迟。"],
+        nextAction: "先补齐 DashScope/媒体桥，再用同一号码和同一话术做单号 A/B。",
+      },
+    ],
+  },
+  learning: {
+    recentLessonCount: 0,
+    activeGuidanceCount: 0,
+    avoidPhraseCount: 0,
+    qualityTags: [],
+    latestGuidance: [],
+    avoidPhrases: [],
+    summary: "还没有真实通话复盘；先用单号拨测沉淀失败样本。",
+  },
   steps: [
     {
       key: "media_bridge",
@@ -4411,6 +4458,9 @@ function App() {
   }
 
   function renderRealtimePipelinePanel() {
+    const routeBenchmark = realtimePipeline.routeBenchmark;
+    const recommendedBenchmark = routeBenchmark?.benchmarks.find((item) => item.key === routeBenchmark.recommendedRoute);
+    const learning = realtimePipeline.learning;
     return (
       <article className="panel span-2 realtime-voice-panel">
         <div className="panel-title">
@@ -4447,6 +4497,51 @@ function App() {
             <strong>¥{realtimePipeline.estimatedAiCostPerMinute.toFixed(2)} / 分钟</strong>
           </div>
         </div>
+        {routeBenchmark && (
+          <div className="realtime-ab-board">
+            <div className="line-test-result">
+              <strong>推荐：{recommendedBenchmark?.label ?? routeBenchmark.recommendedRoute}</strong>
+              <span>{routeBenchmark.summary}</span>
+              <small>
+                {routeBenchmark.lowCostFirst ? "低成本优先" : "质量优先对照"}
+                {routeBenchmark.latestScore !== null && routeBenchmark.latestScore !== undefined ? ` · 最近 ${routeBenchmark.latestScore} 分` : ""}
+                {routeBenchmark.latestTurnResponseMs !== null && routeBenchmark.latestTurnResponseMs !== undefined
+                  ? ` · 首音频 ${routeBenchmark.latestTurnResponseMs}ms`
+                  : ""}
+              </small>
+            </div>
+            <div className="realtime-ab-grid">
+              {routeBenchmark.benchmarks.map((item) => (
+                <div className="line-preflight-step" key={item.key}>
+                  <span className={`line-preflight-badge is-${item.status}`}>{item.qualityScore}</span>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <small>
+                      准备 {item.readinessScore} · 成本第 {item.costRank} · ¥{item.estimatedAiCostPerMinute.toFixed(2)}/分钟 · {item.estimatedLatencyMs}ms
+                    </small>
+                    <em>{item.risks[0] || item.strengths[0] || item.nextAction}</em>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {learning && (
+          <div className="realtime-learning-board">
+            <div className="line-test-result">
+              <strong>通话学习闭环</strong>
+              <span>{learning.summary}</span>
+              <small>
+                复盘 {learning.recentLessonCount} 通 · 改进点 {learning.activeGuidanceCount} 条 · 避免复读 {learning.avoidPhraseCount} 条
+              </small>
+            </div>
+            <div className="state-issues">
+              {(learning.latestGuidance.length > 0 ? learning.latestGuidance : ["真实通话结束后会自动沉淀 ASR 文本、AI 回复和下一通改进点。"]).slice(0, 3).map((item) => (
+                <span key={item}>{item}</span>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="realtime-pipeline-steps">
           {realtimePipeline.steps.map((step) => (
             <div className="line-preflight-step" key={step.key}>

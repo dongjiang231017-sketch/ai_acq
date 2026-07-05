@@ -268,6 +268,41 @@ class RealtimeRouteOptionRead(BaseModel):
     is_active: Annotated[bool, Field(alias="isActive")]
 
 
+class RealtimeRouteBenchmarkRead(BaseModel):
+    key: str
+    label: str
+    status: str
+    quality_score: Annotated[int, Field(alias="qualityScore")]
+    readiness_score: Annotated[int, Field(alias="readinessScore")]
+    estimated_latency_ms: Annotated[int, Field(alias="estimatedLatencyMs")]
+    estimated_ai_cost_per_minute: Annotated[float, Field(alias="estimatedAiCostPerMinute")]
+    cost_rank: Annotated[int, Field(alias="costRank")]
+    risk_level: Annotated[str, Field(alias="riskLevel")]
+    strengths: list[str]
+    risks: list[str]
+    next_action: Annotated[str, Field(alias="nextAction")]
+
+
+class RealtimeRouteBenchmarkReportRead(BaseModel):
+    recommended_route: Annotated[str, Field(alias="recommendedRoute")]
+    status: str
+    summary: str
+    low_cost_first: Annotated[bool, Field(alias="lowCostFirst")]
+    latest_score: Annotated[int | None, Field(alias="latestScore")] = None
+    latest_turn_response_ms: Annotated[int | None, Field(alias="latestTurnResponseMs")] = None
+    benchmarks: list[RealtimeRouteBenchmarkRead]
+
+
+class RealtimeLearningSummaryRead(BaseModel):
+    recent_lesson_count: Annotated[int, Field(alias="recentLessonCount")]
+    active_guidance_count: Annotated[int, Field(alias="activeGuidanceCount")]
+    avoid_phrase_count: Annotated[int, Field(alias="avoidPhraseCount")]
+    quality_tags: Annotated[list[str], Field(alias="qualityTags")]
+    latest_guidance: Annotated[list[str], Field(alias="latestGuidance")]
+    avoid_phrases: Annotated[list[str], Field(alias="avoidPhrases")]
+    summary: str
+
+
 class RealtimePipelineRead(BaseModel):
     mode: str
     bridge_mode: Annotated[str, Field(alias="bridgeMode")]
@@ -278,6 +313,8 @@ class RealtimePipelineRead(BaseModel):
     ready_for_asterisk_media: Annotated[bool, Field(alias="readyForAsteriskMedia")]
     next_step: Annotated[str, Field(alias="nextStep")]
     route_options: Annotated[list[RealtimeRouteOptionRead], Field(alias="routeOptions")] = []
+    route_benchmark: Annotated[RealtimeRouteBenchmarkReportRead | None, Field(alias="routeBenchmark")] = None
+    learning: RealtimeLearningSummaryRead | None = None
     steps: list[RealtimePipelineStepRead]
 
 
