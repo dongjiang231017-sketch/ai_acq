@@ -435,14 +435,15 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
         event = _normalize_live_event(payload)
         if event:
             events.append(event)
-    events = events[-max_limit:]
+    scored_events = list(events)
+    visible_events = events[-max_limit:]
     return {
         "logPath": str(path),
-        "hasEvents": bool(events),
-        "latestAt": events[-1]["at"] if events else None,
-        "score": score_realtime_events(events),
-        "state": summarize_realtime_call_state(events),
-        "events": events,
+        "hasEvents": bool(visible_events),
+        "latestAt": visible_events[-1]["at"] if visible_events else None,
+        "score": score_realtime_events(scored_events),
+        "state": summarize_realtime_call_state(scored_events),
+        "events": visible_events,
     }
 
 
