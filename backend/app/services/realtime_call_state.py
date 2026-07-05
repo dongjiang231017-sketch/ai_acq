@@ -189,6 +189,8 @@ def _derive_state(
         return "voicemail", "语音信箱，已关闭", "closed", "voicemail"
     if "call_closed" in event_types:
         return "closed", "通话已正常结束", "closed", "customer_closed"
+    if "call_error" in event_types and human and ai_speech and _has_audiosocket_closed_error(events):
+        return "closed", "通话已正常结束", "closed", "remote_hangup"
     if "call_error" in event_types:
         return "error", "通话链路异常", "closed", "call_error"
     if hangup and "call_disconnected" in event_types:
@@ -313,6 +315,25 @@ def _has_event(events: list[dict[str, object]], event_type: str) -> bool:
 
 def _has_terminal_event(events: list[dict[str, object]]) -> bool:
     return any(event.get("type") in TERMINAL_EVENT_TYPES for event in events)
+
+
+def _has_audiosocket_closed_error(events: list[dict[str, object]]) -> bool:
+    for event in events:
+        if event.get("type") != "call_error":
+            continue
+        raw = _raw(event)
+        message = " ".join(
+            str(value or "")
+            for value in (
+                event.get("error"),
+                event.get("detail"),
+                raw.get("error"),
+                raw.get("detail"),
+            )
+        )
+        if "AudioSocket connection closed" in message:
+            return True
+    return False
 
 
 def _active_auto_close_scheduled(events: list[dict[str, object]]) -> bool:

@@ -69,6 +69,7 @@ import {
   SalesPerformanceReport,
   SocialComment,
   SystemVoice,
+  TelephonyCellularDiagnostic,
   TelephonyConfig,
   TelephonyHealth,
   TelephonyLineRecovery,
@@ -1578,6 +1579,43 @@ function telephonyVerificationSummary(result: TelephonyTestCallResult) {
   return result.acceptanceNote || "还需要线路侧、手机接听和实时通话记录共同确认。";
 }
 
+function realtimeStateIsAfter(state: RealtimeLiveState | null | undefined, startedAt: string | null) {
+  if (!state?.lastEventAt || !startedAt) return false;
+  const eventAt = new Date(state.lastEventAt).getTime();
+  const startAt = new Date(startedAt).getTime();
+  return Number.isFinite(eventAt) && Number.isFinite(startAt) && eventAt + 1000 >= startAt;
+}
+
+function realtimeStateConfirmsTelephony(state: RealtimeLiveState | null | undefined, startedAt: string | null) {
+  return Boolean(
+    realtimeStateIsAfter(state, startedAt)
+      && state?.humanSpeechConfirmed
+      && state.aiSpeechConfirmed
+      && state.customerSpeechConfirmed,
+  );
+}
+
+function effectiveTelephonyDiagnostic(
+  result: TelephonyTestCallResult | null,
+  liveEvents: RealtimeLiveEvents,
+  startedAt: string | null,
+): TelephonyCellularDiagnostic | null {
+  const diagnostic = result?.cellularDiagnostic ?? null;
+  if (!diagnostic) return null;
+  if (!realtimeStateConfirmsTelephony(liveEvents.state, startedAt)) return diagnostic;
+  return {
+    ...diagnostic,
+    status: "pass",
+    stage: "realtime_conversation_confirmed",
+    title: "真人实时对话已确认",
+    summary: "实时监听已确认真人客户语音、AI 播报和客户回应。",
+    detail: "拨号接口返回时可能还没等到后续实时事件；现在以实时监听证据为准，本次试拨已进入真人对话。",
+    actionItems: ["继续观察本轮通话质量和结束原因。"],
+    canRetry: false,
+    customerActionRequired: false,
+  };
+}
+
 function realtimePipelineStatusText(status: string) {
   if (status === "pass") return "正常";
   if (status === "fail") return "异常";
@@ -1790,6 +1828,7 @@ function App() {
     callerId: "",
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
+  const [telephonyTestStartedAt, setTelephonyTestStartedAt] = useState<string | null>(null);
   const [telephonyLineRecovery, setTelephonyLineRecovery] = useState<TelephonyLineRecovery | null>(null);
   const [telephonyMessage, setTelephonyMessage] = useState("先检查线路，显示已通后再做单号试拨。");
   const [isCheckingTelephony, setIsCheckingTelephony] = useState(false);
@@ -1918,6 +1957,11 @@ function App() {
     () => realtimeEventsToMonitorCalls(realtimeLiveEvents.events, telephonyTestForm.phone.trim(), realtimeLiveEvents.state),
     [realtimeLiveEvents.events, realtimeLiveEvents.state, telephonyTestForm.phone],
   );
+  const displayedTelephonyDiagnostic = useMemo(
+    () => effectiveTelephonyDiagnostic(telephonyTestResult, realtimeLiveEvents, telephonyTestStartedAt),
+    [telephonyTestResult, realtimeLiveEvents, telephonyTestStartedAt],
+  );
+  const telephonyConfirmedByRealtime = displayedTelephonyDiagnostic?.stage === "realtime_conversation_confirmed";
   const recordMonitorCalls = useMemo(
     () => (liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6)).map(callRecordToMonitorCall),
     [callRecords, liveCalls],
@@ -2174,6 +2218,10 @@ function App() {
     if (backendActiveRealtimeRoute.key === realtimeForm.conversationRoute) return;
     setRealtimeForm((current) => ({ ...current, conversationRoute: backendActiveRealtimeRoute.key }));
   }, [backendActiveRealtimeRoute, realtimeForm.conversationRoute, realtimeSession]);
+  useEffect(() => {
+    if (!telephonyConfirmedByRealtime) return;
+    setTelephonyMessage("真人实时对话已确认，继续观察通话质量。");
+  }, [telephonyConfirmedByRealtime]);
   const activeVoiceProfile = customerVoiceProfiles.find((profile) => profile.id === selectedVoiceProfileId) ?? customerVoiceProfiles[0];
   const activeVoiceProfileSamples = activeVoiceProfile
     ? customerVoiceSamples.filter((sample) => sample.profileId === activeVoiceProfile.id)
@@ -2905,8 +2953,10 @@ function App() {
   async function submitTelephonyTestCall(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!telephonyTestForm.phone.trim()) return;
+    const testStartedAt = new Date().toISOString();
     setIsTestingTelephony(true);
     setTelephonyTestResult(null);
+    setTelephonyTestStartedAt(testStartedAt);
     setTelephonyLineRecovery(null);
     setTelephonyMessage("正在提交单号试拨请求...");
     setActiveOutboundTab("实时监听");
@@ -6567,20 +6617,23 @@ function App() {
                 </button>
                 <p className="telephony-test-message">{telephonyMessage}</p>
               </form>
-              {telephonyTestResult?.cellularDiagnostic && (
-                <div className={`cellular-diagnostic is-${telephonyTestResult.cellularDiagnostic.status}`}>
+              {displayedTelephonyDiagnostic && (
+                <div className={`cellular-diagnostic is-${displayedTelephonyDiagnostic.status}`}>
                   <div>
                     <span>试拨结果</span>
-                    <strong>{telephonyTestResult.cellularDiagnostic.status === "pass" ? "已通" : "未通"}</strong>
-                    <small>{telephonyDiagnosticStatusText(telephonyTestResult.cellularDiagnostic.status)}</small>
+                    <strong>{displayedTelephonyDiagnostic.status === "pass" ? "已通" : "未通"}</strong>
+                    <small>{telephonyDiagnosticStatusText(displayedTelephonyDiagnostic.status)}</small>
                   </div>
-                  <p>{telephonyTestResult.cellularDiagnostic.status === "pass" ? "单号试拨达到验收条件。" : "单号试拨还没有达到验收条件，请等待交付人员后台处理。"}</p>
-                  <div className="button-row cellular-actions">
-                    <button className="secondary-button" disabled={isRecoveringTelephony} onClick={() => void recoverTelephonyLine()} type="button">
-                      <RefreshCw size={16} className={isRecoveringTelephony ? "spin" : ""} />
-                      {isRecoveringTelephony ? "恢复中" : "恢复线路"}
-                    </button>
-                  </div>
+                  <p>{displayedTelephonyDiagnostic.status === "pass" ? "单号试拨达到验收条件。" : "单号试拨还没有达到验收条件，请等待交付人员后台处理。"}</p>
+                  {telephonyConfirmedByRealtime && <small>{displayedTelephonyDiagnostic.detail}</small>}
+                  {displayedTelephonyDiagnostic.status !== "pass" && (
+                    <div className="button-row cellular-actions">
+                      <button className="secondary-button" disabled={isRecoveringTelephony} onClick={() => void recoverTelephonyLine()} type="button">
+                        <RefreshCw size={16} className={isRecoveringTelephony ? "spin" : ""} />
+                        {isRecoveringTelephony ? "恢复中" : "恢复线路"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               {telephonyLineRecovery && (

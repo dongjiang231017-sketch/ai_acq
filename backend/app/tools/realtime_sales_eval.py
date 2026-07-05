@@ -16,6 +16,7 @@ from app.services.realtime_sales_playbook import (
 )
 from app.services.realtime_sales_state import SalesStateMachine
 from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
+from app.tools.realtime_audio_bridge import _adds_significant_business_question, should_commit_stable_asr_partial
 from app.tools.realtime_call_replay_eval import evaluate_replay_cases
 
 
@@ -48,6 +49,12 @@ SCENARIOS = [
         "process",
         ("不是4G", "团购套餐", "到店核销"),
         ("美团偏搜索", "私域沉淀", "已有美团也能做补充"),
+    ),
+    Scenario(
+        "用户怎么能看到我的团购券？一定要客户搜索吗？如果客户不搜索，那是不是还要做视频呢？",
+        "visibility",
+        ("同城推荐", "团购券", "视频", "推荐流", "门店主页"),
+        ("更缺新客", "团购套餐转化", "更想提升到店", "费用、效果"),
     ),
     Scenario("不需要资料，直接回答。", "open_need", ("费用", "效果", "流程", "美团"), ("微信", "资料")),
     Scenario("不用加微信，你直接说效果。", "guarantee", ("效果", "测试", "数据", "保底"), ("加微信",)),
@@ -442,6 +449,26 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "incomplete_asr_partial_waits_for_more_words",
             "score": 100 if has_incomplete_realtime_partial("好，如果我有需") else 35,
             "issues": [] if has_incomplete_realtime_partial("好，如果我有需") else ["partial_not_marked_incomplete"],
+        }
+    )
+    video_partial = "如果客户不搜索，那是不是我还要做视频呢？我是说我是不是还"
+    video_final = "如果客户不搜索，那是不是我还要做视频呢？我是说我是不是还得做视频呢？"
+    gates.append(
+        {
+            "text": "long_video_question_partial_waits_for_final",
+            "score": 100 if has_incomplete_realtime_partial(video_partial) and not should_commit_stable_asr_partial(video_partial) else 35,
+            "issues": []
+            if has_incomplete_realtime_partial(video_partial) and not should_commit_stable_asr_partial(video_partial)
+            else ["video_partial_committed_too_early"],
+        }
+    )
+    gates.append(
+        {
+            "text": "video_question_final_not_deduped_as_old_partial",
+            "score": 100 if _adds_significant_business_question(video_final, video_partial) else 35,
+            "issues": []
+            if _adds_significant_business_question(video_final, video_partial)
+            else ["video_final_marked_duplicate"],
         }
     )
     ack_history = [{"role": "assistant", "content": "明白。美团偏搜索下单，视频号偏微信同城推荐。"}]

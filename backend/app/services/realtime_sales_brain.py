@@ -66,6 +66,11 @@ TOPIC_ANSWERS = {
         "先判断门店适不适合，再做团购套餐和页面，小范围投放看数据。",
         "团购套餐就是客户能线上下单、到店核销的优惠套餐。",
     ],
+    "visibility": [
+        "客户不一定主动搜索；视频号有同城推荐和团购券入口，视频只是曝光承载。",
+        "需要一点视频内容承载，同时走同城推荐和团购券入口；不是天天拍大片。",
+        "不搜索也有推荐流机会；客户能从门店主页和团购券入口看到，视频不用重拍很多。",
+    ],
     "materials": [
         "可以，后面发案例和流程给您，您看完再判断。",
         "可以发，电话里我先把核心点说清楚。",
@@ -107,6 +112,7 @@ ADVANCE_LINES = {
     "channel_difference": "已有美团也能做补充，不冲突。",
     "advantage": "如果您已有美团，就把视频号当补充测试，不替代原渠道。",
     "process": "如果品类合适，再看套餐怎么设计。",
+    "visibility": "",
     "quality": "您更想听费用、效果，还是和美团区别？",
     "open_need": "",
 }
@@ -179,7 +185,15 @@ def plan_sales_turn(text: str, intent: str = "", conversation_history: list[dict
     repeat_risk = _repeat_risk(clean, history)
     direct_answer_only = _push_forbidden(clean, history) or repeat_risk
     stage = _detect_stage(topic, intent, history)
-    should_advance = topic not in {"rejection", "busy", "source", "owner", "identity", "correction"} and not direct_answer_only
+    should_advance = topic not in {
+        "rejection",
+        "busy",
+        "source",
+        "owner",
+        "identity",
+        "correction",
+        "visibility",
+    } and not direct_answer_only
     if emotion in {"annoyed", "busy", "confused"}:
         should_advance = should_advance and topic == "open_need"
     answer_mode = "direct_answer" if direct_answer_only else "answer_then_soft_advance"
@@ -310,6 +324,8 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         "团购套餐" in text and _has_any(text, ["什么意思", "什么", "怎么做", "怎么弄", "要帮我"])
     ):
         return "process"
+    if _is_visibility_or_video_question(text):
+        return "visibility"
     if _has_any(text, ["优势", "为什么要用", "为什么用", "凭什么", "比美团", "美团来讲"]):
         return "advantage"
     if _has_any(text, ["美团", "大众点评", "抖音团购", "小红书", "高德", "已经做", "在做团购"]):
@@ -355,6 +371,30 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
     return "open_need"
 
 
+def _is_visibility_or_video_question(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if not compact:
+        return False
+    has_question = _has_any(compact, ["怎么", "如何", "是不是", "要不要", "一定要", "必须", "吗", "呢", "搜索"])
+    visibility_markers = [
+        "怎么看到",
+        "怎么能看到",
+        "客户看到",
+        "用户看到",
+        "看到我的团购券",
+        "团购券",
+        "客户搜索",
+        "客户不搜索",
+        "不搜索",
+        "同城推荐",
+        "推荐流",
+        "门店主页",
+        "主页入口",
+    ]
+    video_markers = ["做视频", "拍视频", "发视频", "视频呢", "还要视频", "还得视频"]
+    return has_question and (_has_any(compact, visibility_markers) or _has_any(compact, video_markers))
+
+
 def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
     text = normalize_realtime_sales_text(text).normalized_text
     if _has_any(text, ["忙", "没空", "开会", "不方便", "快点", "赶时间"]):
@@ -395,7 +435,7 @@ def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
 def _detect_stage(topic: str, intent: str, history: list[dict[str, str]]) -> str:
     if topic in {"identity", "quality", "correction"} or not history:
         return "opening_repair"
-    if topic in {"price", "guarantee", "channel_difference", "advantage", "source"}:
+    if topic in {"price", "guarantee", "channel_difference", "advantage", "source", "visibility"}:
         return "objection_handling"
     if topic in {"process", "open_need"}:
         return "discovery"
@@ -635,7 +675,13 @@ def _metric_naturalness(events: list[dict[str, object]]) -> dict[str, object]:
 
 def _metric_stability(events: list[dict[str, object]], state_issues: list[str] | None = None) -> dict[str, object]:
     bad_types = {"omni_unavailable", "call_error", "omni_audio_append_error", "omni_response_request_error"}
-    bad_count = sum(1 for event in events if event.get("type") in bad_types)
+    normal_socket_close = _normal_audiosocket_close_after_conversation(events)
+    bad_count = sum(
+        1
+        for event in events
+        if event.get("type") in bad_types
+        and not (normal_socket_close and event.get("type") == "call_error")
+    )
     no_audio = sum(1 for event in events if event.get("type") == "omni_no_audio_response")
     issue_count = len(state_issues or [])
     score = max(25, 100 - bad_count * 30 - no_audio * 15 - issue_count * 8)
@@ -679,6 +725,27 @@ def _score_summary(
 
 def _has_event(events: list[dict[str, object]], event_type: str) -> bool:
     return any(event.get("type") == event_type for event in events)
+
+
+def _normal_audiosocket_close_after_conversation(events: list[dict[str, object]]) -> bool:
+    if not _has_event(events, "human_speech_confirmed") or not _has_speech_audio(events):
+        return False
+    for event in events:
+        if event.get("type") != "call_error":
+            continue
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        message = " ".join(
+            str(value or "")
+            for value in (
+                event.get("error"),
+                event.get("detail"),
+                raw.get("error"),
+                raw.get("detail"),
+            )
+        )
+        if "AudioSocket connection closed" in message:
+            return True
+    return False
 
 
 def _has_speech_audio(events: list[dict[str, object]]) -> bool:

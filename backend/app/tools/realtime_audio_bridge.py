@@ -92,6 +92,35 @@ ASR_PARTIAL_FAST_MARKERS = (
     "不说话",
     "不会说话",
 )
+ASR_SIGNIFICANT_QUESTION_MARKERS = (
+    "是不是",
+    "要不要",
+    "是否",
+    "怎么",
+    "怎么能",
+    "怎么看",
+    "吗",
+    "呢",
+    "还是",
+)
+ASR_SIGNIFICANT_BUSINESS_KEYWORDS = (
+    "团购券",
+    "券",
+    "搜索",
+    "不搜索",
+    "客户看到",
+    "用户看到",
+    "看到我",
+    "看到券",
+    "同城推荐",
+    "推荐流",
+    "视频",
+    "做视频",
+    "拍视频",
+    "发视频",
+    "主页",
+    "入口",
+)
 OPENING_RAW_BARGE_PROTECT_SECONDS = 1.8
 _DOWNSAMPLE_FACTOR = 3
 _DOWNSAMPLE_FIR_TAPS = 31
@@ -122,6 +151,44 @@ def _compact_customer_text(text: str) -> str:
         for char in text
         if char not in " \t\r\n。！？?!，,、.；;：:\"'“”‘’（）()[]【】"
     )
+
+
+def _has_significant_business_question(text: str) -> bool:
+    normalized = normalize_realtime_sales_text(text).normalized_text or text
+    compact = _compact_customer_text(normalized)
+    if not compact:
+        return False
+    has_question = any(marker in compact for marker in ASR_SIGNIFICANT_QUESTION_MARKERS)
+    has_business_keyword = any(keyword in compact for keyword in ASR_SIGNIFICANT_BUSINESS_KEYWORDS)
+    return has_question and has_business_keyword
+
+
+def _adds_significant_business_question(current: str, previous: str) -> bool:
+    if not current or not previous:
+        return False
+    if has_incomplete_realtime_partial(previous) and not has_incomplete_realtime_partial(current):
+        return _has_significant_business_question(current)
+    current_norm = normalize_realtime_sales_text(current).normalized_text or current
+    previous_norm = normalize_realtime_sales_text(previous).normalized_text or previous
+    current_compact = _compact_customer_text(current_norm)
+    previous_compact = _compact_customer_text(previous_norm)
+    if not current_compact or not previous_compact:
+        return False
+    if len(current_compact) <= len(previous_compact) + 6:
+        return False
+    previous_keywords = {
+        keyword for keyword in ASR_SIGNIFICANT_BUSINESS_KEYWORDS if keyword in previous_compact
+    }
+    current_keywords = {
+        keyword for keyword in ASR_SIGNIFICANT_BUSINESS_KEYWORDS if keyword in current_compact
+    }
+    added_keywords = current_keywords - previous_keywords
+    if added_keywords and _has_significant_business_question(current_norm):
+        return True
+    if previous_compact in current_compact:
+        suffix = current_compact.split(previous_compact, 1)[-1]
+        return len(suffix) >= 6 and _has_significant_business_question(suffix)
+    return False
 
 
 def should_commit_stable_asr_partial(text: str) -> bool:
@@ -774,6 +841,8 @@ class AudioSocketCallSession:
             return False
         previous_compact = _compact_customer_text(previous)
         if not previous_compact:
+            return False
+        if _adds_significant_business_question(text, previous):
             return False
         if compact == previous_compact:
             return True

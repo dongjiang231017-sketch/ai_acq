@@ -26,6 +26,10 @@ class ReplayCase:
     required_true_flags: tuple[str, ...] = ()
     expected_turn_taking_status: str | None = None
     max_turn_response_ms: int | None = None
+    min_score: int | None = None
+    expected_score_status: str | None = None
+    expected_last_customer_contains: str = ""
+    expected_last_ai_contains: str = ""
     asr_checks: tuple[ReplayAsrCheck, ...] = ()
     note: str = ""
     acceptable_states: tuple[str, ...] = field(default_factory=tuple)
@@ -55,9 +59,21 @@ def _evaluate_case(case: ReplayCase) -> dict[str, object]:
         latency = state.get("latestTurnResponseMs")
         if not isinstance(latency, int) or latency > case.max_turn_response_ms:
             issues.append(f"turn_latency:{latency} max:{case.max_turn_response_ms}")
+    if case.expected_last_customer_contains and case.expected_last_customer_contains not in str(state.get("lastCustomerText") or ""):
+        issues.append(f"last_customer_missing:{case.expected_last_customer_contains}")
+    if case.expected_last_ai_contains and case.expected_last_ai_contains not in str(state.get("lastAiReply") or ""):
+        issues.append(f"last_ai_missing:{case.expected_last_ai_contains}")
     for check in case.asr_checks:
         issues.extend(_evaluate_asr_check(check))
     score = score_realtime_events(case.events)
+    if case.min_score is not None:
+        actual_score = int((score or {}).get("score") or 0)
+        if actual_score < case.min_score:
+            issues.append(f"score:{actual_score} min:{case.min_score}")
+    if case.expected_score_status:
+        actual_status = str((score or {}).get("status") or "")
+        if actual_status != case.expected_score_status:
+            issues.append(f"score_status:{actual_status} expected:{case.expected_score_status}")
     return {
         "name": case.name,
         "passed": not issues,
@@ -244,6 +260,56 @@ def _replay_cases() -> list[ReplayCase]:
             ],
             expected_state="closed",
             required_true_flags=("humanSpeechConfirmed", "aiSpeechConfirmed", "hangupDetected"),
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+            min_score=85,
+            expected_score_status="pass",
+        ),
+        ReplayCase(
+            name="audiosocket_close_after_human_ai_is_remote_hangup_not_link_error",
+            note="来自 2026-07-05 实测：真人和AI已对话后 AudioSocket 关闭，应视为通话结束，不应把监控页打成链路异常。",
+            events=[
+                _event("call_connected", "socketclose", "2026-07-05T03:48:00.000Z"),
+                _event("human_speech_confirmed", "socketclose", "2026-07-05T03:48:01.000Z", text="你好。"),
+                _event("asr_final", "socketclose", "2026-07-05T03:48:01.100Z", text="你好。"),
+                _event("llm_reply", "socketclose", "2026-07-05T03:48:01.730Z", reply="您好，我是做视频号团购到店获客的。"),
+                _event("tts_start", "socketclose", "2026-07-05T03:48:01.900Z", raw={"sentBytes": 640, "firstAudioMs": 430}),
+                _event("tts_done", "socketclose", "2026-07-05T03:48:03.000Z", raw={"sentBytes": 640, "firstAudioMs": 430}),
+                _event("call_error", "socketclose", "2026-07-05T03:48:30.000Z", error="AudioSocket connection closed."),
+                _event("call_disconnected", "socketclose", "2026-07-05T03:48:30.050Z"),
+            ],
+            expected_state="closed",
+            required_true_flags=("humanSpeechConfirmed", "aiSpeechConfirmed", "hangupDetected"),
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+            min_score=85,
+            expected_score_status="pass",
+        ),
+        ReplayCase(
+            name="long_video_question_final_is_visible_as_latest_customer_text",
+            note="来自 2026-07-05 实测：客户长问题最终补出“是不是还得做视频”后，监控态必须保留完整 final。",
+            events=[
+                _event("call_connected", "videoq", "2026-07-05T03:49:00.000Z"),
+                _event("human_speech_confirmed", "videoq", "2026-07-05T03:49:01.000Z", text="我知道你怎么帮我获客。"),
+                _event("asr_partial", "videoq", "2026-07-05T03:49:05.000Z", text="如果客户不搜索，那是不是我还要做视频呢？我是说我是不是还"),
+                _event(
+                    "asr_final",
+                    "videoq",
+                    "2026-07-05T03:49:06.000Z",
+                    text="用户怎么能看到我的团购券？一定要客户搜索吗？如果客户不搜索，那是不是还得做视频呢？",
+                ),
+                _event(
+                    "llm_reply",
+                    "videoq",
+                    "2026-07-05T03:49:06.690Z",
+                    reply="客户不一定主动搜索；视频号有同城推荐和团购券入口，视频只是曝光承载。",
+                ),
+                _event("tts_start", "videoq", "2026-07-05T03:49:06.900Z", raw={"sentBytes": 800, "firstAudioMs": 440}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("humanSpeechConfirmed", "customerSpeechConfirmed", "aiSpeechConfirmed"),
+            expected_last_customer_contains="还得做视频",
+            expected_last_ai_contains="团购券入口",
             expected_turn_taking_status="pass",
             max_turn_response_ms=1000,
         ),
