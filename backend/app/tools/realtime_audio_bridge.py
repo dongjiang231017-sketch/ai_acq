@@ -59,6 +59,7 @@ OMNI_LOCAL_BARGE_MIN_SENT_BYTES = PCM_FRAME_BYTES * 12
 OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_MAX_SECONDS = 1.0
+OMNI_BARGE_RECOVERY_WATCHDOG_SECONDS = OMNI_BARGE_RECOVERY_MAX_SECONDS + 0.05
 OMNI_BARGE_FORCED_RESPONSE_SKIP_SECONDS = 4.0
 OMNI_FIRST_AUDIO_DEADLINE_SECONDS = 1.15
 OMNI_NO_AUDIO_FALLBACK_TEXT = "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
@@ -1710,6 +1711,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._omni_barge_forced_requested = False
         self._omni_barge_server_stopped = False
         self._omni_barge_server_committed = False
+        self._omni_barge_recovery_generation = 0
+        self._omni_barge_last_text = ""
         self._human_speech_confirmed = False
         self._last_remote_speech_started_at = 0.0
         self._call_screening_seen = False
@@ -1894,6 +1897,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if not clean:
             return
         self._note_customer_activity("omni_sidecar_asr_partial", text=clean)
+        with self._omni_lock:
+            if self._omni_barge_collecting:
+                self._omni_barge_last_text = clean
         if not should_commit_stable_asr_partial(clean):
             self.logger.emit(
                 "turn_waiting_final",
@@ -2013,16 +2019,23 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     signal = "human_speech"
         human_confirmed_before = self._human_speech_confirmed
         self.handle_answer_text(clean, is_final=True)
-        skip_response_after_forced_barge = False
-        replace_forced_barge_response = False
+        duplicate_turn = self._is_recent_committed_customer_text(clean)
         with self._omni_lock:
-            self._omni_barge_collecting = False
-            if self._omni_barge_forced_response_until > time.monotonic():
-                if self._omni_barge_forced_audio_started:
-                    skip_response_after_forced_barge = True
-                else:
-                    replace_forced_barge_response = True
-        if self._is_recent_committed_customer_text(clean):
+            barge_collecting = self._omni_barge_collecting
+        if duplicate_turn:
+            if barge_collecting:
+                with self._omni_lock:
+                    self._omni_barge_last_text = clean
+                    self._omni_barge_last_voice_at = time.monotonic()
+                self.logger.emit(
+                    "customer_turn_duplicate_ignored",
+                    callId=self.call_id,
+                    text=clean,
+                    provider=provider,
+                    source=source,
+                    detail="打断恢复期间只收到重复转写，继续等待恢复兜底，不能让 AI 静默。",
+                )
+                return
             self.logger.emit(
                 "customer_turn_duplicate_ignored",
                 callId=self.call_id,
@@ -2032,6 +2045,15 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 detail="同一句客户话已经由更快的 ASR/Omni 通道触发过回复，避免重复回答。",
             )
             return
+        skip_response_after_forced_barge = False
+        replace_forced_barge_response = False
+        with self._omni_lock:
+            self._omni_barge_collecting = False
+            if self._omni_barge_forced_response_until > time.monotonic():
+                if self._omni_barge_forced_audio_started:
+                    skip_response_after_forced_barge = True
+                else:
+                    replace_forced_barge_response = True
         asr_fields: dict[str, Any] = {"callId": self.call_id, "text": clean, "provider": provider, "signal": signal}
         if source != "omni_transcription":
             asr_fields["source"] = source
@@ -2233,6 +2255,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni_barge_forced_requested = False
             self._omni_barge_server_stopped = False
             self._omni_barge_server_committed = False
+            self._omni_barge_last_text = ""
+            self._omni_barge_recovery_generation += 1
+            recovery_generation = self._omni_barge_recovery_generation
         if self._omni:
             try:
                 self._omni.cancel_response()
@@ -2246,19 +2271,47 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             cancelledResponseId=cancelled_response_id,
             detail="已停止本地播放并恢复监听，等待客户本轮语音最终识别后再回复。",
         )
+        threading.Thread(
+            target=self._omni_barge_recovery_watchdog,
+            args=(recovery_generation,),
+            name="ai-acq-omni-barge-recovery-watchdog",
+            daemon=True,
+        ).start()
 
     def _maybe_commit_omni_barge_turn(self, now: float, rms: int) -> None:
         if rms >= self.config.barge_rms_threshold:
             with self._omni_lock:
                 if self._omni_barge_collecting:
                     self._omni_barge_last_voice_at = now
+        self._commit_omni_barge_recovery("omni_rms_recovery", now=now)
+
+    def _omni_barge_recovery_watchdog(self, generation: int) -> None:
+        time.sleep(OMNI_BARGE_RECOVERY_WATCHDOG_SECONDS)
+        if self.stop_event.is_set():
+            return
+        self._commit_omni_barge_recovery(
+            "barge_recovery_watchdog",
+            now=time.monotonic(),
+            recovery_generation=generation,
+        )
+
+    def _commit_omni_barge_recovery(
+        self,
+        source: str,
+        *,
+        now: float,
+        recovery_generation: int | None = None,
+    ) -> bool:
         with self._omni_lock:
             collecting = self._omni_barge_collecting
             started_at = self._omni_barge_started_at
             last_voice_at = self._omni_barge_last_voice_at
             forced_requested = self._omni_barge_forced_requested
+            current_generation = self._omni_barge_recovery_generation
+            if recovery_generation is not None and recovery_generation != current_generation:
+                return False
             if not collecting or forced_requested:
-                return
+                return False
             elapsed = now - started_at
             silence = now - last_voice_at
             should_commit = elapsed >= OMNI_BARGE_RECOVERY_MIN_SECONDS and (
@@ -2266,29 +2319,34 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 or elapsed >= OMNI_BARGE_RECOVERY_MAX_SECONDS
             )
             if not should_commit:
-                return
+                return False
             self._omni_barge_collecting = False
             self._omni_barge_forced_requested = True
             self._omni_barge_forced_response_until = now + OMNI_BARGE_FORCED_RESPONSE_SKIP_SECONDS
             self._omni_barge_forced_audio_started = False
+            last_reply = self._last_omni_reply
+            last_customer_text = self._omni_barge_last_text or self._omni_pending_customer_text
+        if not last_customer_text:
+            with self.asr_partial_lock:
+                last_customer_text = self._last_committed_customer_text
         if not self._omni or self.stop_event.is_set():
-            return
+            return False
         self.logger.emit(
             "barge_turn_committed",
             callId=self.call_id,
+            source=source,
             elapsedMs=int(elapsed * 1000),
             silenceMs=int(silence * 1000),
             detail="客户打断后短暂停顿，已在一秒内请求恢复回复；若随后转写到达会改用转写回复。",
         )
-        with self._omni_lock:
-            last_reply = self._last_omni_reply
         self._request_omni_response(
             build_barge_recovery_instruction(
                 list(self._conversation_history),
-                last_customer_text="",
+                last_customer_text=last_customer_text,
                 last_assistant_reply=last_reply,
             )
         )
+        return True
 
     def start_omni_response(self, response_id: str) -> None:
         with self._omni_lock:
