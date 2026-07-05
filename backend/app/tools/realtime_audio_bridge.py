@@ -626,6 +626,7 @@ class AudioSocketCallSession:
                     self._last_outbound_audio_at = time.monotonic()
                 except Exception as exc:  # noqa: BLE001
                     self.logger.emit("idle_keepalive_error", callId=self.call_id, error=str(exc))
+                    self._close_after_socket_write_error("idle_keepalive", exc)
                     break
                 sent += 1
             next_frame_at += PCM_FRAME_SECONDS
@@ -633,6 +634,23 @@ class AudioSocketCallSession:
         self._startup_keepalive_active.clear()
         if sent:
             self.logger.emit("idle_keepalive_done", callId=self.call_id, frames=sent)
+
+    def _close_after_socket_write_error(self, source: str, exc: Exception) -> None:
+        if self.stop_event.is_set():
+            return
+        self.logger.emit(
+            "socket_write_closed",
+            callId=self.call_id,
+            source=source,
+            error=str(exc),
+            detail="向 AudioSocket 写入音频失败，判定电话媒体链路已断开并立即结束本次会话。",
+        )
+        self.stop_event.set()
+        self.interrupt_event.set()
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def _await_call_uuid(self) -> bool:
         started = time.monotonic()
@@ -1591,7 +1609,11 @@ class AudioSocketCallSession:
             )
         if self._audio_capture:
             self._audio_capture.write_outbound(processed_frame)
-        self._send_frame(AUDIO_SOCKET_KIND_AUDIO, processed_frame)
+        try:
+            self._send_frame(AUDIO_SOCKET_KIND_AUDIO, processed_frame)
+        except Exception as exc:  # noqa: BLE001
+            self._close_after_socket_write_error("tts_playback", exc)
+            raise
         self._last_outbound_audio_at = time.monotonic()
         return next_frame_at + PCM_FRAME_SECONDS, lag_events
 
@@ -1722,6 +1744,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             )
             self._start_startup_keepalive()
             self._start_omni()
+            self._start_omni_sidecar_asr()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
@@ -1740,6 +1763,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self.interrupt_event.set()
             self._record_learning_summary()
             self._stop_startup_keepalive()
+            self._stop_asr()
             self._stop_omni()
             self._stop_audio_capture()
             try:
@@ -1773,6 +1797,24 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             turn_detection_silence_duration_ms=650,
             turn_detection_param={"interrupt_response": True, "create_response": False},
             instructions=build_video_group_buying_sales_instructions(),
+        )
+
+    def _start_omni_sidecar_asr(self) -> None:
+        try:
+            self._start_asr()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit(
+                "omni_sidecar_asr_error",
+                callId=self.call_id,
+                error=str(exc),
+                detail="Omni 旁路实时 ASR 启动失败，将退回仅等待 Omni final 转写。",
+            )
+            return
+        self.logger.emit(
+            "omni_sidecar_asr_started",
+            callId=self.call_id,
+            model=self.config.asr_model,
+            detail="已启动旁路实时 ASR，用于快速断句和低延迟回复兜底。",
         )
 
     def _stop_omni(self) -> None:
@@ -1847,6 +1889,71 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._request_omni_response(build_omni_turn_instruction(text, "call_screening"))
         self._schedule_call_screening_hangup(source)
 
+    def note_asr_partial_text(self, text: str) -> None:
+        clean = " ".join(text.strip().split())
+        if not clean:
+            return
+        self._note_customer_activity("omni_sidecar_asr_partial", text=clean)
+        if not should_commit_stable_asr_partial(clean):
+            self.logger.emit(
+                "turn_waiting_final",
+                callId=self.call_id,
+                text=clean,
+                provider="qwen_asr_sidecar",
+                reason="incomplete_or_nonactionable_partial",
+                detail="旁路 ASR partial 还不够完整，继续等 final 或更稳定的短句。",
+            )
+            return
+        with self.asr_partial_lock:
+            self._asr_partial_generation += 1
+            generation = self._asr_partial_generation
+            self._asr_partial_text = clean
+        delay = _asr_partial_stable_delay_seconds(clean)
+        self.logger.emit(
+            "turn_endpoint_candidate",
+            callId=self.call_id,
+            text=clean,
+            provider="qwen_asr_sidecar",
+            waitMs=int(delay * 1000),
+            detail="旁路 ASR 已拿到可回答短句；若 Omni final 未到，将先触发回复。",
+        )
+        threading.Thread(
+            target=self._commit_omni_sidecar_asr_partial_after_delay,
+            args=(generation, clean, delay),
+            name="ai-acq-omni-sidecar-asr-partial-turn",
+            daemon=True,
+        ).start()
+
+    def commit_asr_final_text(self, text: str) -> None:
+        self._cancel_pending_asr_partial_turn("omni_sidecar_asr_final")
+        self.logger.emit(
+            "turn_endpoint_final",
+            callId=self.call_id,
+            text=text,
+            provider="qwen_asr_sidecar",
+            detail="旁路 ASR final 已到达，先触发 Omni 回复，避免等待 Omni 自身 final。",
+        )
+        self.handle_omni_transcription(text, provider="qwen_asr_sidecar", source="omni_sidecar_asr_final")
+
+    def _commit_omni_sidecar_asr_partial_after_delay(self, generation: int, text: str, delay: float) -> None:
+        time.sleep(delay)
+        if self.stop_event.is_set():
+            return
+        with self.asr_partial_lock:
+            if generation != self._asr_partial_generation or text != self._asr_partial_text:
+                return
+        if not should_commit_stable_asr_partial(text):
+            return
+        self.logger.emit(
+            "asr_partial_stable",
+            callId=self.call_id,
+            text=text,
+            provider="qwen_asr_sidecar",
+            waitMs=int(delay * 1000),
+            detail="Omni final 尚未到达，旁路 ASR 短句已稳定，先接话避免客户空等。",
+        )
+        self.handle_omni_transcription(text, provider="qwen_asr_sidecar", source="omni_sidecar_asr_partial_stable")
+
     def handle_omni_speech_started(self) -> None:
         now = time.monotonic()
         self._note_customer_activity("omni_speech_started", now=now)
@@ -1876,11 +1983,17 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     self._omni_barge_server_committed = True
         self.logger.emit("omni_input_buffer_event", **fields)
 
-    def handle_omni_transcription(self, text: str) -> None:
+    def handle_omni_transcription(
+        self,
+        text: str,
+        *,
+        provider: str = "qwen_omni",
+        source: str = "omni_transcription",
+    ) -> None:
         clean = " ".join(text.strip().split())
         if not clean:
             return
-        self._note_customer_activity("omni_transcription", text=clean)
+        self._note_customer_activity(source, text=clean)
         raw_clean = clean
         signal = classify_realtime_call_input(clean)
         if signal == "system_prompt":
@@ -1891,7 +2004,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     callId=self.call_id,
                     text=raw_clean,
                     strippedText=human_tail,
-                    provider="qwen_omni",
+                    provider=provider,
                     detail="ASR 同一句里包含系统提示和真人客户语音，已只剥离系统提示并继续回复真人内容。",
                 )
                 clean = human_tail
@@ -1909,7 +2022,19 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     skip_response_after_forced_barge = True
                 else:
                     replace_forced_barge_response = True
-        asr_fields: dict[str, Any] = {"callId": self.call_id, "text": clean, "provider": "qwen_omni", "signal": signal}
+        if self._is_recent_committed_customer_text(clean):
+            self.logger.emit(
+                "customer_turn_duplicate_ignored",
+                callId=self.call_id,
+                text=clean,
+                provider=provider,
+                source=source,
+                detail="同一句客户话已经由更快的 ASR/Omni 通道触发过回复，避免重复回答。",
+            )
+            return
+        asr_fields: dict[str, Any] = {"callId": self.call_id, "text": clean, "provider": provider, "signal": signal}
+        if source != "omni_transcription":
+            asr_fields["source"] = source
         if raw_clean != clean:
             asr_fields["rawText"] = raw_clean
         self.logger.emit("asr_final", **asr_fields)
@@ -1917,8 +2042,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             "turn_endpoint_final",
             callId=self.call_id,
             text=clean,
-            provider="qwen_omni",
-            detail="Omni 转写 final 到达，客户本轮说话完成。",
+            provider=provider,
+            source=source,
+            detail="客户本轮说话已由实时 ASR 端点提交，可以触发回复。",
         )
         if signal == "system_prompt":
             if classify_answer_text(clean) == CallAnswerType.VOICEMAIL:
@@ -1946,9 +2072,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 callId=self.call_id,
                 text=clean,
                 normalizedText=routed_clean,
-                provider="qwen_omni",
+                provider=provider,
                 fixes=list(normalization.fixes),
-                detail="Omni 转写进入销售脑前已做高置信语境纠错，原始转写仍保留在 ASR 事件中。",
+                detail="实时 ASR 文本进入销售脑前已做高置信语境纠错，原始转写仍保留在 ASR 事件中。",
             )
         intent, _node = _classify_intent(routed_clean)
         stage = self._sales_fsm.update(routed_clean, intent, signal)
@@ -2016,11 +2142,12 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 detail="打断后的文字转写先于强制回复音频到达，改用文字转写生成更准确回复。",
             )
         history_snapshot = list(self._conversation_history)
+        self._remember_committed_customer_text(clean)
         self.logger.emit(
             "turn_reply_preparing",
             callId=self.call_id,
             text=routed_clean,
-            source="omni_transcription",
+            source=source,
             detail="客户本轮已提交给实时语音模型，准备生成回复。",
         )
         self.logger.emit(
@@ -2031,7 +2158,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             signal=signal,
             salesStage=stage.value,
             historyTurns=len(history_snapshot),
-            provider="qwen_omni",
+            provider=provider,
             detail="客户本轮已进入 Omni 回复生成，等待首个音频块。",
         )
         with self._omni_lock:
@@ -2076,6 +2203,11 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     self.handle_omni_closed("append_error", exc)
                 else:
                     self.logger.emit("omni_audio_append_error", callId=self.call_id, error=str(exc))
+        if self._recognition and payload:
+            try:
+                self._recognition.send_audio_frame(payload)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("omni_sidecar_asr_audio_error", callId=self.call_id, error=str(exc))
         self._maybe_commit_omni_barge_turn(now, rms)
 
     def _omni_local_barge_ready(self) -> bool:
@@ -2248,6 +2380,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             return "好的，不打扰了，再见。"
         if normalization.has_fix("group_buying_package"):
             return "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
+        if any(keyword in text for keyword in ["套餐", "介绍", "流程", "怎么合作", "说一下", "讲一下"]):
+            return "套餐主要三块：看品类，设计团购券，再小范围测曝光、咨询和到店。"
         if any(keyword in text for keyword in ["费用", "价格", "收费", "要钱", "付费"]):
             return "这是付费服务，费用看套餐和投放节奏，不合适不建议做。"
         if any(keyword in text for keyword in ["美团", "抖音", "大众点评"]):
