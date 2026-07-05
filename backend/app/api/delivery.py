@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from secrets import choice, token_hex
+from secrets import token_hex
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -29,20 +29,29 @@ from app.schemas.delivery import (
     VoiceGatewayLineEventCreate,
     VoiceGatewayLineEventRead,
     VoiceGatewayLineRead,
+    VoiceGatewayLineRedelivery,
+    VoiceGatewayLineRedeliveryRequest,
     VoiceGatewayLineUpdate,
+)
+from app.services.voice_gateway_delivery import (
+    INACTIVE_LINE_STATUSES,
+    ONE_TIME_WARNING,
+    VoiceGatewayRedeliveryError,
+    find_assigned_line_for_device,
+    find_redelivery_discovery_for_line,
+    generate_sip_password,
+    redeliver_voice_gateway_line,
 )
 from app.services.voice_gateway_profiles import PROFILE_DEFAULTS
 
 router = APIRouter()
 
-ONE_TIME_WARNING = "SIP 密码只在本次响应展示；交付后请写入受控密钥库，丢失后只能重新轮换。"
 DEFAULT_SIP_SERVER_HOST = "101.132.63.159"
 DEFAULT_CODEC_PRIMARY = "PCMA/alaw"
 DEFAULT_CODEC_SECONDARY = "PCMU/ulaw"
 DEFAULT_DTMF_MODE = "RFC2833/RFC4733"
 DEFAULT_RTP_RANGE = "10000-20000/UDP"
 DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
-SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 PROFILE_CHANNEL_DEFAULTS = {
     "dinstar_8t_server": 8,
     "multi_sim_lte_gateway": 8,
@@ -79,7 +88,10 @@ def list_voice_gateway_lines(
 ) -> list[dict[str, object]]:
     statement = select(VoiceGatewayLine)
     if not (include_all and current_user.is_superuser):
-        statement = statement.where(VoiceGatewayLine.owner_user_id == current_user.id)
+        statement = statement.where(
+            VoiceGatewayLine.owner_user_id == current_user.id,
+            VoiceGatewayLine.status.notin_(INACTIVE_LINE_STATUSES),
+        )
     lines = db.scalars(statement.order_by(VoiceGatewayLine.created_at.desc())).all()
     return [_read_line(line) for line in lines]
 
@@ -112,12 +124,16 @@ def create_voice_gateway_device_discovery(
 ) -> VoiceGatewayDeviceDiscovery:
     discovery = _record_device_discovery(db, current_user.id, current_user, payload, matched_line_id=None)
     line, created_line = _auto_bind_device_discovery(db, current_user, current_user, discovery)
+    if discovery.status == "待转移":
+        audit_summary = "发现已被其他账号占用的语音网关，等待后台重新交付/转移"
+    else:
+        audit_summary = "自动生成语音网关线路并匹配设备" if line and created_line else "记录待匹配语音网关设备"
     _add_audit(
         db,
         current_user,
         "voice_gateway_device_discovery.create",
         discovery.id,
-        f"{'自动生成语音网关线路并匹配设备' if line and created_line else '记录待匹配语音网关设备'}：{discovery.device_admin_url or discovery.device_ip or discovery.gateway_label}",
+        f"{audit_summary}：{discovery.device_admin_url or discovery.device_ip or discovery.gateway_label}",
     )
     try:
         db.commit()
@@ -359,6 +375,59 @@ def rotate_voice_gateway_credential(
     }
 
 
+@router.post("/voice-gateway-lines/{line_id}/redeliver", response_model=VoiceGatewayLineRedelivery)
+def redeliver_voice_gateway_line_to_customer(
+    line_id: str,
+    payload: VoiceGatewayLineRedeliveryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="只有超级用户可以重新交付/转移语音网关设备")
+    line = _get_line(line_id, db, current_user)
+    discovery = _resolve_redelivery_discovery(payload, line, db)
+    target_owner_id = payload.target_owner_user_id or discovery.owner_user_id
+    target_owner = db.get(User, target_owner_id)
+    if target_owner is None:
+        raise HTTPException(status_code=404, detail="目标客户账号不存在")
+    try:
+        result = redeliver_voice_gateway_line(
+            db,
+            line,
+            discovery,
+            target_owner,
+            actor_user_id=current_user.id,
+            sync_asterisk=payload.sync_asterisk,
+        )
+        _add_audit(
+            db,
+            current_user,
+            "voice_gateway_line.redeliver",
+            line.id,
+            f"重新交付语音网关：{result.previous_customer_name or result.previous_owner_user_id} -> {line.customer_name}",
+        )
+        db.commit()
+    except VoiceGatewayRedeliveryError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="重新交付失败：新客户线路名称、SIP账号或 trunk 与已有数据冲突") from exc
+    db.refresh(line)
+    db.refresh(discovery)
+    return {
+        "line": _read_line(line),
+        "discovery": discovery,
+        "previousOwnerUserId": result.previous_owner_user_id,
+        "previousCustomerName": result.previous_customer_name,
+        "previousSipUsername": result.previous_sip_username,
+        "previousTrunkName": result.previous_trunk_name,
+        "sipPasswordOneTime": result.sip_password_one_time,
+        "oneTimeWarning": ONE_TIME_WARNING,
+        "asteriskSyncMessage": result.asterisk_sync_message,
+    }
+
+
 @router.get("/voice-gateway-lines/{line_id}/events", response_model=list[VoiceGatewayLineEventRead])
 def list_voice_gateway_line_events(
     line_id: str,
@@ -422,6 +491,28 @@ def _get_line(line_id: str, db: Session, current_user: User) -> VoiceGatewayLine
     if line.owner_user_id != current_user.id and not current_user.is_superuser:
         raise HTTPException(status_code=404, detail="语音网关线路不存在")
     return line
+
+
+def _resolve_redelivery_discovery(
+    payload: VoiceGatewayLineRedeliveryRequest,
+    line: VoiceGatewayLine,
+    db: Session,
+) -> VoiceGatewayDeviceDiscovery:
+    discovery: VoiceGatewayDeviceDiscovery | None = None
+    if payload.discovery_id:
+        discovery = db.get(VoiceGatewayDeviceDiscovery, payload.discovery_id)
+    else:
+        discovery = find_redelivery_discovery_for_line(
+            db,
+            line,
+            target_owner_user_id=payload.target_owner_user_id,
+        )
+    if discovery is None:
+        raise HTTPException(
+            status_code=409,
+            detail="没有找到可用于重新交付的客户设备发现记录：请让目标客户登录客户端并重新扫描现场语音网关。",
+        )
+    return discovery
 
 
 def _profile_defaults(key: str) -> dict[str, object]:
@@ -625,6 +716,13 @@ def _auto_bind_device_discovery(
     discovery: VoiceGatewayDeviceDiscovery,
 ) -> tuple[VoiceGatewayLine | None, bool]:
     if not _device_discovery_can_bind(discovery):
+        return None, False
+
+    assigned_line = find_assigned_line_for_device(db, discovery, exclude_owner_user_id=owner.id)
+    if assigned_line is not None:
+        discovery.status = "待转移"
+        discovery.summary = discovery.summary or "发现同一台语音网关已绑定其他客户/测试账号，等待后台重新交付/转移"
+        discovery.updated_at = datetime.utcnow()
         return None, False
 
     line = _matching_line_for_device_discovery(db, owner.id, discovery)
@@ -959,7 +1057,7 @@ def _add_audit(db: Session, actor: User, action: str, resource_id: str, summary:
 
 
 def _generate_sip_password(length: int = 24) -> str:
-    return "".join(choice(SECRET_ALPHABET) for _ in range(length))
+    return generate_sip_password(length)
 
 
 def _slug(value: str) -> str:

@@ -64,6 +64,11 @@ from app.services.registration import (
     approve_registration_request,
     reject_registration_request,
 )
+from app.services.voice_gateway_delivery import (
+    VoiceGatewayRedeliveryError,
+    find_redelivery_discovery_for_line,
+    redeliver_voice_gateway_line,
+)
 from app.services.voice_gateway_profiles import PROFILE_DEFAULTS
 
 
@@ -2037,6 +2042,143 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         request: Request,
     ) -> None:
         _admin_mark_latest_discovery_matched(model)
+
+    @action(
+        name="redeliver-gateway",
+        label="重新交付/转移设备",
+        confirmation_message=(
+            "确认把选中的语音网关线路重新交付给最新扫描到同一台设备的客户账号？"
+            "系统会生成新客户 SIP/trunk/一次性密码，旧 SIP 密码失效，并写入云端 Asterisk。"
+        ),
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def redeliver_gateway(self, request: Request) -> Response:
+        selected_ids = _admin_selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要重新交付/转移的语音网关线路")
+            return _admin_action_redirect(request, self.identity)
+
+        actor_username = request.session.get("admin_user")
+        results: list[dict[str, str]] = []
+        errors: list[str] = []
+        with SessionLocal() as db:
+            for line_id in selected_ids:
+                line = db.get(VoiceGatewayLine, line_id)
+                if line is None:
+                    errors.append(f"未找到线路：{line_id}")
+                    continue
+                try:
+                    discovery = find_redelivery_discovery_for_line(db, line)
+                    if discovery is None:
+                        raise VoiceGatewayRedeliveryError(
+                            "没有找到目标客户最新扫描到的同一台设备；请让客户登录客户端重新扫描，或确认旧线路已录入设备 MAC/序列号"
+                        )
+                    target_owner = db.get(User, discovery.owner_user_id)
+                    if target_owner is None:
+                        raise VoiceGatewayRedeliveryError("目标客户账号不存在")
+                    result = redeliver_voice_gateway_line(
+                        db,
+                        line,
+                        discovery,
+                        target_owner,
+                        actor_user_id=None,
+                        sync_asterisk=True,
+                        asterisk_path=ASTERISK_DYNAMIC_PJSIP_PATH,
+                        reload_callback=_admin_reload_asterisk_pjsip,
+                    )
+                    db.add(
+                        AuditLog(
+                            actor_user_id=None,
+                            actor_username=actor_username,
+                            action="voice_gateway_line.redeliver",
+                            resource_type="voice_gateway_line",
+                            resource_id=line.id,
+                            summary=(
+                                "SQLAdmin 重新交付语音网关："
+                                f"{result.previous_customer_name or result.previous_owner_user_id} -> {line.customer_name}"
+                            ),
+                        )
+                    )
+                    db.commit()
+                    results.append(
+                        {
+                            "line_name": line.line_name or line.id,
+                            "customer_name": line.customer_name or line.line_name or line.id,
+                            "previous_customer_name": result.previous_customer_name or result.previous_owner_user_id,
+                            "device_admin_url": line.device_admin_url or "现场设备后台地址",
+                            "sip_server": line.sip_server_host,
+                            "sip_port": str(line.sip_server_port),
+                            "sip_transport": line.sip_transport,
+                            "sip_username": line.sip_username,
+                            "sip_auth_username": line.sip_auth_username or line.sip_username,
+                            "trunk_name": line.trunk_name,
+                            "channel_count": str(line.channel_count or 1),
+                            "password": result.sip_password_one_time,
+                            "reload_message": result.asterisk_sync_message,
+                        }
+                    )
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(f"{line.line_name if line else line_id}：{exc}")
+                    continue
+
+        if results:
+            if len(results) == 1:
+                item = results[0]
+                secret_value = item["password"]
+                secret_label = (
+                    f"重新交付完成，只显示本次。原客户：{item['previous_customer_name']}；"
+                    f"新客户：{item['customer_name']}；设备后台：{item['device_admin_url']}；"
+                    f"SIP账号/鉴权账号：{item['sip_auth_username']}；服务器："
+                    f"{item['sip_server']}:{item['sip_port']}/{item['sip_transport']}。"
+                    "请立刻覆盖设备后台的 SIP 账号、鉴权账号、密码、端口组和路由设置。"
+                )
+            else:
+                secret_value = "\n\n".join(
+                    "\n".join(
+                        [
+                            f"原客户：{item['previous_customer_name']}",
+                            f"新客户：{item['customer_name']}",
+                            f"设备后台：{item['device_admin_url']}",
+                            f"SIP服务器：{item['sip_server']}",
+                            f"SIP端口/协议：{item['sip_port']}/{item['sip_transport']}",
+                            f"SIP账号：{item['sip_username']}",
+                            f"鉴权账号：{item['sip_auth_username']}",
+                            f"一次性密码：{item['password']}",
+                            f"云端Trunk：{item['trunk_name']}",
+                            f"通道数：{item['channel_count']}",
+                        ]
+                    )
+                    for item in results
+                )
+                secret_label = "已重新交付多条线路。请立刻复制，逐台覆盖对应设备后台。"
+            Secret.reveal_once(
+                request,
+                value=secret_value,
+                title="重新交付完成：一次性 SIP 密码",
+                label=secret_label,
+            )
+            Flash.success(request, "语音网关已重新交付给目标客户，并已写入云端 Asterisk。")
+        if errors:
+            Flash.error(request, "部分线路重新交付失败：" + "；".join(errors))
+        if not results:
+            return _admin_action_redirect(request, self.identity)
+
+        response = await self.templates.TemplateResponse(
+            request,
+            "sqladmin/voice_gateway_secret_reveal.html",
+            {
+                "title": "重新交付完成",
+                "subtitle": "一次性 SIP 密码只显示本次",
+                "model_view": self,
+                "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                "generated_count": len(results),
+                "errors": errors,
+            },
+        )
+        Secret.apply_no_store_headers(response)
+        return response
 
     @action(
         name="rotate-sip-password",

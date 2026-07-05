@@ -152,6 +152,12 @@ class VoiceGatewayCredentialRotation(BaseModel):
     one_time_warning: Annotated[str, Field(alias="oneTimeWarning")]
 
 
+class VoiceGatewayLineRedeliveryRequest(BaseModel):
+    target_owner_user_id: Annotated[str | None, Field(alias="targetOwnerUserId")] = None
+    discovery_id: Annotated[str | None, Field(alias="discoveryId")] = None
+    sync_asterisk: Annotated[bool, Field(alias="syncAsterisk")] = True
+
+
 class VoiceGatewayDeviceDiscoveryUpdate(BaseModel):
     device_admin_url: Annotated[str | None, Field(alias="deviceAdminUrl", max_length=240)] = None
     device_ip: Annotated[str | None, Field(alias="deviceIp", max_length=80)] = None
@@ -193,12 +199,24 @@ class VoiceGatewayDeviceDiscoveryRead(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
+class VoiceGatewayLineRedelivery(BaseModel):
+    line: VoiceGatewayLineRead
+    discovery: VoiceGatewayDeviceDiscoveryRead
+    previous_owner_user_id: Annotated[str, Field(alias="previousOwnerUserId")]
+    previous_customer_name: Annotated[str, Field(alias="previousCustomerName")]
+    previous_sip_username: Annotated[str, Field(alias="previousSipUsername")]
+    previous_trunk_name: Annotated[str, Field(alias="previousTrunkName")]
+    sip_password_one_time: Annotated[str, Field(alias="sipPasswordOneTime")]
+    one_time_warning: Annotated[str, Field(alias="oneTimeWarning")]
+    asterisk_sync_message: Annotated[str, Field(alias="asteriskSyncMessage")]
+
+
 class VoiceGatewayLineEventCreate(BaseModel):
     event_type: Annotated[
         str,
         Field(
             alias="eventType",
-            pattern="^(device_discovery|sip_registration|gateway_route|sim_voice|rtp_media|single_call|asr_tts|live_monitor|note)$",
+            pattern="^(device_discovery|sip_registration|gateway_route|sim_voice|rtp_media|single_call|asr_tts|live_monitor|credential_rotated|redelivered|note)$",
         ),
     ]
     status: Annotated[str, Field(min_length=1, max_length=40)]
