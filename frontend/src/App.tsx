@@ -6785,14 +6785,34 @@ function App() {
                     <strong>{displayedTelephonyDiagnostic.status === "pass" ? "已通" : "未通"}</strong>
                     <small>{telephonyDiagnosticStatusText(displayedTelephonyDiagnostic.status)}</small>
                   </div>
-                  <p>{displayedTelephonyDiagnostic.status === "pass" ? "单号试拨达到验收条件。" : "单号试拨还没有达到验收条件，请等待交付人员后台处理。"}</p>
+                  <p>
+                    {displayedTelephonyDiagnostic.status === "pass"
+                      ? "单号试拨达到验收条件。"
+                      : displayedTelephonyDiagnostic.summary || "单号试拨还没有达到验收条件。"}
+                  </p>
                   {telephonyTestResult && (
-                    <small>
-                      请求路线：{telephonyTestResult.requestedRoute}；实际 bridge：{telephonyTestResult.actualBridgeRoute}
-                      {telephonyTestResult.routeMatched ? "；路线一致" : "；路线不一致"}
-                    </small>
+                    <div className="cellular-diagnostic-evidence">
+                      <small>
+                        拨号阶段：{telephonyVerificationStageText(telephonyTestResult)}；网关状态：{telephonyTestResult.gatewayStatus || "未知"}
+                      </small>
+                      <small>
+                        请求路线：{telephonyTestResult.requestedRoute}；实际 bridge：{telephonyTestResult.actualBridgeRoute}
+                        {telephonyTestResult.routeMatched ? "；路线一致" : "；路线不一致"}
+                      </small>
+                      <small>{telephonyVerificationSummary(telephonyTestResult)}</small>
+                      {telephonyTestPayloadSummary(telephonyTestResult) && (
+                        <code>线路事件：{telephonyTestPayloadSummary(telephonyTestResult)}</code>
+                      )}
+                    </div>
                   )}
                   {telephonyConfirmedByRealtime && <small>{displayedTelephonyDiagnostic.detail}</small>}
+                  {displayedTelephonyDiagnostic.status !== "pass" && displayedTelephonyDiagnostic.actionItems.length > 0 && (
+                    <div className="cellular-action-list">
+                      {displayedTelephonyDiagnostic.actionItems.slice(0, 4).map((item) => (
+                        <span key={item}>{item}</span>
+                      ))}
+                    </div>
+                  )}
                   {displayedTelephonyDiagnostic.status !== "pass" && (
                     <div className="button-row cellular-actions">
                       <button className="secondary-button" disabled={isRecoveringTelephony} onClick={() => void recoverTelephonyLine()} type="button">

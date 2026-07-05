@@ -1706,6 +1706,11 @@ button:disabled {
   line-height: 1.6;
 }
 
+.cellular-diagnostic-evidence {
+  display: grid;
+  gap: 6px;
+}
+
 .cellular-action-list,
 .cellular-command-list {
   display: grid;

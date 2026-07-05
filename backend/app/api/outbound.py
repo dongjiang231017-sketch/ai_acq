@@ -1,3 +1,4 @@
+import logging
 import time
 from datetime import datetime
 
@@ -58,6 +59,7 @@ from app.services.telephony_runtime_config import telephony_bool, telephony_int,
 from app.services.voice_gateway_profiles import current_voice_gateway_profile
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _seed_default_script(db: Session) -> CallScript:
@@ -205,6 +207,28 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         and cellular_diagnostic.get("status") == "fail"
     ):
         auto_recovery = recover_telephony_line()
+    logger.warning(
+        "telephony_test_call_result action_id=%s phone=%s accepted=%s status=%s channel=%s route=%s/%s "
+        "cellular_confirmed=%s media_loop_confirmed=%s human_speech=%s ai_speech=%s verification_stage=%s "
+        "diagnostic_status=%s diagnostic_stage=%s diagnostic_title=%s message=%s raw_payload=%s",
+        result.action_id,
+        payload.phone[-4:].rjust(len(payload.phone), "*"),
+        result.accepted,
+        result.status,
+        result.channel,
+        requested_route,
+        actual_bridge_route,
+        result.cellular_confirmed,
+        media_loop_confirmed,
+        human_speech_confirmed,
+        ai_speech_confirmed,
+        verification_stage,
+        cellular_diagnostic.get("status"),
+        cellular_diagnostic.get("stage"),
+        cellular_diagnostic.get("title"),
+        result.message,
+        result.raw_payload[:2000],
+    )
     return {
         "accepted": result.accepted,
         "actionId": result.action_id,
