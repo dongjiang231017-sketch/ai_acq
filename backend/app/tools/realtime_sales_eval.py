@@ -45,6 +45,13 @@ SCENARIOS = [
     Scenario("具体怎么做？", "process", ("套餐", "投放", "流程", "品类")),
     Scenario("怎么合作，流程说一下。", "process", ("套餐", "品类", "投放", "测试")),
     Scenario("你详细说一下。", "process", ("流程", "套餐", "测试"), ("更缺新客", "团购套餐转化")),
+    Scenario("同城曝光，你能详细说一下吗？", "exposure_detail", ("同城", "团购券", "门店页", "核销"), ("效果不能", "保底", "更缺新客")),
+    Scenario(
+        "我要花这个成本，如果达不到那么多客户？",
+        "roi_risk",
+        ("小", "测试", "达不到", "投入", "成本"),
+        ("更缺新客", "团购套餐转化", "微信曝光入口"),
+    ),
     Scenario(
         "好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？",
         "process",
@@ -94,6 +101,7 @@ SCENARIOS = [
     Scenario("什么意思啊？", "quality", ("视频号", "团购", "到店")),
     Scenario("不是问这个，我问费用。", "price", ("付费", "费用", "价格", "收费")),
     Scenario("我的问题你还没解决。", "quality", ("费用", "效果", "美团", "流程")),
+    Scenario("说话。", "quality", ("视频号", "团购", "到店"), ("更缺新客", "团购套餐转化")),
     Scenario("我没有提什么问题。", "correction", ("理解错", "猜错", "问我是谁", "来电目的"), ("费用", "效果", "美团", "餐饮", "美业")),
     Scenario("不是费用，你别猜。", "correction", ("理解错", "身份", "来电", "干嘛"), ("费用问题", "餐饮", "美业", "资料", "加微信")),
     Scenario("你先讲重点。", "open_need", ("到店", "曝光", "客流", "费用", "效果")),
@@ -490,6 +498,32 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "cumulative_need_partial_waits_for_final",
             "score": 100 if not should_commit_stable_asr_partial(cumulative_need_partial) else 35,
             "issues": [] if not should_commit_stable_asr_partial(cumulative_need_partial) else ["cumulative_partial_committed"],
+        }
+    )
+    complete_detail_partial = "同城曝光，你能详细说一下吗？"
+    incomplete_detail_partial = "同城曝光，你能详细说一下吗？我说你能详细"
+    gates.append(
+        {
+            "text": "complete_business_question_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(complete_detail_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(complete_detail_partial) else ["complete_question_waited_for_final"],
+        }
+    )
+    gates.append(
+        {
+            "text": "continued_business_question_partial_waits_for_final",
+            "score": 100 if has_incomplete_realtime_partial(incomplete_detail_partial) and not should_commit_stable_asr_partial(incomplete_detail_partial) else 35,
+            "issues": []
+            if has_incomplete_realtime_partial(incomplete_detail_partial) and not should_commit_stable_asr_partial(incomplete_detail_partial)
+            else ["continued_question_committed_too_early"],
+        }
+    )
+    roi_partial = "我要花这个成本，如果达不到那么多客户？"
+    gates.append(
+        {
+            "text": "roi_risk_question_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(roi_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(roi_partial) else ["roi_risk_question_waited_for_final"],
         }
     )
     repaired_need = normalize_realtime_sales_text("你需求什么？你什么新客到店我都说了。")

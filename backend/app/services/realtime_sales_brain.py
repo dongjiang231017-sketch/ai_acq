@@ -48,6 +48,10 @@ TOPIC_ANSWERS = {
         "费用按套餐设计和投放范围定，适合再给明确报价。",
         "要收费，但先看品类和客单价，能做再谈具体费用。",
     ],
+    "roi_risk": [
+        "这个风险要控制：先小预算测曝光、咨询和到店，达不到就不放大投入。",
+        "不建议一上来花大成本。先按小测试跑数据，客户量不达标就及时停。",
+    ],
     "guarantee": [
         "效果不能空口保底，只能先测曝光、咨询和到店数据。",
         "不能承诺一定成交，靠谱的做法是小范围测试数据再放大。",
@@ -60,6 +64,10 @@ TOPIC_ANSWERS = {
         "优势是微信同城内容曝光、私域沉淀和套餐核销，补的是美团之外的入口。",
         "您用美团解决搜索下单，我们补微信同城推荐和老客沉淀，不冲突。",
         "不是替代美团，是多一个微信里的到店入口，适合做补充流量。",
+    ],
+    "exposure_detail": [
+        "同城曝光就是把团购套餐放到微信视频号同城入口，附近用户刷到内容或团购券后进门店页下单核销。",
+        "简单说，不是只拍视频；核心是同城内容曝光加团购券入口，把附近用户引到店。",
     ],
     "process": [
         "流程三步：先看品类和客单价，再设计可核销团购套餐，最后小范围测曝光和到店。",
@@ -112,9 +120,11 @@ TOPIC_ANSWERS = {
 ADVANCE_LINES = {
     "identity": "",
     "price": "您更关心基础费用，还是先看适不适合？",
+    "roi_risk": "",
     "guarantee": "可以先拿小测试看数据，不用一上来做大投入。",
     "channel_difference": "已有美团也能做补充，不冲突。",
     "advantage": "如果您已有美团，就把视频号当补充测试，不替代原渠道。",
+    "exposure_detail": "",
     "process": "如果品类合适，再看套餐怎么设计。",
     "need_confirmed": "",
     "visibility": "",
@@ -199,6 +209,9 @@ def plan_sales_turn(text: str, intent: str = "", conversation_history: list[dict
         "correction",
         "visibility",
         "need_confirmed",
+        "roi_risk",
+        "quality",
+        "exposure_detail",
     } and not direct_answer_only
     if emotion in {"annoyed", "busy", "confused"}:
         should_advance = should_advance and topic == "open_need"
@@ -324,7 +337,15 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         return "busy"
     if _has_any(text, ["没有提", "没提", "没有问", "没问", "不是费用", "别猜", "不要猜", "理解错", "猜错"]):
         return "correction"
-    if _has_any(text, ["多少钱", "费用", "价格", "收费", "付费", "要钱", "花钱", "贵"]):
+    if _is_continue_prompt(text):
+        return _infer_previous_topic(history) or "quality"
+    if _is_exposure_detail_question(text):
+        return "exposure_detail"
+    if _has_any(text, ["怎么做", "怎么合作", "流程", "怎么弄", "具体讲", "详细讲", "详细说", "说详细", "细说", "展开说", "介绍一下"]):
+        return "process"
+    if _is_roi_risk_question(text):
+        return "roi_risk"
+    if _has_any(text, ["多少钱", "费用", "价格", "收费", "付费", "要钱", "花钱", "成本", "预算", "投入", "贵"]):
         return "price"
     if normalized.has_fix("group_buying_package") or (
         "团购套餐" in text and _has_any(text, ["什么意思", "什么", "怎么做", "怎么弄", "要帮我"])
@@ -340,8 +361,6 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         return "channel_difference"
     if _has_any(text, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "靠谱吗", "有用吗"]):
         return "guarantee"
-    if _has_any(text, ["怎么做", "怎么合作", "流程", "怎么弄", "具体讲", "详细讲", "详细说", "说详细", "细说", "展开说", "介绍一下"]):
-        return "process"
     if _has_any(text, ["多少单", "带来多少", "能带多少", "能来多少"]):
         return "guarantee"
     if _has_any(text, ["哪来的", "哪里来的", "怎么知道", "电话来源", "号码来源", "个人信息"]):
@@ -403,6 +422,30 @@ def _is_visibility_or_video_question(text: str) -> bool:
     return has_question and (_has_any(compact, visibility_markers) or _has_any(compact, video_markers))
 
 
+def _is_exposure_detail_question(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if not compact:
+        return False
+    has_exposure = _has_any(compact, ["同城曝光", "微信曝光", "曝光入口", "同城入口"])
+    has_detail = _has_any(compact, ["详细", "具体", "说一下", "讲一下", "怎么回事", "什么意思", "怎么做"])
+    return has_exposure and has_detail
+
+
+def _is_roi_risk_question(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if not compact:
+        return False
+    risk_markers = ["达不到", "没有达到", "没达到", "不达标", "达不成", "不来客户", "没客户", "客户不够"]
+    cost_markers = ["成本", "花钱", "投入", "预算", "付费", "费用", "钱"]
+    customer_markers = ["客户", "到店", "客流", "成交", "咨询"]
+    return _has_any(compact, risk_markers) and (_has_any(compact, cost_markers) or _has_any(compact, customer_markers))
+
+
+def _is_continue_prompt(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    return compact in {"说话", "继续说", "接着说", "你说", "讲", "继续"}
+
+
 def _is_need_already_answered(text: str) -> bool:
     compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
     if not compact:
@@ -455,7 +498,7 @@ def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
 def _detect_stage(topic: str, intent: str, history: list[dict[str, str]]) -> str:
     if topic in {"identity", "quality", "correction"} or not history:
         return "opening_repair"
-    if topic in {"price", "guarantee", "channel_difference", "advantage", "source", "visibility"}:
+    if topic in {"price", "roi_risk", "guarantee", "channel_difference", "advantage", "source", "visibility", "exposure_detail"}:
         return "objection_handling"
     if topic in {"process", "open_need", "need_confirmed"}:
         return "discovery"
@@ -511,7 +554,7 @@ def _infer_previous_topic(history: list[dict[str, str]]) -> str | None:
     last_user = _last_history_content(history, "user")
     last_assistant = _last_history_content(history, "assistant")
     combined = last_user + last_assistant
-    for topic in ("price", "guarantee", "advantage", "channel_difference", "process", "identity"):
+    for topic in ("price", "roi_risk", "guarantee", "advantage", "channel_difference", "exposure_detail", "process", "identity"):
         if _detect_topic(combined, "", []) == topic:
             return topic
     return None

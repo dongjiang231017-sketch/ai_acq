@@ -92,6 +92,29 @@ ASR_PARTIAL_FAST_MARKERS = (
     "不说话",
     "不会说话",
 )
+ASR_PARTIAL_COMPLETE_QUESTION_MARKERS = (
+    "详细说一下",
+    "详细讲一下",
+    "具体说一下",
+    "介绍一下",
+    "说一下吗",
+    "讲一下吗",
+    "怎么做",
+    "怎么合作",
+    "流程",
+    "有什么优势",
+    "有什么用",
+    "有啥用",
+    "多少钱",
+    "费用",
+    "价格",
+    "成本",
+    "达不到",
+    "保证",
+    "多少客户",
+    "多少单",
+    "到店客流",
+)
 ASR_SIGNIFICANT_QUESTION_MARKERS = (
     "是不是",
     "要不要",
@@ -191,6 +214,18 @@ def _adds_significant_business_question(current: str, previous: str) -> bool:
     return False
 
 
+def _is_complete_actionable_asr_partial(text: str) -> bool:
+    normalized = normalize_realtime_sales_text(text).normalized_text or text
+    compact = _compact_customer_text(normalized)
+    if len(compact) < ASR_PARTIAL_MIN_COMPACT_CHARS:
+        return False
+    if compact.startswith("你需求什么"):
+        return False
+    has_question_shape = any(marker in text for marker in ("？", "?")) or compact.endswith(("吗", "呢", "嘛"))
+    has_actionable_marker = any(marker in compact for marker in ASR_PARTIAL_COMPLETE_QUESTION_MARKERS)
+    return has_question_shape and has_actionable_marker
+
+
 def should_commit_stable_asr_partial(text: str) -> bool:
     compact = _compact_customer_text(text)
     if compact == "喂":
@@ -206,6 +241,8 @@ def should_commit_stable_asr_partial(text: str) -> bool:
         return True
     if any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
         return True
+    if _is_complete_actionable_asr_partial(text):
+        return True
     return False
 
 
@@ -214,6 +251,8 @@ def _asr_partial_stable_delay_seconds(text: str) -> float:
     signal = classify_realtime_call_input(text)
     if signal in ASR_PARTIAL_FAST_SIGNALS or any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
         return ASR_PARTIAL_STABLE_SECONDS
+    if _is_complete_actionable_asr_partial(text):
+        return 0.45
     return ASR_PARTIAL_STABLE_SECONDS + 0.35
 
 
