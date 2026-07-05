@@ -517,6 +517,11 @@ def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
     if not text:
         return None, "未返回 trunk 状态"
     lower = text.lower()
+    contact_lines = [line for line in lower.splitlines() if "contact:" in line]
+    for line in contact_lines:
+        tokens = {token.strip("<>:,;()[]") for token in line.split()}
+        if tokens.intersection({"avail", "available", "reachable", "ok", "registered"}):
+            return True, "trunk 已注册或可达"
     if any(marker in lower for marker in ["not found", "unable to find", "not a known", "no such"]):
         return False, "trunk 未找到"
     if any(marker in lower for marker in ["unreachable", "unavailable", "rejected", "failed"]):
