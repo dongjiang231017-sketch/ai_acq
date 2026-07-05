@@ -110,6 +110,7 @@ class BridgeConfig:
     debug_audio_capture_dir: Path = Path("/tmp/ai-acq-realtime-audio")
     audio_quality_enabled: bool = True
     answer_classification_seconds: float = 7.0
+    call_screening_hangup_seconds: float = 12.0
 
 
 class JsonlEventLogger:
@@ -343,6 +344,7 @@ class AudioSocketCallSession:
         self._human_speech_confirmed = False
         self._call_screening_seen = False
         self._call_screening_answered = False
+        self._call_screening_hangup_generation = 0
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
@@ -523,8 +525,17 @@ class AudioSocketCallSession:
         self._handle_answer_classification(answer_type, text="", source="audio")
 
     def handle_answer_text(self, text: str, *, is_final: bool) -> None:
-        answer_type = self._answer_classifier.on_asr_text(text, is_final=is_final)
-        self._handle_answer_classification(answer_type, text=text, source="asr_final" if is_final else "asr_partial")
+        classifier_text = text
+        if classify_realtime_call_input(text) == "system_prompt":
+            human_tail = extract_human_text_after_system_prompt(text)
+            if human_tail:
+                classifier_text = human_tail
+        answer_type = self._answer_classifier.on_asr_text(classifier_text, is_final=is_final)
+        self._handle_answer_classification(
+            answer_type,
+            text=classifier_text,
+            source="asr_final" if is_final else "asr_partial",
+        )
 
     def _handle_answer_classification(self, answer_type: CallAnswerType | None, *, text: str, source: str) -> None:
         if not answer_type or answer_type == CallAnswerType.UNKNOWN:
@@ -544,14 +555,7 @@ class AudioSocketCallSession:
             longestSpeechMs=int(state.longest_speech * 1000),
         )
         if answer_type == CallAnswerType.HUMAN:
-            if not self._human_speech_confirmed:
-                self._human_speech_confirmed = True
-                self.logger.emit(
-                    "human_speech_confirmed",
-                    callId=self.call_id,
-                    text=text,
-                    detail="接听判定确认是真人，进入实时对话。",
-                )
+            self._confirm_human_speech(text, detail="接听判定确认是真人，进入实时对话。")
             return
         if answer_type == CallAnswerType.PHONE_ASSISTANT:
             self._respond_to_call_screening(text or "电话助理提示", source=f"answer_classifier:{source}")
@@ -600,6 +604,57 @@ class AudioSocketCallSession:
         with self.generation_lock:
             generation = self.speech_generation
         threading.Thread(target=self._speak, args=(reply, "call_screening", generation), daemon=True).start()
+        self._schedule_call_screening_hangup(source)
+
+    def _confirm_human_speech(self, text: str, *, detail: str) -> None:
+        if self._human_speech_confirmed:
+            return
+        self._human_speech_confirmed = True
+        self.logger.emit(
+            "human_speech_confirmed",
+            callId=self.call_id,
+            text=text,
+            detail=detail,
+        )
+
+    def _schedule_call_screening_hangup(self, source: str) -> None:
+        wait_seconds = max(0.0, self.config.call_screening_hangup_seconds)
+        if wait_seconds <= 0:
+            return
+        self._call_screening_hangup_generation += 1
+        generation = self._call_screening_hangup_generation
+        self.logger.emit(
+            "call_screening_hangup_scheduled",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            source=source,
+            detail="电话助理说明来意后进入短等待；若无人转接真人，将主动挂断避免空等计费。",
+        )
+        threading.Thread(
+            target=self._close_if_no_human_after_call_screening,
+            args=(generation, wait_seconds),
+            daemon=True,
+        ).start()
+
+    def _close_if_no_human_after_call_screening(self, generation: int, wait_seconds: float) -> None:
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            if self._human_speech_confirmed:
+                return
+            time.sleep(0.1)
+        if (
+            self.stop_event.is_set()
+            or self._human_speech_confirmed
+            or generation != self._call_screening_hangup_generation
+        ):
+            return
+        self.logger.emit(
+            "call_screening_hangup_timeout",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            detail="电话助理后未等到真人转接，主动结束本次通话。",
+        )
+        self._close_after_terminal_reply("call_screening_no_human")
 
     def _speak_opening_after_grace(self) -> None:
         grace = max(0.0, self.config.opening_grace_seconds)
@@ -734,13 +789,7 @@ class AudioSocketCallSession:
                 self._respond_to_call_screening(text, source="pipeline_turn")
                 continue
             if not self._human_speech_confirmed:
-                self._human_speech_confirmed = True
-                self.logger.emit(
-                    "human_speech_confirmed",
-                    callId=self.call_id,
-                    text=text,
-                    detail="已识别到真人客户语音，可以进入实时对话。",
-                )
+                self._confirm_human_speech(text, detail="已识别到真人客户语音，可以进入实时对话。")
             intent, node = _classify_intent(text)
             stage = self._sales_fsm.update(text, intent, signal)
             stage_instruction = self._sales_fsm.get_stage_instruction()
@@ -1131,6 +1180,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._last_remote_speech_started_at = 0.0
         self._call_screening_seen = False
         self._call_screening_answered = False
+        self._call_screening_hangup_generation = 0
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
@@ -1271,6 +1321,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni_pending_customer_text = text
             self._omni_pending_signal = "call_screening"
         self._request_omni_response(build_omni_turn_instruction(text, "call_screening"))
+        self._schedule_call_screening_hangup(source)
 
     def handle_omni_speech_started(self) -> None:
         self.customer_activity_event.set()
@@ -1398,16 +1449,11 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 text=clean,
                 detail="识别到电话助理/秘书提示，先说明身份和来电原因，等待真人转接。",
             )
+            self._schedule_call_screening_hangup("omni_transcription")
         elif not human_confirmed_before:
             first_human_after_screening = self._call_screening_seen
             if not self._human_speech_confirmed:
-                self._human_speech_confirmed = True
-                self.logger.emit(
-                    "human_speech_confirmed",
-                    callId=self.call_id,
-                    text=clean,
-                    detail="已识别到真人客户语音，可以进入实时对话。",
-                )
+                self._confirm_human_speech(clean, detail="已识别到真人客户语音，可以进入实时对话。")
         if skip_response_after_forced_barge:
             self.logger.emit(
                 "barge_transcription_after_forced_response",
@@ -2032,6 +2078,7 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         debug_audio_capture_dir=Path(settings.realtime_debug_audio_capture_dir).expanduser(),
         audio_quality_enabled=settings.realtime_audio_quality_enabled,
         answer_classification_seconds=max(0.5, min(10.0, settings.realtime_answer_classification_seconds)),
+        call_screening_hangup_seconds=max(0.0, min(45.0, settings.realtime_call_screening_hangup_seconds)),
     )
 
 
@@ -2185,6 +2232,7 @@ def config_summary(config: BridgeConfig) -> dict[str, object]:
         "debugAudioCaptureDir": str(config.debug_audio_capture_dir),
         "audioQualityEnabled": config.audio_quality_enabled,
         "answerClassificationSeconds": config.answer_classification_seconds,
+        "callScreeningHangupSeconds": config.call_screening_hangup_seconds,
     }
 
 

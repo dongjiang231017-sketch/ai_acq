@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import dataclass
 
-from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType
+from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_sales_brain import render_sales_reply, score_realtime_events
@@ -139,6 +139,15 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "phone_assistant_not_human",
             "score": 100 if apple_assistant_signal == "call_screening" else 35,
             "issues": [] if apple_assistant_signal == "call_screening" else [f"signal:{apple_assistant_signal}"],
+        }
+    )
+    smart_answering_text = "机主已开启智能接听，我会帮您转达，请说出来电原因。"
+    smart_answering_signal = classify_realtime_call_input(smart_answering_text)
+    gates.append(
+        {
+            "text": "smart_answering_not_human",
+            "score": 100 if smart_answering_signal == "call_screening" else 35,
+            "issues": [] if smart_answering_signal == "call_screening" else [f"signal:{smart_answering_signal}"],
         }
     )
     screening_reply_instruction = build_omni_turn_instruction(screening_text, "call_screening")
@@ -341,6 +350,14 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": [] if assistant_type == CallAnswerType.PHONE_ASSISTANT else [f"type:{assistant_type}"],
         }
     )
+    smart_assistant_type = classify_answer_text("机主正在忙，我是智能接听助理，请问您有什么事。")
+    gates.append(
+        {
+            "text": "answer_classifier_smart_answering",
+            "score": 100 if smart_assistant_type == CallAnswerType.PHONE_ASSISTANT else 35,
+            "issues": [] if smart_assistant_type == CallAnswerType.PHONE_ASSISTANT else [f"type:{smart_assistant_type}"],
+        }
+    )
     voicemail_classifier = AnswerClassifier()
     voicemail_type = voicemail_classifier.on_asr_text("您好，请在提示音后留言，挂断即可。")
     gates.append(
@@ -362,14 +379,21 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
     real_mixed_prompt = "尝试联系的用户无法接听，请在提示音后录制留言。录音完成后挂断即可。喂喂，不会说话啊。"
     real_mixed_tail = extract_human_text_after_system_prompt(real_mixed_prompt)
     real_mixed_signal = classify_realtime_call_input(real_mixed_tail)
+    real_mixed_answer_type = classify_answer_text(real_mixed_prompt)
     gates.append(
         {
             "text": "real_mixed_system_prompt_keeps_audio_issue",
-            "score": 100 if "不会说话" in real_mixed_tail and real_mixed_signal == "audio_issue" else 35,
+            "score": 100
+            if "不会说话" in real_mixed_tail
+            and real_mixed_signal == "audio_issue"
+            and real_mixed_answer_type == CallAnswerType.HUMAN
+            else 35,
             "reply": real_mixed_tail,
             "issues": []
-            if "不会说话" in real_mixed_tail and real_mixed_signal == "audio_issue"
-            else [f"tail:{real_mixed_tail}", f"signal:{real_mixed_signal}"],
+            if "不会说话" in real_mixed_tail
+            and real_mixed_signal == "audio_issue"
+            and real_mixed_answer_type == CallAnswerType.HUMAN
+            else [f"tail:{real_mixed_tail}", f"signal:{real_mixed_signal}", f"type:{real_mixed_answer_type}"],
         }
     )
     human_classifier = AnswerClassifier()
