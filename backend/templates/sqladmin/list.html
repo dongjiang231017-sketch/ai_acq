@@ -280,3 +280,42 @@
   {% endfor %}
 </div>
 {% endblock %}
+
+{% block tail %}
+{{ super() }}
+<script>
+  document.addEventListener('click', function (event) {
+    const actionButton = event.target.closest("[id^='action-custom-modal-']");
+    if (!actionButton) {
+      return;
+    }
+    const selected = document.querySelectorAll(".select-box:checked");
+    if (!selected.length) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      alert("请先勾选左侧复选框，或直接点击某一行里的操作按钮。");
+      return;
+    }
+    actionButton.classList.add("disabled");
+    actionButton.setAttribute("aria-disabled", "true");
+    actionButton.textContent = "处理中...";
+  }, true);
+
+  document.addEventListener('click', function (event) {
+    const rowAction = event.target.closest("a[href*='/action/']");
+    if (!rowAction || rowAction.id.startsWith("action-custom")) {
+      return;
+    }
+    if (rowAction.dataset.submitting === "1") {
+      event.preventDefault();
+      return;
+    }
+    setTimeout(function () {
+      rowAction.dataset.submitting = "1";
+      rowAction.classList.add("disabled");
+      rowAction.setAttribute("aria-disabled", "true");
+      rowAction.textContent = "处理中...";
+    }, 0);
+  });
+</script>
+{% endblock %}

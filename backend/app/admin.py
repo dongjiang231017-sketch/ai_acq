@@ -2056,8 +2056,19 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
     async def redeliver_gateway(self, request: Request) -> Response:
         selected_ids = _admin_selected_ids(request)
         if not selected_ids:
-            Flash.warning(request, "请先选择要重新交付/转移的语音网关线路")
-            return _admin_action_redirect(request, self.identity)
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "重新交付失败",
+                    "subtitle": "没有选择线路",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": ["请先勾选左侧复选框，或点击某一行里的重新交付/转移设备按钮。"],
+                },
+                status_code=400,
+            )
 
         actor_username = request.session.get("admin_user")
         results: list[dict[str, str]] = []
@@ -2163,7 +2174,19 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         if errors:
             Flash.error(request, "部分线路重新交付失败：" + "；".join(errors))
         if not results:
-            return _admin_action_redirect(request, self.identity)
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "重新交付失败",
+                    "subtitle": "未生成新 SIP 密码",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": errors or ["没有可处理的语音网关线路。"],
+                },
+                status_code=400,
+            )
 
         response = await self.templates.TemplateResponse(
             request,
@@ -2190,8 +2213,19 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
     async def rotate_sip_password(self, request: Request) -> Response:
         selected_ids = _admin_selected_ids(request)
         if not selected_ids:
-            Flash.warning(request, "请先选择要生成密码的语音网关线路")
-            return _admin_action_redirect(request, self.identity)
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "生成密码失败",
+                    "subtitle": "没有选择线路",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": ["请先勾选左侧复选框，或点击某一行里的生成一次性 SIP 密码按钮。"],
+                },
+                status_code=400,
+            )
 
         actor_username = request.session.get("admin_user")
         results: list[dict[str, str]] = []
@@ -2288,7 +2322,19 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         if errors:
             Flash.error(request, "部分线路生成失败：" + "；".join(errors))
         if not results:
-            return _admin_action_redirect(request, self.identity)
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "生成密码失败",
+                    "subtitle": "未生成新 SIP 密码",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": errors or ["没有可处理的语音网关线路。"],
+                },
+                status_code=400,
+            )
 
         response = await self.templates.TemplateResponse(
             request,
