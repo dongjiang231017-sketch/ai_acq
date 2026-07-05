@@ -3040,7 +3040,7 @@ function App() {
     setTelephonyLineRecovery(null);
     setTelephonyMessage("正在提交单号试拨请求...");
     setActiveOutboundTab("实时监听");
-    await refreshRealtimeLiveEvents(false);
+    void refreshRealtimeLiveEvents(false);
     try {
       const result = await api.createTelephonyTestCall({
         phone: telephonyTestForm.phone.trim(),
