@@ -389,6 +389,23 @@ def _replay_cases() -> list[ReplayCase]:
             max_turn_response_ms=1000,
         ),
         ReplayCase(
+            name="omni_human_answer_before_session_ready_gets_local_opening",
+            note="来自 2026-07-05 20:06 实测：真人已接听但 Omni session 7 秒后才 ready，开场必须先走本地 TTS，不能沉默。",
+            events=[
+                _event("call_connected", "omniready", "2026-07-05T12:06:06.793Z"),
+                _event("omni_open", "omniready", "2026-07-05T12:06:07.638Z"),
+                _event("answer_classified", "omniready", "2026-07-05T12:06:08.726Z", answerType="human"),
+                _event("human_speech_confirmed", "omniready", "2026-07-05T12:06:08.726Z", text=""),
+                _event("opening_after_human_audio", "omniready", "2026-07-05T12:06:08.773Z", waitMs=1200),
+                _event("opening_start", "omniready", "2026-07-05T12:06:08.773Z", text="喂，您好，我在。"),
+                _event("omni_opening_local_fallback", "omniready", "2026-07-05T12:06:08.774Z"),
+                _event("tts_start", "omniready", "2026-07-05T12:06:09.220Z", raw={"sentBytes": 640, "firstAudioMs": 440}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("humanSpeechConfirmed", "aiSpeechConfirmed"),
+            expected_current_phase="ai_speaking",
+        ),
+        ReplayCase(
             name="barge_in_stops_ai_and_returns_to_listening_fast",
             note="客户打断时必须可见停嘴耗时，不能继续播旧答案。",
             events=[

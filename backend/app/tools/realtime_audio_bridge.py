@@ -428,6 +428,7 @@ class CallOmniCallback(OmniRealtimeCallback):
         event_type = str(response.get("type") or "")
         if event_type == "session.updated":
             session = response.get("session") if isinstance(response.get("session"), dict) else {}
+            self.call.mark_omni_session_ready()
             self.call.logger.emit(
                 "omni_session_updated",
                 callId=self.call.call_id,
@@ -1701,6 +1702,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._omni_audio_total = 0
         self._omni_response_started_at = 0.0
         self._omni_tts_started = False
+        self._omni_session_ready = False
         self._omni_closed = False
         self._omni_unavailable_closing = False
         self._omni_barge_collecting = False
@@ -1861,7 +1863,30 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 return
         if self._mark_opening_started():
             self.logger.emit("opening_start", callId=self.call_id, mode="omni", text=self.config.opening_text)
+            if not self._is_omni_session_ready():
+                with self.generation_lock:
+                    generation = self.speech_generation
+                self.logger.emit(
+                    "omni_opening_local_fallback",
+                    callId=self.call_id,
+                    generation=generation,
+                    detail="真人已接听但 Omni session 尚未 ready，先用本地实时 TTS 播短开场，避免电话里沉默。",
+                )
+                threading.Thread(
+                    target=self._speak,
+                    args=(self.config.opening_text, "omni_opening_local_fallback", generation),
+                    daemon=True,
+                ).start()
+                return
             self._request_omni_response(f"电话刚接通。只说这一句，不要改写，不要加问句，不要展开：{self.config.opening_text}")
+
+    def mark_omni_session_ready(self) -> None:
+        with self._omni_lock:
+            self._omni_session_ready = True
+
+    def _is_omni_session_ready(self) -> bool:
+        with self._omni_lock:
+            return self._omni_session_ready
 
     def _request_omni_response(self, instruction: str) -> None:
         if not self._omni or self.stop_event.is_set():
