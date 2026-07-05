@@ -10,6 +10,10 @@ const packageJson = require("../package.json");
 const { createAsteriskSidecar } = require("./asterisk-sidecar.cjs");
 
 const REMOTE_FRONTEND_URL = process.env.AI_ACQ_REMOTE_FRONTEND_URL || "http://101.132.63.159/ai-acq/";
+const REMOTE_FRONTEND_TIMEOUT_MS =
+  Number.parseInt(process.env.AI_ACQ_REMOTE_FRONTEND_TIMEOUT_MS || "8000", 10) || 8000;
+const REMOTE_FRONTEND_RENDER_WAIT_MS =
+  Number.parseInt(process.env.AI_ACQ_REMOTE_FRONTEND_RENDER_WAIT_MS || "1200", 10) || 1200;
 const UPDATE_MANIFEST_URL = process.env.AI_ACQ_UPDATE_MANIFEST_URL || "http://101.132.63.159/ai-acq-downloads/latest.json";
 
 const PLATFORM_SESSION_DOMAINS = {
@@ -356,11 +360,11 @@ async function checkClientUpdate({ prompt = false, owner = null } = {}) {
     autoInstallSupported: Boolean(autoInstallAsset?.url),
     manifestUrl: UPDATE_MANIFEST_URL,
     remoteFrontendUrl: REMOTE_FRONTEND_URL,
-    onlineFrontendEnabled: true,
+    onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "true",
     appName: packageJson.productName || packageJson.name || app.getName(),
     message: updateAvailable
       ? `发现客户端 ${manifest.version}，当前 ${currentVersion}。`
-      : "当前客户端壳已是最新；业务前端会从服务器在线更新。",
+      : "当前客户端已是最新。",
   };
 
   if (prompt && updateAvailable && updateUrl) {
@@ -414,6 +418,39 @@ function localFrontendFile() {
   return path.join(__dirname, "..", "dist", "index.html");
 }
 
+async function loadUrlWithTimeout(window, url, timeoutMs) {
+  let timeoutId = null;
+  const loadPromise = window.loadURL(url);
+  loadPromise.catch(() => {});
+  try {
+    await Promise.race([
+      loadPromise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`远程前端加载超过 ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function remoteFrontendRendered(window) {
+  if (REMOTE_FRONTEND_RENDER_WAIT_MS > 0) {
+    await new Promise((resolve) => setTimeout(resolve, REMOTE_FRONTEND_RENDER_WAIT_MS));
+  }
+  return window.webContents.executeJavaScript(
+    `(() => {
+      const root = document.getElementById("root");
+      if (!root) return true;
+      if (root.children.length > 0) return true;
+      return document.body && document.body.innerText.trim().length > 0;
+    })()`,
+    true,
+  );
+}
+
 async function loadCustomerFrontend(window) {
   const explicitFrontendUrl = String(process.env.AI_ACQ_FRONTEND_URL || "").trim();
   if (explicitFrontendUrl) {
@@ -421,13 +458,16 @@ async function loadCustomerFrontend(window) {
     return { mode: "explicit", url: explicitFrontendUrl };
   }
 
-  const remoteDisabled = process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "false";
-  if (app.isPackaged && !remoteDisabled) {
+  const remoteEnabled = process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "true";
+  if (app.isPackaged && remoteEnabled) {
     try {
-      await window.loadURL(REMOTE_FRONTEND_URL);
+      await loadUrlWithTimeout(window, REMOTE_FRONTEND_URL, REMOTE_FRONTEND_TIMEOUT_MS);
+      const rendered = await remoteFrontendRendered(window);
+      if (!rendered) throw new Error("远程前端加载后没有渲染内容");
       return { mode: "remote", url: REMOTE_FRONTEND_URL };
     } catch (error) {
       console.error("[ai-acq] remote frontend load failed, falling back to bundled dist:", error);
+      window.webContents.stop();
     }
   }
 
@@ -1335,7 +1375,7 @@ ipcMain.handle("app-info:get", async () => ({
   version: app.getVersion(),
   remoteFrontendUrl: REMOTE_FRONTEND_URL,
   manifestUrl: UPDATE_MANIFEST_URL,
-  onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND !== "false",
+  onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "true",
 }));
 
 ipcMain.handle("app-update:check", async (event, payload = {}) =>
@@ -1375,7 +1415,16 @@ function createWindow() {
     },
   });
 
-  void loadCustomerFrontend(window);
+  void loadCustomerFrontend(window).catch((error) => {
+    console.error("[ai-acq] customer frontend load failed:", error);
+    if (!window.isDestroyed()) {
+      window.loadURL(
+        `data:text/html;charset=utf-8,${encodeURIComponent(
+          "<!doctype html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f6faff;color:#20304a;padding:32px;\"><h2>客户端页面加载失败</h2><p>请检查网络后重新打开客户端，或联系交付人员重新安装最新客户端。</p></body></html>",
+        )}`,
+      );
+    }
+  });
 }
 
 app.whenReady().then(() => {

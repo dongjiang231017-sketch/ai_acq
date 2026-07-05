@@ -1,5 +1,6 @@
 const LOCAL_API_BASE_URL = "http://127.0.0.1:8017/api";
 const DEPLOYED_API_BASE_URL = "http://101.132.63.159/ai-acq-api/api";
+const DEFAULT_API_TIMEOUT_MS = 25000;
 
 function resolveApiBaseUrl() {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -1315,14 +1316,32 @@ export type SystemAuditLog = {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const isFormData = options?.body instanceof FormData;
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...authHeaders(),
-      ...options?.headers,
-    },
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), DEFAULT_API_TIMEOUT_MS);
+  const upstreamSignal = options?.signal;
+  const abortFromUpstream = () => controller.abort();
+  upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...authHeaders(),
+        ...options?.headers,
+      },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`请求超时，请检查网络或服务器状态后重试：${path}`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
