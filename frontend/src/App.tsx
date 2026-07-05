@@ -295,6 +295,9 @@ const fallbackRealtimePipeline: RealtimePipeline = {
   estimatedAiCostPerMinute: 0.04,
   readyForMockCall: true,
   readyForAsteriskMedia: false,
+  configuredRoute: "pipeline",
+  actualBridgeRoute: "pipeline",
+  routeMatched: true,
   nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；线路接通后再接入实时媒体。",
   routeOptions: [
     {
@@ -3042,6 +3045,7 @@ function App() {
       const result = await api.createTelephonyTestCall({
         phone: telephonyTestForm.phone.trim(),
         callerId: telephonyTestForm.callerId.trim() || null,
+        conversationRoute: activeRealtimeRoute.key,
       });
       setTelephonyTestResult(result);
       setTelephonyLineRecovery(result.autoRecovery ?? null);
@@ -6737,9 +6741,36 @@ function App() {
                     onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, callerId: event.target.value })}
                   />
                 </label>
+                <label className="wide">
+                  真实语音路线
+                  <select
+                    value={activeRealtimeRoute.key}
+                    onChange={(event) => {
+                      const nextRoute = event.target.value as "pipeline" | "omni";
+                      setRealtimeForm((current) => ({ ...current, conversationRoute: nextRoute }));
+                      setRealtimeSession(null);
+                      setRealtimeLastReply("");
+                    }}
+                  >
+                    {realtimePipeline.routeOptions.map((option) => (
+                      <option key={option.key} value={option.key} disabled={!option.readyForAsteriskMedia}>
+                        {option.label} {option.readyForAsteriskMedia ? "可用于真实电话" : "未接入当前电话桥"}
+                      </option>
+                    ))}
+                  </select>
+                  <small>
+                    当前 bridge：{realtimePipeline.actualBridgeRoute}；后台配置：{realtimePipeline.configuredRoute}
+                    {realtimePipeline.routeMatched ? "" : "；两者不一致，需重启 bridge 后再测。"}
+                  </small>
+                </label>
                 <button
                   className="primary-button"
-                  disabled={isTestingTelephony || !telephonyHealth.readyForTestCall || !telephonyConfig.asteriskLiveCallEnabled}
+                  disabled={
+                    isTestingTelephony
+                    || !telephonyHealth.readyForTestCall
+                    || !telephonyConfig.asteriskLiveCallEnabled
+                    || !activeRealtimeRoute.readyForAsteriskMedia
+                  }
                   type="submit"
                 >
                   <PhoneCall size={16} />
@@ -6755,6 +6786,12 @@ function App() {
                     <small>{telephonyDiagnosticStatusText(displayedTelephonyDiagnostic.status)}</small>
                   </div>
                   <p>{displayedTelephonyDiagnostic.status === "pass" ? "单号试拨达到验收条件。" : "单号试拨还没有达到验收条件，请等待交付人员后台处理。"}</p>
+                  {telephonyTestResult && (
+                    <small>
+                      请求路线：{telephonyTestResult.requestedRoute}；实际 bridge：{telephonyTestResult.actualBridgeRoute}
+                      {telephonyTestResult.routeMatched ? "；路线一致" : "；路线不一致"}
+                    </small>
+                  )}
                   {telephonyConfirmedByRealtime && <small>{displayedTelephonyDiagnostic.detail}</small>}
                   {displayedTelephonyDiagnostic.status !== "pass" && (
                     <div className="button-row cellular-actions">

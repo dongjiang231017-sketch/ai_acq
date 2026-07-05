@@ -473,6 +473,9 @@ export type TelephonyTestCallResult = {
   accepted: boolean;
   actionId: string;
   channel: string;
+  requestedRoute: "pipeline" | "omni" | string;
+  actualBridgeRoute: "pipeline" | "omni" | string;
+  routeMatched: boolean;
   gatewayStatus: string;
   message: string;
   rawPayload: string;
@@ -552,6 +555,9 @@ export type RealtimePipeline = {
   estimatedAiCostPerMinute: number;
   readyForMockCall: boolean;
   readyForAsteriskMedia: boolean;
+  configuredRoute: "pipeline" | "omni" | string;
+  actualBridgeRoute: "pipeline" | "omni" | string;
+  routeMatched: boolean;
   nextStep: string;
   routeOptions: RealtimeRouteOption[];
   routeBenchmark?: RealtimeRouteBenchmarkReport | null;
@@ -1450,7 +1456,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  createTelephonyTestCall: (payload: { phone: string; callerId?: string | null }) =>
+  createTelephonyTestCall: (payload: { phone: string; callerId?: string | null; conversationRoute?: "pipeline" | "omni" }) =>
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",
       body: JSON.stringify(payload),

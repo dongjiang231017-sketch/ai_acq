@@ -198,6 +198,9 @@ class TelephonyPreflightRead(BaseModel):
 class TelephonyTestCallCreate(BaseModel):
     phone: Annotated[str, Field(min_length=3, max_length=40)]
     caller_id: Annotated[str | None, Field(alias="callerId")] = None
+    conversation_route: Annotated[str | None, Field(alias="conversationRoute", pattern="^(pipeline|omni)$")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class TelephonyCellularDiagnosticRead(BaseModel):
@@ -232,6 +235,9 @@ class TelephonyTestCallRead(BaseModel):
     accepted: bool
     action_id: Annotated[str, Field(alias="actionId")]
     channel: str
+    requested_route: Annotated[str, Field(alias="requestedRoute")]
+    actual_bridge_route: Annotated[str, Field(alias="actualBridgeRoute")]
+    route_matched: Annotated[bool, Field(alias="routeMatched")]
     gateway_status: Annotated[str, Field(alias="gatewayStatus")]
     message: str
     raw_payload: Annotated[str, Field(alias="rawPayload")]
@@ -311,6 +317,9 @@ class RealtimePipelineRead(BaseModel):
     estimated_ai_cost_per_minute: Annotated[float, Field(alias="estimatedAiCostPerMinute")]
     ready_for_mock_call: Annotated[bool, Field(alias="readyForMockCall")]
     ready_for_asterisk_media: Annotated[bool, Field(alias="readyForAsteriskMedia")]
+    configured_route: Annotated[str, Field(alias="configuredRoute")] = "pipeline"
+    actual_bridge_route: Annotated[str, Field(alias="actualBridgeRoute")] = "pipeline"
+    route_matched: Annotated[bool, Field(alias="routeMatched")] = True
     next_step: Annotated[str, Field(alias="nextStep")]
     route_options: Annotated[list[RealtimeRouteOptionRead], Field(alias="routeOptions")] = []
     route_benchmark: Annotated[RealtimeRouteBenchmarkReportRead | None, Field(alias="routeBenchmark")] = None

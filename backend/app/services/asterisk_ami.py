@@ -593,17 +593,20 @@ def check_asterisk_health() -> AsteriskHealth:
     return AsteriskHealth(**health)
 
 
-def originate_test_call(phone: str, caller_id: str | None = None) -> AsteriskOriginateResult:
+def originate_test_call(phone: str, caller_id: str | None = None, conversation_route: str | None = None) -> AsteriskOriginateResult:
     if not telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled):
         raise AsteriskAmiError("真实线路拨号开关未启用，请先设置 ASTERISK_LIVE_CALL_ENABLED=true")
     render_originate_channel(phone)
     if caller_id:
         clean_ami_field_value(caller_id, "AMI CallerID")
     with AsteriskAmiClient(events=True) as client:
+        variables = {"AI_ACQ_TEST_CALL": "1"}
+        if conversation_route:
+            variables["AI_ACQ_CONVERSATION_ROUTE"] = conversation_route
         return client.originate(
             phone,
             caller_id=caller_id,
-            variables={"AI_ACQ_TEST_CALL": "1"},
+            variables=variables,
             wait_for_result_seconds=settings.asterisk_test_call_result_wait_seconds,
         )
 

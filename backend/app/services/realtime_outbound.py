@@ -137,6 +137,25 @@ def _normalize_conversation_route(route: str | None) -> str:
     return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
 
 
+def active_bridge_conversation_route() -> str | None:
+    path = Path(settings.realtime_call_event_log_path).expanduser()
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-400:]
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "bridge_start":
+            continue
+        return _normalize_conversation_route(str(payload.get("conversationMode") or ""))
+    return None
+
+
 def _route_mode_label(route: str) -> str:
     return "omni_realtime_interruptible" if route == "omni" else "half_duplex_interruptible"
 
@@ -188,7 +207,10 @@ def build_realtime_pipeline() -> dict[str, object]:
     gateway_label = voice_gateway_label()
     audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
-    conversation_mode = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
+    configured_route = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
+    actual_bridge_route = active_bridge_conversation_route()
+    conversation_mode = actual_bridge_route or configured_route
+    route_matched = not actual_bridge_route or actual_bridge_route == configured_route
     if conversation_mode == "omni":
         dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
         steps = [
@@ -232,9 +254,14 @@ def build_realtime_pipeline() -> dict[str, object]:
             "estimatedAiCostPerMinute": 0.09,
             "readyForMockCall": True,
             "readyForAsteriskMedia": bridge_ready and dashscope_ready,
+            "configuredRoute": configured_route,
+            "actualBridgeRoute": actual_bridge_route or conversation_mode,
+            "routeMatched": route_matched,
             "nextStep": (
                 "Omni 真实电话媒体桥已就绪，可以从前端做单号试拨。"
-                if bridge_ready and dashscope_ready
+                if bridge_ready and dashscope_ready and route_matched
+                else f"后台配置是 {configured_route}，当前 AudioSocket bridge 实际是 {actual_bridge_route}；先重启 bridge 到同一路线。"
+                if bridge_ready and dashscope_ready and not route_matched
                 else "先启动 AudioSocket bridge 的 omni 模式，并确认 DashScope key 与 Asterisk 单号试拨开关。"
             ),
             "routeOptions": route_options,
@@ -302,9 +329,14 @@ def build_realtime_pipeline() -> dict[str, object]:
         "estimatedAiCostPerMinute": 0.04,
         "readyForMockCall": True,
         "readyForAsteriskMedia": bridge_ready,
+        "configuredRoute": configured_route,
+        "actualBridgeRoute": actual_bridge_route or conversation_mode,
+        "routeMatched": route_matched,
         "nextStep": (
             "真实电话媒体桥已就绪，可以从前端做单号试拨。"
-            if bridge_ready
+            if bridge_ready and route_matched
+            else f"后台配置是 {configured_route}，当前 AudioSocket bridge 实际是 {actual_bridge_route}；先重启 bridge 到同一路线。"
+            if bridge_ready and not route_matched
             else "先启动 AudioSocket bridge，再打开 ASTERISK_LIVE_CALL_ENABLED=true，并从前端做单号试拨。"
         ),
         "routeOptions": route_options,

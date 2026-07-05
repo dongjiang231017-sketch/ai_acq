@@ -43,6 +43,7 @@ from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
 from app.services.realtime_outbound import (
     RealtimeSessionNotFound,
+    active_bridge_conversation_route,
     build_realtime_pipeline,
     complete_realtime_playback,
     create_realtime_session,
@@ -149,8 +150,22 @@ def recover_telephony_line_api() -> dict[str, object]:
 @router.post("/telephony/test-call", response_model=TelephonyTestCallRead)
 def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, object]:
     started_at = datetime.utcnow()
+    pipeline = build_realtime_pipeline()
+    actual_bridge_route = str(pipeline.get("actualBridgeRoute") or active_bridge_conversation_route() or "pipeline")
+    requested_route = (payload.conversation_route or actual_bridge_route or "pipeline").strip().lower()
+    if requested_route not in {"pipeline", "omni"}:
+        requested_route = "pipeline"
+    route_matched = requested_route == actual_bridge_route
+    if not route_matched:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"本次选择的是 {requested_route} 路线，但当前真实 AudioSocket bridge 正在运行 {actual_bridge_route}。"
+                f"请先把 bridge 重启为 {requested_route}，否则这通电话不会走你选择的路线。"
+            ),
+        )
     try:
-        result = originate_test_call(payload.phone, caller_id=payload.caller_id)
+        result = originate_test_call(payload.phone, caller_id=payload.caller_id, conversation_route=requested_route)
     except AsteriskAmiValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
@@ -194,6 +209,9 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "accepted": result.accepted,
         "actionId": result.action_id,
         "channel": result.channel,
+        "requestedRoute": requested_route,
+        "actualBridgeRoute": actual_bridge_route,
+        "routeMatched": route_matched,
         "gatewayStatus": result.status,
         "message": result.message,
         "rawPayload": result.raw_payload,
