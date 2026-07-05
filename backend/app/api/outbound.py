@@ -42,6 +42,7 @@ from app.services.asterisk_ami import (
 from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
+from app.services.realtime_intent_capture import register_realtime_test_call_context
 from app.services.realtime_outbound import (
     RealtimeSessionNotFound,
     active_bridge_conversation_route,
@@ -172,6 +173,12 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
                 f"请先把 bridge 重启为 {requested_route}，否则这通电话不会走你选择的路线。"
             ),
         )
+    register_realtime_test_call_context(
+        phone=payload.phone,
+        caller_id=payload.caller_id,
+        requested_route=requested_route,
+        effective_route=effective_route,
+    )
     try:
         result = originate_test_call(payload.phone, caller_id=payload.caller_id, conversation_route=effective_route)
     except AsteriskAmiValidationError as exc:

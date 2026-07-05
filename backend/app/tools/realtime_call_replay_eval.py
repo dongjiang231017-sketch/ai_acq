@@ -389,6 +389,25 @@ def _replay_cases() -> list[ReplayCase]:
             max_turn_response_ms=1000,
         ),
         ReplayCase(
+            name="complete_phone_question_partial_gets_first_audio_under_one_second",
+            note="客户已经问完手机号问题时不能继续等 final，否则客户会以为 AI 没听到。",
+            events=[
+                _event("call_connected", "phonepartial", "2026-07-05T07:06:00.000Z"),
+                _event("human_speech_confirmed", "phonepartial", "2026-07-05T07:06:00.300Z", text="你打的不就是我手机号吗？"),
+                _event("asr_partial", "phonepartial", "2026-07-05T07:06:00.520Z", text="你打的不就是我手机号吗？"),
+                _event("turn_endpoint_candidate", "phonepartial", "2026-07-05T07:06:00.530Z", waitMs=250),
+                _event("asr_partial_stable", "phonepartial", "2026-07-05T07:06:00.780Z", text="你打的不就是我手机号吗？", waitMs=250),
+                _event("turn_reply_preparing", "phonepartial", "2026-07-05T07:06:00.790Z", text="你打的不就是我手机号吗？"),
+                _event("turn_llm_start", "phonepartial", "2026-07-05T07:06:00.800Z", text="你打的不就是我手机号吗？"),
+                _event("tts_start", "phonepartial", "2026-07-05T07:06:01.260Z", raw={"sentBytes": 640, "firstAudioMs": 440}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("humanSpeechConfirmed", "customerSpeechConfirmed", "aiSpeechConfirmed"),
+            expected_current_phase="ai_speaking",
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+        ),
+        ReplayCase(
             name="omni_human_answer_before_session_ready_gets_local_opening",
             note="来自 2026-07-05 20:06 实测：真人已接听但 Omni session 7 秒后才 ready，开场必须先走本地 TTS，不能沉默。",
             events=[

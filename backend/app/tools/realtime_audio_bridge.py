@@ -32,6 +32,7 @@ from app.models.growth import VoiceCloneRecord
 from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
 from app.services.realtime_call_learning import record_realtime_call_learning
+from app.services.realtime_intent_capture import claim_realtime_call_context, record_realtime_intent_signal
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_route_health import mark_omni_route_unavailable, omni_route_unavailable_reason
@@ -67,7 +68,7 @@ OMNI_NO_AUDIO_FALLBACK_TEXT = "我短说：我是做视频号团购到店获客�
 REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS = 7.0
 REMOTE_AUDIO_SILENCE_SECONDS = 1.3
 BARGE_AUDIO_FORWARD_SECONDS = 2.8
-ASR_PARTIAL_STABLE_SECONDS = 0.85
+ASR_PARTIAL_STABLE_SECONDS = 0.45
 ASR_PARTIAL_DUPLICATE_SECONDS = 6.0
 ASR_PARTIAL_MIN_COMPACT_CHARS = 5
 ASR_PARTIAL_FAST_SIGNALS = {
@@ -93,6 +94,12 @@ ASR_PARTIAL_FAST_MARKERS = (
     "没听清",
     "不说话",
     "不会说话",
+    "加微信",
+    "加我微信",
+    "发资料",
+    "发案例",
+    "发给我",
+    "给我发",
 )
 ASR_PARTIAL_COMPLETE_QUESTION_MARKERS = (
     "详细说一下",
@@ -111,6 +118,14 @@ ASR_PARTIAL_COMPLETE_QUESTION_MARKERS = (
     "费用",
     "价格",
     "成本",
+    "手机号",
+    "手机号码",
+    "电话号码",
+    "号码",
+    "加微信",
+    "加我微信",
+    "发资料",
+    "发案例",
     "达不到",
     "保证",
     "多少客户",
@@ -254,7 +269,7 @@ def _asr_partial_stable_delay_seconds(text: str) -> float:
     if signal in ASR_PARTIAL_FAST_SIGNALS or any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
         return ASR_PARTIAL_STABLE_SECONDS
     if _is_complete_actionable_asr_partial(text):
-        return 0.45
+        return 0.25
     return ASR_PARTIAL_STABLE_SECONDS + 0.35
 
 
@@ -549,6 +564,7 @@ class AudioSocketCallSession:
         self._startup_keepalive_active = threading.Event()
         self._intentional_close_reason = ""
         self._learning_recorded = False
+        self._call_context: dict[str, Any] = {}
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
 
     def run(self) -> None:
@@ -611,6 +627,31 @@ class AudioSocketCallSession:
                 nextGuidance=lesson.get("nextGuidance", []),
             )
 
+    def _record_realtime_intent_signal(self, text: str, intent: str, signal: str, source: str) -> None:
+        try:
+            result = record_realtime_intent_signal(
+                call_id=self.call_id,
+                context=self._call_context,
+                text=text,
+                intent=intent,
+                signal=signal,
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("intent_capture_error", callId=self.call_id, text=text, intent=intent, error=str(exc))
+            return
+        if result:
+            self.logger.emit(
+                "intent_customer_upserted",
+                callId=self.call_id,
+                text=text,
+                intent=intent,
+                customerId=result.get("customerId"),
+                intentLevel=result.get("intentLevel"),
+                sourceRecordId=result.get("sourceRecordId"),
+                summary=result.get("summary"),
+            )
+
     def _start_startup_keepalive(self) -> None:
         self._startup_keepalive_active.set()
         threading.Thread(target=self._startup_keepalive_loop, name="ai-acq-audiosocket-keepalive", daemon=True).start()
@@ -665,6 +706,16 @@ class AudioSocketCallSession:
             if frame_type == AUDIO_SOCKET_KIND_UUID:
                 self.call_id = _decode_call_id(payload)
                 self.logger.emit("call_uuid", callId=self.call_id)
+                self._call_context = claim_realtime_call_context(self.call_id)
+                if self._call_context:
+                    self.logger.emit(
+                        "call_context_attached",
+                        callId=self.call_id,
+                        source="realtime_test_call",
+                        merchantName=self._call_context.get("merchantName"),
+                        requestedRoute=self._call_context.get("requestedRoute"),
+                        effectiveRoute=self._call_context.get("effectiveRoute"),
+                    )
                 self._start_audio_capture()
                 return True
             if frame_type == AUDIO_SOCKET_KIND_HANGUP:
@@ -826,6 +877,10 @@ class AudioSocketCallSession:
         self._note_customer_activity("asr_partial", text=clean)
         should_commit = should_commit_stable_asr_partial(clean)
         if not should_commit:
+            with self.asr_partial_lock:
+                if self._asr_partial_text and clean != self._asr_partial_text:
+                    self._asr_partial_generation += 1
+                    self._asr_partial_text = ""
             self.logger.emit(
                 "turn_waiting_final",
                 callId=self.call_id,
@@ -1295,6 +1350,7 @@ class AudioSocketCallSession:
             if intent == "系统提示":
                 self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
                 continue
+            self._record_realtime_intent_signal(routed_text, intent, signal, "pipeline_turn")
             turn_count, fallback_reply = self._reply_for_turn(routed_text, intent)
             history_snapshot = list(self._conversation_history)
             self.logger.emit(
@@ -1968,6 +2024,10 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             if self._omni_barge_collecting:
                 self._omni_barge_last_text = clean
         if not should_commit_stable_asr_partial(clean):
+            with self.asr_partial_lock:
+                if self._asr_partial_text and clean != self._asr_partial_text:
+                    self._asr_partial_generation += 1
+                    self._asr_partial_text = ""
             self.logger.emit(
                 "turn_waiting_final",
                 callId=self.call_id,
@@ -2214,6 +2274,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             first_human_after_screening = self._call_screening_seen
             if not self._human_speech_confirmed:
                 self._confirm_human_speech(clean, detail="已识别到真人客户语音，可以进入实时对话。")
+        if signal != "call_screening":
+            self._record_realtime_intent_signal(routed_clean, intent, signal, source)
         if skip_response_after_forced_barge:
             self.logger.emit(
                 "barge_transcription_after_forced_response",

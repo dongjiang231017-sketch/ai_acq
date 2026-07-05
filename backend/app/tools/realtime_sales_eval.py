@@ -526,6 +526,22 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": [] if should_commit_stable_asr_partial(roi_partial) else ["roi_risk_question_waited_for_final"],
         }
     )
+    phone_question_partial = "你打的不就是我手机号吗？"
+    gates.append(
+        {
+            "text": "phone_question_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(phone_question_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(phone_question_partial) else ["phone_question_waited_for_final"],
+        }
+    )
+    wechat_material_partial = "好，你加我微信，发案例给我看一下。"
+    gates.append(
+        {
+            "text": "wechat_material_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(wechat_material_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(wechat_material_partial) else ["wechat_material_waited_for_final"],
+        }
+    )
     repaired_need = normalize_realtime_sales_text("你需求什么？你什么新客到店我都说了。")
     gates.append(
         {
