@@ -230,6 +230,24 @@ def _replay_cases() -> list[ReplayCase]:
             required_true_flags=("hangupDetected",),
         ),
         ReplayCase(
+            name="customer_rejected_close_is_not_link_error",
+            events=[
+                _event("call_connected", "closed", "2026-07-05T01:55:00.000Z"),
+                _event("human_speech_confirmed", "closed", "2026-07-05T01:55:00.600Z", text="不合适，再见，挂了。"),
+                _event("asr_partial_stable", "closed", "2026-07-05T01:55:01.100Z", text="不合适，再见"),
+                _event("llm_reply", "closed", "2026-07-05T01:55:01.110Z", reply="好的，不打扰了，再见。"),
+                _event("tts_start", "closed", "2026-07-05T01:55:01.420Z", raw={"sentBytes": 640, "firstAudioMs": 330}),
+                _event("tts_done", "closed", "2026-07-05T01:55:02.200Z", raw={"sentBytes": 640, "firstAudioMs": 330}),
+                _event("call_closing", "closed", "2026-07-05T01:55:02.210Z", reason="customer_rejected"),
+                _event("call_closed", "closed", "2026-07-05T01:55:02.220Z", reason="customer_rejected"),
+                _event("call_disconnected", "closed", "2026-07-05T01:55:02.260Z"),
+            ],
+            expected_state="closed",
+            required_true_flags=("humanSpeechConfirmed", "aiSpeechConfirmed", "hangupDetected"),
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+        ),
+        ReplayCase(
             name="turn_taking_fast_after_customer_final",
             events=[
                 _event("call_connected", "turnfast", "2026-07-05T02:00:00.000Z"),

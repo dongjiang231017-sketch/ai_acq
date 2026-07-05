@@ -6,6 +6,7 @@ from typing import Any
 
 
 TERMINAL_EVENT_TYPES = {
+    "call_closed",
     "call_disconnected",
     "call_error",
     "hangup_frame",
@@ -186,6 +187,8 @@ def _derive_state(
         return "no_response_timeout", "客户无响应，已自动关闭", "closed", "no_customer_response"
     if voicemail:
         return "voicemail", "语音信箱，已关闭", "closed", "voicemail"
+    if "call_closed" in event_types:
+        return "closed", "通话已正常结束", "closed", "customer_closed"
     if "call_error" in event_types:
         return "error", "通话链路异常", "closed", "call_error"
     if hangup and "call_disconnected" in event_types:
@@ -327,6 +330,7 @@ def _active_auto_close_scheduled(events: list[dict[str, object]]) -> bool:
             "no_response_hangup_timeout",
             "voicemail_detected",
             "hangup_frame",
+            "call_closed",
             "call_disconnected",
             "call_error",
         }:

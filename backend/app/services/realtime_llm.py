@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import settings
+from app.services.realtime_call_learning import build_realtime_learning_instruction
 from app.services.realtime_sales_brain import render_sales_reply
 from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 from app.services.runtime_ai_config import RuntimeAiConfig, get_runtime_ai_config
@@ -144,6 +145,14 @@ def generate_realtime_reply(
             latency_ms=int((time.perf_counter() - started) * 1000),
             fallback_used=True,
             error="DeepSeek 返回空回复",
+        )
+    if _repeats_recent_reply(cleaned, history):
+        return RealtimeReplyResult(
+            reply=contextual_reply,
+            strategy="local_context_deepseek_repeat_suppressed",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            fallback_used=True,
+            error="DeepSeek 回复与近期话术重复，已切回本地去重话术。",
         )
     return RealtimeReplyResult(
         reply=cleaned,
@@ -543,6 +552,22 @@ def _has_any(text: str, keywords: list[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def _repeats_recent_reply(reply: str, history: list[dict[str, str]]) -> bool:
+    normalized = _normalize_reply(reply)
+    if not normalized:
+        return False
+    recent = [
+        _normalize_reply(turn.get("content", ""))
+        for turn in history[-10:]
+        if (turn.get("role") or "").strip().lower() == "assistant"
+    ]
+    return normalized in {item for item in recent if item}
+
+
+def _normalize_reply(text: str) -> str:
+    return re.sub(r"[\s。！？?!，,、.；;：:\"'“”‘’（）()]+", "", str(text).lower())
+
+
 def _avoid_repeat(reply: str, last_assistant: str, topic_alternatives: list[str] | None = None) -> str:
     if not last_assistant or reply.strip() != last_assistant.strip():
         return reply
@@ -569,6 +594,7 @@ def _request_deepseek_reply(
     stage_instruction: str = "",
 ) -> str:
     recent_history = _format_conversation_history(conversation_history or [])
+    learning_instruction = build_realtime_learning_instruction(limit=3)
     normalization = normalize_realtime_sales_text(text)
     normalized_hint = ""
     if normalization.changed:
@@ -587,6 +613,7 @@ def _request_deepseek_reply(
                     "必须先回答客户当前问题，再轻轻推进下一步。"
                     "客户说不要资料、不加微信、直接回答、别重复时，本轮停止推进资料和微信，只回答问题。"
                     "客户重复追问时必须换角度回答，不要复读上一轮。客户插话后直接接着答，不解释上一句为什么停了。"
+                    "如果最近通话复盘指出某类问题重复回答，本轮必须换角度。"
                     "语气要像真人电销：先承接情绪，再给一个短解释，必要时问一个选择题。"
                     "客户问你是谁、做什么，就直接说明身份和服务；客户问效果、费用、怎么做、怎么发资料，"
                     "就针对问题回答；客户说没听懂，就换更短说法；客户只是嗯、好、可以，要承接上一轮继续说重点。"
@@ -600,6 +627,7 @@ def _request_deepseek_reply(
                     f"商家：{merchant_name or '客户门店'}\n"
                     f"本地意图：{intent}\n"
                     f"销售状态：{stage_instruction or '无'}\n"
+                    f"{learning_instruction}\n"
                     f"最近对话：\n{recent_history}\n"
                     f"{normalized_hint}"
                     f"客户刚说：{normalization.normalized_text or text}\n"

@@ -31,6 +31,7 @@ from app.db.session import SessionLocal
 from app.models.growth import VoiceCloneRecord
 from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
+from app.services.realtime_call_learning import record_realtime_call_learning
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_sales_playbook import (
@@ -77,6 +78,7 @@ ASR_PARTIAL_FAST_SIGNALS = {
     "call_screening",
 }
 ASR_PARTIAL_FAST_MARKERS = (
+    "喂",
     "你谁",
     "谁啊",
     "谁呀",
@@ -90,6 +92,7 @@ ASR_PARTIAL_FAST_MARKERS = (
     "不说话",
     "不会说话",
 )
+OPENING_RAW_BARGE_PROTECT_SECONDS = 1.8
 _DOWNSAMPLE_FACTOR = 3
 _DOWNSAMPLE_FIR_TAPS = 31
 _DOWNSAMPLE_CUTOFF = 3600 / 24000
@@ -123,6 +126,8 @@ def _compact_customer_text(text: str) -> str:
 
 def should_commit_stable_asr_partial(text: str) -> bool:
     compact = _compact_customer_text(text)
+    if compact == "喂":
+        return True
     if len(compact) < 2:
         return False
     if has_incomplete_realtime_partial(text):
@@ -399,6 +404,7 @@ class AudioSocketCallSession:
         self._audio_capture: CallAudioCapture | None = None
         self._intent_counts: dict[str, int] = {}
         self._conversation_history: list[dict[str, str]] = []
+        self._call_history: list[dict[str, str]] = []
         self._sales_fsm = SalesStateMachine()
         self._answer_classifier = AnswerClassifier(max_wait_seconds=self.config.answer_classification_seconds)
         self._answer_classification_reported: CallAnswerType | None = None
@@ -412,6 +418,9 @@ class AudioSocketCallSession:
         self._no_response_hangup_active = False
         self._system_prompt_seen = False
         self._opening_started = False
+        self._opening_started_at = 0.0
+        self._opening_raw_barge_protect_until = 0.0
+        self._opening_raw_barge_protected_logged = False
         self._last_remote_audio_at = 0.0
         self._asr_partial_generation = 0
         self._asr_partial_text = ""
@@ -421,6 +430,8 @@ class AudioSocketCallSession:
         self._remote_audio_sample_peak = 0
         self._last_outbound_audio_at = 0.0
         self._startup_keepalive_active = threading.Event()
+        self._intentional_close_reason = ""
+        self._learning_recorded = False
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
 
     def run(self) -> None:
@@ -436,10 +447,19 @@ class AudioSocketCallSession:
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
-            self.logger.emit("call_error", callId=self.call_id, error=str(exc))
+            if self._is_intentional_socket_close(exc):
+                self.logger.emit(
+                    "call_closed",
+                    callId=self.call_id,
+                    reason=self._intentional_close_reason,
+                    detail="客户明确结束后系统主动关闭 AudioSocket。",
+                )
+            else:
+                self.logger.emit("call_error", callId=self.call_id, error=str(exc))
         finally:
             self.stop_event.set()
             self.interrupt_event.set()
+            self._record_learning_summary()
             self._stop_startup_keepalive()
             self._stop_asr()
             self._stop_audio_capture()
@@ -448,6 +468,31 @@ class AudioSocketCallSession:
             except OSError:
                 pass
             self.logger.emit("call_disconnected", callId=self.call_id)
+
+    def _is_intentional_socket_close(self, exc: Exception) -> bool:
+        return bool(self._intentional_close_reason) and "AudioSocket connection closed" in str(exc)
+
+    def _record_learning_summary(self) -> None:
+        if self._learning_recorded or not self.call_id:
+            return
+        self._learning_recorded = True
+        try:
+            lesson = record_realtime_call_learning(
+                call_id=self.call_id,
+                conversation_history=list(self._call_history or self._conversation_history),
+                close_reason=self._intentional_close_reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("call_learning_error", callId=self.call_id, error=str(exc))
+            return
+        if lesson:
+            self.logger.emit(
+                "call_learning_summary",
+                callId=self.call_id,
+                topics=lesson.get("topics", {}),
+                avoidPhrases=lesson.get("avoidPhrases", []),
+                nextGuidance=lesson.get("nextGuidance", []),
+            )
 
     def _start_startup_keepalive(self) -> None:
         self._startup_keepalive_active.set()
@@ -558,6 +603,11 @@ class AudioSocketCallSession:
                 if self._recognition:
                     self._recognition.send_audio_frame(payload)
                 return
+            if self._should_protect_opening_from_raw_barge(now, rms):
+                self._loud_frames = 0
+                if self._recognition:
+                    self._recognition.send_audio_frame(payload)
+                return
             if rms >= self.config.barge_rms_threshold:
                 self._loud_frames += 1
             else:
@@ -571,6 +621,24 @@ class AudioSocketCallSession:
         self._loud_frames = 0
         if self._recognition:
             self._recognition.send_audio_frame(payload)
+
+    def _should_protect_opening_from_raw_barge(self, now: float, rms: int) -> bool:
+        if not self._opening_started or now > self._opening_raw_barge_protect_until:
+            return False
+        if self._human_speech_confirmed or self._last_committed_customer_text:
+            return False
+        if rms < self.config.barge_rms_threshold:
+            return False
+        if not self._opening_raw_barge_protected_logged:
+            self._opening_raw_barge_protected_logged = True
+            self.logger.emit(
+                "opening_raw_barge_protected",
+                callId=self.call_id,
+                rms=rms,
+                protectMs=int(max(0.0, self._opening_raw_barge_protect_until - now) * 1000),
+                detail="首句刚开始播放时检测到对端问候音，先不断开首句，等待ASR确认后再接话。",
+            )
+        return True
 
     def _emit_remote_audio_sample(self, rms: int, now: float) -> None:
         self._remote_audio_sample_peak = max(self._remote_audio_sample_peak, rms)
@@ -974,6 +1042,9 @@ class AudioSocketCallSession:
         if self._opening_blocked():
             return False
         self._opening_started = True
+        self._opening_started_at = time.monotonic()
+        self._opening_raw_barge_protect_until = self._opening_started_at + OPENING_RAW_BARGE_PROTECT_SECONDS
+        self._opening_raw_barge_protected_logged = False
         return True
 
     def _turn_worker(self) -> None:
@@ -1117,10 +1188,12 @@ class AudioSocketCallSession:
         return turn_count, _build_reply(text, intent, "您的门店")
 
     def _append_conversation_turn(self, customer_text: str, assistant_reply: str) -> None:
+        self._call_history.append({"role": "user", "content": customer_text.strip()})
+        self._call_history.append({"role": "assistant", "content": assistant_reply.strip()})
         self._conversation_history.append({"role": "user", "content": customer_text.strip()})
         self._conversation_history.append({"role": "assistant", "content": assistant_reply.strip()})
-        if len(self._conversation_history) > 8:
-            del self._conversation_history[: len(self._conversation_history) - 8]
+        if len(self._conversation_history) > 12:
+            del self._conversation_history[: len(self._conversation_history) - 12]
 
     def _drain_latest_customer_text(self, generation: int, text: str) -> tuple[int, str]:
         latest_generation = generation
@@ -1369,6 +1442,7 @@ class AudioSocketCallSession:
                 self.speaking_event.clear()
 
     def _close_after_terminal_reply(self, reason: str) -> None:
+        self._intentional_close_reason = reason
         self.logger.emit("call_closing", callId=self.call_id, reason=reason)
         self.stop_event.set()
         try:
@@ -1469,10 +1543,20 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
-            self.logger.emit("call_error", callId=self.call_id, error=str(exc), mode="omni")
+            if self._is_intentional_socket_close(exc):
+                self.logger.emit(
+                    "call_closed",
+                    callId=self.call_id,
+                    reason=self._intentional_close_reason,
+                    detail="客户明确结束后系统主动关闭 AudioSocket。",
+                    mode="omni",
+                )
+            else:
+                self.logger.emit("call_error", callId=self.call_id, error=str(exc), mode="omni")
         finally:
             self.stop_event.set()
             self.interrupt_event.set()
+            self._record_learning_summary()
             self._stop_startup_keepalive()
             self._stop_omni()
             self._stop_audio_capture()

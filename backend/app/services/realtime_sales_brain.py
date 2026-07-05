@@ -44,8 +44,9 @@ TOPIC_ANSWERS = {
         "简单说，我是帮门店做视频号团购获客的，不是平台官方。",
     ],
     "price": [
-        "这是付费服务，费用看套餐设计和投放节奏，不合适不建议做。",
-        "要收费，但不是上来硬报价格，先看门店品类适不适合。",
+        "是付费服务，基础费用要看套餐和投放节奏，我不在电话里乱报。",
+        "费用按套餐设计和投放范围定，适合再给明确报价。",
+        "要收费，但先看品类和客单价，能做再谈具体费用。",
     ],
     "guarantee": [
         "效果不能空口保底，只能先测曝光、咨询和到店数据。",
@@ -55,9 +56,14 @@ TOPIC_ANSWERS = {
         "美团偏搜索下单，视频号偏微信同城推荐和私域沉淀，是补充不是替代。",
         "简单说，美团像货架搜索；视频号更像微信同城内容推荐和私域入口。",
     ],
+    "advantage": [
+        "优势是微信同城内容曝光、私域沉淀和套餐核销，补的是美团之外的入口。",
+        "您用美团解决搜索下单，我们补微信同城推荐和老客沉淀，不冲突。",
+        "不是替代美团，是多一个微信里的到店入口，适合做补充流量。",
+    ],
     "process": [
-        "流程是先看品类，再设计团购套餐，接着做同城曝光测试。",
-        "先判断门店适不适合，再做套餐、页面和小范围投放。",
+        "流程三步：先看品类和客单价，再设计可核销团购套餐，最后小范围测曝光和到店。",
+        "先判断门店适不适合，再做团购套餐和页面，小范围投放看数据。",
         "团购套餐就是客户能线上下单、到店核销的优惠套餐。",
     ],
     "materials": [
@@ -99,6 +105,7 @@ ADVANCE_LINES = {
     "price": "您更关心基础费用，还是先看适不适合？",
     "guarantee": "可以先拿小测试看数据，不用一上来做大投入。",
     "channel_difference": "已有美团也能做补充，不冲突。",
+    "advantage": "如果您已有美团，就把视频号当补充测试，不替代原渠道。",
     "process": "如果品类合适，再看套餐怎么设计。",
     "quality": "您更想听费用、效果，还是和美团区别？",
     "open_need": "",
@@ -117,8 +124,9 @@ def render_sales_reply(
     customer_text = normalization.normalized_text or text
     plan = plan_sales_turn(customer_text, intent, history)
     last_assistant = _last_history_content(history, "assistant")
+    recent_assistants = _recent_history_contents(history, "assistant", limit=5)
     answers = TOPIC_ANSWERS.get(plan.topic) or []
-    answer = _choose_variant(answers, customer_text, last_assistant) if answers else fallback_reply
+    answer = _choose_variant(answers, customer_text, last_assistant, recent_assistants) if answers else fallback_reply
     compact = re.sub(r"[\s。！？?!，,、.]+", "", customer_text.lower())
     if normalization.has_fix("group_buying_package"):
         answer = "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
@@ -135,7 +143,7 @@ def render_sales_reply(
             if _recently_answered_identity(history)
             else "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
         )
-    ack = _choose_variant(EMOTION_ACKS.get(plan.emotion, EMOTION_ACKS["neutral"]), customer_text + intent, last_assistant)
+    ack = _choose_variant(EMOTION_ACKS.get(plan.emotion, EMOTION_ACKS["neutral"]), customer_text + intent, last_assistant, recent_assistants)
     if plan.direct_answer_only and plan.topic == "open_need":
         answer = "不推材料，我直接答。您问费用、效果或流程，我就按这个说。"
     if plan.direct_answer_only and plan.topic == "quality":
@@ -152,11 +160,13 @@ def render_sales_reply(
         ack = ""
     pieces = [ack, answer]
     advance = ADVANCE_LINES.get(plan.topic, "")
-    if plan.should_advance and advance and not _push_forbidden(text, history):
+    suppress_advance = plan.topic == "advantage" and _recently_answered_advantage(history)
+    if plan.should_advance and advance and not suppress_advance and not _push_forbidden(text, history):
         pieces.append(advance)
     reply = _polish_reply("".join(piece for piece in pieces if piece))
     reply = _suppress_habitual_ack(reply, last_assistant, plan)
     reply = _avoid_repeat(reply, last_assistant, plan)
+    reply = _avoid_recent_repeats(reply, recent_assistants, plan)
     return SalesBrainReply(reply=reply, strategy=f"sales_brain_{plan.topic}_{plan.emotion}", plan=plan)
 
 
@@ -300,6 +310,8 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         "团购套餐" in text and _has_any(text, ["什么意思", "什么", "怎么做", "怎么弄", "要帮我"])
     ):
         return "process"
+    if _has_any(text, ["优势", "为什么要用", "为什么用", "凭什么", "比美团", "美团来讲"]):
+        return "advantage"
     if _has_any(text, ["美团", "大众点评", "抖音团购", "小红书", "高德", "已经做", "在做团购"]):
         return "channel_difference"
     if _has_any(text, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "靠谱吗", "有用吗"]):
@@ -383,7 +395,7 @@ def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
 def _detect_stage(topic: str, intent: str, history: list[dict[str, str]]) -> str:
     if topic in {"identity", "quality", "correction"} or not history:
         return "opening_repair"
-    if topic in {"price", "guarantee", "channel_difference", "source"}:
+    if topic in {"price", "guarantee", "channel_difference", "advantage", "source"}:
         return "objection_handling"
     if topic in {"process", "open_need"}:
         return "discovery"
@@ -430,11 +442,16 @@ def _recently_answered_identity(history: list[dict[str, str]]) -> bool:
     return any(_has_any(reply, ["做视频号团购", "到店获客", "同城曝光"]) for reply in recent_replies)
 
 
+def _recently_answered_advantage(history: list[dict[str, str]]) -> bool:
+    recent_replies = _recent_history_contents(history, "assistant", limit=4)
+    return any(_has_any(reply, ["微信同城", "私域", "美团", "到店入口", "补充"]) for reply in recent_replies)
+
+
 def _infer_previous_topic(history: list[dict[str, str]]) -> str | None:
     last_user = _last_history_content(history, "user")
     last_assistant = _last_history_content(history, "assistant")
     combined = last_user + last_assistant
-    for topic in ("price", "guarantee", "channel_difference", "process", "identity"):
+    for topic in ("price", "guarantee", "advantage", "channel_difference", "process", "identity"):
         if _detect_topic(combined, "", []) == topic:
             return topic
     return None
@@ -447,13 +464,27 @@ def _last_history_content(history: list[dict[str, str]], role: str) -> str:
     return ""
 
 
-def _choose_variant(options: list[str], seed: str, last_assistant: str) -> str:
+def _recent_history_contents(history: list[dict[str, str]], role: str, *, limit: int = 5) -> list[str]:
+    items: list[str] = []
+    for turn in reversed(history):
+        if (turn.get("role") or "").strip().lower() == role:
+            content = str(turn.get("content") or "").strip()
+            if content:
+                items.append(content)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _choose_variant(options: list[str], seed: str, last_assistant: str, recent_assistants: list[str] | None = None) -> str:
     if not options:
         return ""
     start = sum(ord(ch) for ch in seed) % len(options)
+    recent_norm = {_normalize_reply(item) for item in (recent_assistants or []) if item}
     for offset in range(len(options)):
         candidate = options[(start + offset) % len(options)]
-        if _normalize_reply(candidate) != _normalize_reply(last_assistant):
+        normalized = _normalize_reply(candidate)
+        if normalized != _normalize_reply(last_assistant) and normalized not in recent_norm:
             return candidate
     return options[start]
 
@@ -479,6 +510,23 @@ def _avoid_repeat(reply: str, last_assistant: str, plan: SalesTurnPlan) -> str:
     for candidate in options:
         polished = _polish_reply(candidate)
         if _normalize_reply(polished) != _normalize_reply(last_assistant):
+            return polished
+    return reply
+
+
+def _avoid_recent_repeats(reply: str, recent_assistants: list[str], plan: SalesTurnPlan) -> str:
+    normalized = _normalize_reply(reply)
+    recent_norm = {_normalize_reply(item) for item in recent_assistants if item}
+    if normalized not in recent_norm:
+        return reply
+    options = TOPIC_ANSWERS.get(plan.topic, []) + [
+        "我换个角度说：微信同城曝光、私域沉淀、到店核销，这是视频号补的部分。",
+        "简单讲，先看品类，再做可核销套餐，小范围测到店数据。",
+        "您问得对，我直接答这个点，不再重复前面那句。",
+    ]
+    for candidate in options:
+        polished = _polish_reply(candidate)
+        if _normalize_reply(polished) not in recent_norm:
             return polished
     return reply
 

@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     realtime_llm_timeout_seconds: float = 1.2
     realtime_call_opening_text: str = "喂，您好，我在。简单说一句，我这边是做视频号团购到店获客的。"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
+    realtime_call_learning_path: str = ""
     realtime_reply_max_chars: int = 48
     realtime_barge_rms_threshold: int = 2600
     realtime_barge_frames: int = 8

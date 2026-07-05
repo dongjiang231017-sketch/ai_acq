@@ -559,6 +559,7 @@ function realtimeEventToMonitorMessage(event: RealtimeLiveEvent): MonitorMessage
     return { speaker: "system", label: "收音", text: `检测到对端音频，RMS ${rms} / 阈值 ${threshold}。` };
   }
   if (event.type === "call_error") return { speaker: "system", label: "异常", text: event.detail || "通话媒体桥异常。" };
+  if (event.type === "call_closed") return { speaker: "system", label: "结束", text: event.detail || "通话已正常结束。" };
   if (event.type === "call_disconnected") return { speaker: "system", label: "结束", text: "电话已结束。" };
   return null;
 }
@@ -595,7 +596,7 @@ function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone
       const sorted = [...list].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
       const state = liveState?.callId === callId ? liveState : null;
       const start = sorted.find((event) => event.type === "call_connected")?.at ?? sorted[0]?.at;
-      const end = [...sorted].reverse().find((event) => event.type === "call_disconnected" || event.type === "call_error")?.at;
+      const end = [...sorted].reverse().find((event) => event.type === "call_disconnected" || event.type === "call_closed" || event.type === "call_error")?.at;
       const latest = sorted[sorted.length - 1]?.at;
       const durationSeconds =
         start && (end || latest)
@@ -1615,6 +1616,8 @@ function realtimeLiveEventTitle(type: string) {
   if (type === "omni_no_audio_response") return "无音频兜底";
   if (type === "omni_unavailable") return "实时模型断开";
   if (type === "call_disconnected") return "电话结束";
+  if (type === "call_closed") return "正常结束";
+  if (type === "call_learning_summary") return "通话复盘";
   return type;
 }
 
