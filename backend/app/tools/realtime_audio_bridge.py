@@ -1806,15 +1806,22 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 mode="omni",
             )
             self._start_startup_keepalive()
-            circuit_reason = omni_route_unavailable_reason()
-            if circuit_reason:
-                self._enable_omni_pipeline_fallback("omni_circuit_open", RuntimeError(circuit_reason))
+            requested_route = self._context_conversation_route()
+            if requested_route == "pipeline":
+                self._enable_omni_pipeline_fallback(
+                    "requested_pipeline_route",
+                    RuntimeError("本通电话在前端选择稳定分段语音 Pipeline。"),
+                )
             else:
-                try:
-                    self._start_omni()
-                except Exception as exc:  # noqa: BLE001
-                    mark_omni_route_unavailable(str(exc))
-                    self._enable_omni_pipeline_fallback("omni_start", exc)
+                circuit_reason = omni_route_unavailable_reason()
+                if circuit_reason:
+                    self._enable_omni_pipeline_fallback("omni_circuit_open", RuntimeError(circuit_reason))
+                else:
+                    try:
+                        self._start_omni()
+                    except Exception as exc:  # noqa: BLE001
+                        mark_omni_route_unavailable(str(exc))
+                        self._enable_omni_pipeline_fallback("omni_start", exc)
             self._start_omni_sidecar_asr()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
@@ -1884,13 +1891,27 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             error=str(exc),
             mode="omni",
             fallbackMode="pipeline",
-            detail="Omni 实时连接启动失败，本通电话自动降级到本地 ASR+LLM+TTS pipeline，避免接通后直接挂断。",
+            detail=(
+                "本通电话前端选择稳定分段语音 Pipeline，当前 Omni bridge 已按单通话切到本地 ASR+LLM+TTS pipeline。"
+                if source == "requested_pipeline_route"
+                else "Omni 实时连接启动失败，本通电话自动降级到本地 ASR+LLM+TTS pipeline，避免接通后直接挂断。"
+            ),
         )
         try:
             if not self._turn_thread.is_alive():
                 self._turn_thread.start()
         except RuntimeError:
             pass
+
+    def _context_conversation_route(self) -> str:
+        value = str(
+            self._call_context.get("effectiveRoute")
+            or self._call_context.get("requestedRoute")
+            or ""
+        ).strip().lower()
+        if value in {"pipeline", "omni"}:
+            return value
+        return ""
 
     def _is_omni_pipeline_fallback(self) -> bool:
         with self._omni_lock:

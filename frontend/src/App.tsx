@@ -2290,16 +2290,24 @@ function App() {
   const activeRealtimeVoiceOption = realtimeVoiceOptions.find((option) => option.key === realtimeForm.voiceChoice) ?? realtimeVoiceOptions[0];
   const backendActiveRealtimeRoute = realtimePipeline.routeOptions.find((option) => option.isActive);
   const realCallRouteOptions = realtimePipeline.routeOptions.filter((option) => option.readyForAsteriskMedia);
+  const formRealtimeRoute = realtimePipeline.routeOptions.find((option) => option.key === realtimeForm.conversationRoute);
+  const selectedRealCallRoute =
+    realCallRouteOptions.find((option) => option.key === realtimeForm.conversationRoute) ??
+    realCallRouteOptions.find((option) => option.key === backendActiveRealtimeRoute?.key) ??
+    realCallRouteOptions[0] ??
+    null;
   const activeRealtimeRoute =
+    selectedRealCallRoute ??
+    formRealtimeRoute ??
     backendActiveRealtimeRoute ??
-    realtimePipeline.routeOptions.find((option) => option.key === realtimeForm.conversationRoute) ??
     fallbackRealtimePipeline.routeOptions[0];
-  const selectedRealCallRoute = realCallRouteOptions.find((option) => option.key === activeRealtimeRoute.key) ?? realCallRouteOptions[0] ?? null;
+  const formRouteReadyForRealCall = realCallRouteOptions.some((option) => option.key === realtimeForm.conversationRoute);
   useEffect(() => {
     if (!backendActiveRealtimeRoute || realtimeSession) return;
+    if (formRouteReadyForRealCall) return;
     if (backendActiveRealtimeRoute.key === realtimeForm.conversationRoute) return;
     setRealtimeForm((current) => ({ ...current, conversationRoute: backendActiveRealtimeRoute.key }));
-  }, [backendActiveRealtimeRoute, realtimeForm.conversationRoute, realtimeSession]);
+  }, [backendActiveRealtimeRoute, formRouteReadyForRealCall, realtimeForm.conversationRoute, realtimeSession]);
   useEffect(() => {
     if (!telephonyConfirmedByRealtime) return;
     setTelephonyMessage("真人实时对话已确认，继续观察通话质量。");
@@ -6767,7 +6775,7 @@ function App() {
                     </div>
                   )}
                   <small>
-                    当前使用：{selectedRealCallRoute?.label ?? activeRealtimeRoute.label}
+                    本次选择：{selectedRealCallRoute?.label ?? activeRealtimeRoute.label}
                     {realtimePipeline.routeMatched ? "" : "；两者不一致，需重启 bridge 后再测。"}
                   </small>
                 </label>
@@ -6806,7 +6814,7 @@ function App() {
                       <small>
                         请求路线：{telephonyTestResult.requestedRoute}；实际 bridge：{telephonyTestResult.actualBridgeRoute}
                         ；本次执行：{telephonyTestResult.effectiveRoute || telephonyTestResult.requestedRoute}
-                        {telephonyTestResult.routeMatched ? "；路线一致" : "；路线不一致"}
+                        {telephonyTestResult.routeMatched ? "；路线可承接" : "；路线不可承接"}
                       </small>
                       {telephonyTestResult.routeFallbackReason && <small>路线降级：{telephonyTestResult.routeFallbackReason}</small>}
                       {telephonyTestResult.bridgeError && <small>实时语音桥错误：{telephonyTestResult.bridgeError}</small>}

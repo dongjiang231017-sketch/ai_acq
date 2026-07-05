@@ -178,6 +178,8 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
     runtime_config = get_runtime_ai_config()
     llm_ready = deepseek_configured()
     dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
+    omni_bridge_ready = bridge_ready and current_route == "omni"
+    pipeline_bridge_ready = bridge_ready and current_route in {"pipeline", "omni"}
     return [
         {
             "key": "omni",
@@ -186,17 +188,17 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
             "summary": "端到端实时语音模型，直接听语音并直接说话，适合追求自然衔接和低延迟的正式拨测。",
             "estimatedLatencyMs": _route_latency("omni"),
             "estimatedAiCostPerMinute": _route_cost("omni"),
-            "readyForAsteriskMedia": bridge_ready and dashscope_ready and current_route == "omni",
+            "readyForAsteriskMedia": omni_bridge_ready and dashscope_ready,
             "isActive": current_route == "omni",
         },
         {
             "key": "pipeline",
             "label": "稳定分段语音 Pipeline",
             "mode": "half_duplex_interruptible",
-            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行，适合在实时模型不可用时保持真实电话不断线。",
+            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行；当前 Omni bridge 可按单通话切到这条稳定路线做对照测试。",
             "estimatedLatencyMs": _route_latency("pipeline", llm_ready),
             "estimatedAiCostPerMinute": _route_cost("pipeline"),
-            "readyForAsteriskMedia": bridge_ready and current_route == "pipeline",
+            "readyForAsteriskMedia": pipeline_bridge_ready,
             "isActive": current_route == "pipeline",
         },
     ]
@@ -210,7 +212,11 @@ def build_realtime_pipeline() -> dict[str, object]:
     configured_route = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
     actual_bridge_route = active_bridge_conversation_route()
     conversation_mode = actual_bridge_route or configured_route
-    route_matched = not actual_bridge_route or actual_bridge_route == configured_route
+    route_matched = (
+        not actual_bridge_route
+        or actual_bridge_route == configured_route
+        or (actual_bridge_route == "omni" and configured_route == "pipeline")
+    )
     if conversation_mode == "omni":
         dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
         steps = [

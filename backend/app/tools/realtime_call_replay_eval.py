@@ -4,6 +4,7 @@ import argparse
 import json
 from dataclasses import dataclass, field
 
+from app.services import realtime_outbound
 from app.services.realtime_answer_classifier import CallAnswerType, classify_answer_text
 from app.services.realtime_call_state import reduce_realtime_call_events
 from app.services.realtime_sales_brain import score_realtime_events
@@ -39,10 +40,13 @@ class ReplayCase:
 
 def evaluate_replay_cases() -> dict[str, object]:
     results = [_evaluate_case(case) for case in _replay_cases()]
+    route_selection_results = _evaluate_route_selection_cases()
     return {
         "caseCount": len(results),
-        "passed": all(result["passed"] for result in results),
+        "routeSelectionCaseCount": len(route_selection_results),
+        "passed": all(result["passed"] for result in results) and all(result["passed"] for result in route_selection_results),
         "results": results,
+        "routeSelectionResults": route_selection_results,
     }
 
 
@@ -106,6 +110,25 @@ def _evaluate_asr_check(check: ReplayAsrCheck) -> list[str]:
     if check.expected_tail_contains and check.expected_tail_contains not in tail:
         issues.append(f"tail_missing:{check.expected_tail_contains} tail:{tail}")
     return issues
+
+
+def _evaluate_route_selection_cases() -> list[dict[str, object]]:
+    issues: list[str] = []
+    route_options = realtime_outbound._conversation_route_options("omni", bridge_ready=True)
+    option_by_key = {str(option.get("key")): option for option in route_options}
+    pipeline_option = option_by_key.get("pipeline")
+    if not pipeline_option:
+        issues.append("missing_pipeline_option")
+    elif not pipeline_option.get("readyForAsteriskMedia"):
+        issues.append("pipeline_not_ready_on_omni_bridge")
+    return [
+        {
+            "name": "omni_bridge_exposes_pipeline_for_single_call_ab_test",
+            "passed": not issues,
+            "issues": issues,
+            "options": route_options,
+        }
+    ]
 
 
 def _replay_cases() -> list[ReplayCase]:
@@ -539,8 +562,15 @@ def main() -> None:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(f"replayCases={report['caseCount']} passed={report['passed']}")
+        print(
+            f"replayCases={report['caseCount']} routeSelectionCases={report.get('routeSelectionCaseCount', 0)} "
+            f"passed={report['passed']}"
+        )
         for item in report["results"]:
+            if item["passed"]:
+                continue
+            print(f"- {item['name']}: {','.join(item['issues'])}")
+        for item in report.get("routeSelectionResults", []):
             if item["passed"]:
                 continue
             print(f"- {item['name']}: {','.join(item['issues'])}")

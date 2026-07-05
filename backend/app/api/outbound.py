@@ -162,15 +162,13 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
     route_probe = prepare_realtime_route_for_call(requested_route)
     effective_route = route_probe.effective_route
     route_fallback_reason = route_probe.route_fallback_reason
-    route_matched = requested_route == actual_bridge_route or (
-        requested_route == "omni" and effective_route == "pipeline" and actual_bridge_route == "omni"
-    )
+    route_matched = requested_route == actual_bridge_route or (actual_bridge_route == "omni" and effective_route == "pipeline")
     if not route_matched:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"本次选择的是 {requested_route} 路线，但当前真实 AudioSocket bridge 正在运行 {actual_bridge_route}。"
-                f"请先把 bridge 重启为 {requested_route}，否则这通电话不会走你选择的路线。"
+                "请先把 bridge 重启到可承接该路线的模式，否则这通电话不会走你选择的路线。"
             ),
         )
     register_realtime_test_call_context(
