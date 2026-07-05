@@ -1785,6 +1785,55 @@ button:disabled {
   gap: 10px;
 }
 
+.realtime-state-board {
+  border: 1px solid #dfe9f6;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.realtime-state-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.state-chip {
+  min-height: 54px;
+  border: 1px solid #e5edf7;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px;
+  display: grid;
+  gap: 5px;
+  align-content: start;
+}
+
+.state-chip strong {
+  color: #26364d;
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.state-issues {
+  display: grid;
+  gap: 6px;
+}
+
+.state-issues span {
+  border-radius: 8px;
+  background: #fff5e6;
+  color: #7a4c08;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.45;
+  padding: 7px 9px;
+}
+
 .realtime-score-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3998,6 +4047,7 @@ button:disabled {
 
   .realtime-pipeline-summary,
   .realtime-pipeline-steps,
+  .realtime-state-grid,
   .realtime-score-board,
   .realtime-score-grid,
   .realtime-event-list,
@@ -4142,6 +4192,7 @@ button:disabled {
   .intercept-summary,
   .realtime-pipeline-summary,
   .realtime-pipeline-steps,
+  .realtime-state-grid,
   .realtime-score-board,
   .realtime-score-grid,
   .realtime-event-list,

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.core.config import settings
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
+from app.services.realtime_call_state import summarize_realtime_call_state
 from app.services.realtime_sales_brain import score_realtime_events
 from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.voice_gateway_profiles import voice_gateway_label
@@ -419,6 +420,7 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
             "hasEvents": False,
             "latestAt": None,
             "score": None,
+            "state": None,
             "events": [],
         }
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -439,6 +441,7 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
         "hasEvents": bool(events),
         "latestAt": events[-1]["at"] if events else None,
         "score": score_realtime_events(events),
+        "state": summarize_realtime_call_state(events),
         "events": events,
     }
 

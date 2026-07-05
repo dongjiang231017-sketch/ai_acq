@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.services.realtime_call_state import latest_realtime_call_events, reduce_realtime_call_events
+
 
 @dataclass(frozen=True)
 class SalesTurnPlan:
@@ -204,16 +206,17 @@ def build_omni_sales_instruction(
 
 
 def score_realtime_events(events: list[dict[str, object]]) -> dict[str, object] | None:
-    call_events = _latest_call_events(events)
+    call_events = latest_realtime_call_events(events)
     if not call_events:
         return None
+    call_state = reduce_realtime_call_events(call_events)
     metrics = [
         _metric_answer_detection(call_events),
         _metric_latency(call_events),
-        _metric_turn_taking(call_events),
+        _metric_turn_taking(call_events, call_state.latest_turn_response_ms),
         _metric_understanding(call_events),
         _metric_naturalness(call_events),
-        _metric_stability(call_events),
+        _metric_stability(call_events, call_state.issues),
     ]
     total = int(round(sum(metric["score"] * metric["weight"] for metric in metrics) / sum(metric["weight"] for metric in metrics)))
     has_human = _has_event(call_events, "human_speech_confirmed")
@@ -435,14 +438,6 @@ def _has_any(text: str, keywords: list[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def _latest_call_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
-    call_ids = [str(event.get("callId") or "") for event in events if event.get("callId")]
-    if not call_ids:
-        return []
-    latest = call_ids[-1]
-    return [event for event in events if str(event.get("callId") or "") == latest]
-
-
 def _metric_answer_detection(events: list[dict[str, object]]) -> dict[str, object]:
     has_connected = _has_event(events, "call_connected")
     has_human = _has_event(events, "human_speech_confirmed")
@@ -461,7 +456,7 @@ def _metric_latency(events: list[dict[str, object]]) -> dict[str, object]:
     return _metric("响应延迟", score, 1.0, f"平均首音频约 {int(average)}ms")
 
 
-def _metric_turn_taking(events: list[dict[str, object]]) -> dict[str, object]:
+def _metric_turn_taking(events: list[dict[str, object]], latest_turn_response_ms: int | None = None) -> dict[str, object]:
     human_at = next((_parse_event_time(event) for event in events if event.get("type") == "human_speech_confirmed"), None)
     scored_events = [
         event
@@ -473,14 +468,20 @@ def _metric_turn_taking(events: list[dict[str, object]]) -> dict[str, object]:
         for event in scored_events
         if event.get("type") in {"barge_in", "barge_recovery_ready", "barge_turn_committed", "tts_interrupted"}
     ]
-    if not barge_events:
-        return _metric("打断恢复", 78, 0.9, "本轮没有明显打断，按基础稳定分")
+    if latest_turn_response_ms is not None:
+        latency_score = 100 if latest_turn_response_ms <= 1000 else 78 if latest_turn_response_ms <= 1500 else 45
+        if not barge_events:
+            return _metric("轮次衔接", latency_score, 1.1, f"客户说完到AI响应约 {latest_turn_response_ms}ms")
     recovered = any(
-        _has_event_after(scored_events, start_type, {"tts_start", "llm_reply", "omni_response_slow_fallback"}, within_seconds=1.2)
+        _has_event_after(scored_events, start_type, {"tts_start", "llm_reply", "omni_response_slow_fallback"}, within_seconds=1.0)
         for start_type in ("barge_recovery_ready", "barge_turn_committed", "barge_in", "tts_interrupted")
     )
+    if not barge_events:
+        return _metric("轮次衔接", 78, 0.9, "本轮没有明显打断，按基础稳定分")
     score = 92 if recovered else 48
-    return _metric("打断恢复", score, 1.1, "打断后约1秒内已重新回复" if recovered else "打断后未在1.2秒内恢复回复")
+    if latest_turn_response_ms is not None:
+        score = min(score, 100 if latest_turn_response_ms <= 1000 else 78 if latest_turn_response_ms <= 1500 else 45)
+    return _metric("打断恢复", score, 1.1, "打断后1秒内已重新回复" if recovered else "打断后未在1秒内恢复回复")
 
 
 def _metric_understanding(events: list[dict[str, object]]) -> dict[str, object]:
@@ -518,12 +519,16 @@ def _metric_naturalness(events: list[dict[str, object]]) -> dict[str, object]:
     return _metric("真人感", max(25, min(100, score)), 1.0, f"情绪承接 {emotion} 次，技术口吻 {bad} 次")
 
 
-def _metric_stability(events: list[dict[str, object]]) -> dict[str, object]:
+def _metric_stability(events: list[dict[str, object]], state_issues: list[str] | None = None) -> dict[str, object]:
     bad_types = {"omni_unavailable", "call_error", "omni_audio_append_error", "omni_response_request_error"}
     bad_count = sum(1 for event in events if event.get("type") in bad_types)
     no_audio = sum(1 for event in events if event.get("type") == "omni_no_audio_response")
-    score = max(25, 100 - bad_count * 30 - no_audio * 15)
-    return _metric("链路稳定", score, 0.9, f"异常 {bad_count} 次，无音频兜底 {no_audio} 次")
+    issue_count = len(state_issues or [])
+    score = max(25, 100 - bad_count * 30 - no_audio * 15 - issue_count * 8)
+    detail = f"异常 {bad_count} 次，无音频兜底 {no_audio} 次"
+    if state_issues:
+        detail += "；" + "；".join(state_issues[:2])
+    return _metric("链路稳定", score, 0.9, detail)
 
 
 def _metric(name: str, score: int, weight: float, detail: str) -> dict[str, object]:

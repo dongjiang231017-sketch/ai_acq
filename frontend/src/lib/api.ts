@@ -602,11 +602,37 @@ export type RealtimeLiveScore = {
   metrics: RealtimeLiveScoreMetric[];
 };
 
+export type RealtimeLiveState = {
+  callId?: string | null;
+  state: string;
+  label: string;
+  status: "active" | "closed" | "attention" | "unknown" | string;
+  closeReason?: string | null;
+  canAutoClose: boolean;
+  autoCloseScheduled: boolean;
+  humanSpeechConfirmed: boolean;
+  callScreeningDetected: boolean;
+  voicemailDetected: boolean;
+  silenceDetected: boolean;
+  noResponseDetected: boolean;
+  hangupDetected: boolean;
+  aiSpeechConfirmed: boolean;
+  customerSpeechConfirmed: boolean;
+  interruptionDetected: boolean;
+  turnTakingStatus: "pass" | "warn" | "fail" | "unknown" | string;
+  latestTurnResponseMs?: number | null;
+  lastCustomerText?: string | null;
+  lastAiReply?: string | null;
+  lastEventAt?: string | null;
+  issues: string[];
+};
+
 export type RealtimeLiveEvents = {
   logPath: string;
   hasEvents: boolean;
   latestAt?: string | null;
   score?: RealtimeLiveScore | null;
+  state?: RealtimeLiveState | null;
   events: RealtimeLiveEvent[];
 };
 

@@ -62,6 +62,7 @@ import {
   ReportOverview,
   RealtimeLiveEvent,
   RealtimeLiveEvents,
+  RealtimeLiveState,
   RealtimePipeline,
   RealtimeSession,
   RealtimeVoiceSelection,
@@ -561,7 +562,26 @@ function realtimeEventToMonitorMessage(event: RealtimeLiveEvent): MonitorMessage
   return null;
 }
 
-function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone?: string): MonitorCall[] {
+function realtimeStateTone(state?: RealtimeLiveState | null) {
+  if (!state) return "warn";
+  if (state.turnTakingStatus === "fail" || state.status === "unknown") return "fail";
+  if (state.status === "attention" || state.turnTakingStatus === "warn") return "warn";
+  if (state.state === "human" || state.state === "customer_speaking" || state.turnTakingStatus === "pass") return "pass";
+  if (state.status === "closed") return state.noResponseDetected || state.callScreeningDetected || state.voicemailDetected ? "warn" : "pass";
+  return "pass";
+}
+
+function realtimeStateOutcome(state?: RealtimeLiveState | null) {
+  if (!state) return "";
+  const parts = [state.label];
+  if (state.latestTurnResponseMs !== null && state.latestTurnResponseMs !== undefined) {
+    parts.push(`轮次 ${state.latestTurnResponseMs}ms`);
+  }
+  if (state.autoCloseScheduled && state.status !== "closed") parts.push("已启用自动关闭");
+  return parts.join(" · ");
+}
+
+function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone?: string, liveState?: RealtimeLiveState | null): MonitorCall[] {
   const grouped = new Map<string, RealtimeLiveEvent[]>();
   events.forEach((event) => {
     if (!event.callId) return;
@@ -572,6 +592,7 @@ function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone
   return Array.from(grouped.entries())
     .map(([callId, list]) => {
       const sorted = [...list].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+      const state = liveState?.callId === callId ? liveState : null;
       const start = sorted.find((event) => event.type === "call_connected")?.at ?? sorted[0]?.at;
       const end = [...sorted].reverse().find((event) => event.type === "call_disconnected" || event.type === "call_error")?.at;
       const latest = sorted[sorted.length - 1]?.at;
@@ -598,9 +619,9 @@ function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone
         aiSeat: "AI实时坐席",
         durationSeconds,
         intentLevel: asrCount > 0 ? "B" : "待识别",
-        currentNode: asrCount > 0 ? "客户已开口" : replyCount > 0 ? "AI首句已播" : "媒体桥接入",
-        outcome: error && !softClose ? error.detail || "通话媒体桥异常" : disconnected || softClose ? "电话已结束" : "通话中",
-        statusLabel: error && !softClose ? "异常" : disconnected || softClose ? "结束" : "监听",
+        currentNode: state?.label ?? (asrCount > 0 ? "客户已开口" : replyCount > 0 ? "AI首句已播" : "媒体桥接入"),
+        outcome: state ? realtimeStateOutcome(state) : error && !softClose ? error.detail || "通话媒体桥异常" : disconnected || softClose ? "电话已结束" : "通话中",
+        statusLabel: state?.label ?? (error && !softClose ? "异常" : disconnected || softClose ? "结束" : "监听"),
         latestAt: latest || start || "",
         messages,
         record: null,
@@ -1887,8 +1908,8 @@ function App() {
   );
   const allCallableSelected = callableLeadIds.length > 0 && selectedCallableLeadIds.length === callableLeadIds.length;
   const realtimeMonitorCalls = useMemo(
-    () => realtimeEventsToMonitorCalls(realtimeLiveEvents.events, telephonyTestForm.phone.trim()),
-    [realtimeLiveEvents.events, telephonyTestForm.phone],
+    () => realtimeEventsToMonitorCalls(realtimeLiveEvents.events, telephonyTestForm.phone.trim(), realtimeLiveEvents.state),
+    [realtimeLiveEvents.events, realtimeLiveEvents.state, telephonyTestForm.phone],
   );
   const recordMonitorCalls = useMemo(
     () => (liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6)).map(callRecordToMonitorCall),
@@ -4446,6 +4467,56 @@ function App() {
                 </small>
               </div>
             ))}
+          </div>
+        )}
+        {realtimeLiveEvents.state && (
+          <div className="realtime-state-board">
+            <div className="line-test-result">
+              <strong>{realtimeLiveEvents.state.label}</strong>
+              <span>{realtimeStateOutcome(realtimeLiveEvents.state)}</span>
+              <small>{realtimeLiveEvents.state.callId ? `Call ${realtimeLiveEvents.state.callId.slice(0, 8)}` : "最近真实通话"}</small>
+            </div>
+            <div className="realtime-state-grid">
+              {[
+                ["真人", realtimeLiveEvents.state.humanSpeechConfirmed],
+                ["电话助理", realtimeLiveEvents.state.callScreeningDetected],
+                ["语音信箱", realtimeLiveEvents.state.voicemailDetected],
+                ["静音", realtimeLiveEvents.state.silenceDetected],
+                ["无响应", realtimeLiveEvents.state.noResponseDetected],
+                ["挂断", realtimeLiveEvents.state.hangupDetected],
+                ["AI播报", realtimeLiveEvents.state.aiSpeechConfirmed],
+                ["客户打断", realtimeLiveEvents.state.interruptionDetected],
+              ].map(([label, enabled]) => (
+                <div className="state-chip" key={String(label)}>
+                  <span className={`line-preflight-badge is-${enabled ? "pass" : "warn"}`}>{enabled ? "已见" : "未见"}</span>
+                  <strong>{label}</strong>
+                </div>
+              ))}
+              <div className="state-chip">
+                <span className={`line-preflight-badge is-${realtimeStateTone(realtimeLiveEvents.state)}`}>
+                  {realtimeLiveEvents.state.turnTakingStatus === "pass" ? "通过" : realtimeLiveEvents.state.turnTakingStatus === "fail" ? "超时" : "观察"}
+                </span>
+                <strong>
+                  轮次
+                  {realtimeLiveEvents.state.latestTurnResponseMs !== null && realtimeLiveEvents.state.latestTurnResponseMs !== undefined
+                    ? ` ${realtimeLiveEvents.state.latestTurnResponseMs}ms`
+                    : " 待测"}
+                </strong>
+              </div>
+              <div className="state-chip">
+                <span className={`line-preflight-badge is-${realtimeLiveEvents.state.autoCloseScheduled ? "pass" : "warn"}`}>
+                  {realtimeLiveEvents.state.autoCloseScheduled ? "已启用" : "未触发"}
+                </span>
+                <strong>自动关闭</strong>
+              </div>
+            </div>
+            {realtimeLiveEvents.state.issues.length > 0 && (
+              <div className="state-issues">
+                {realtimeLiveEvents.state.issues.slice(0, 3).map((issue) => (
+                  <span key={issue}>{issue}</span>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {realtimeLiveEvents.score && (

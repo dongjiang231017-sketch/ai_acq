@@ -15,6 +15,7 @@ from app.services.realtime_sales_playbook import (
     extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
+from app.tools.realtime_call_replay_eval import evaluate_replay_cases
 
 
 @dataclass(frozen=True)
@@ -429,6 +430,15 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             else ["audio_quality_not_limiting"],
         }
     )
+    replay_report = evaluate_replay_cases()
+    for result in replay_report["results"]:
+        gates.append(
+            {
+                "text": f"replay_{result['name']}",
+                "score": 100 if result["passed"] else 35,
+                "issues": list(result["issues"]),
+            }
+        )
     return gates
 
 

@@ -381,9 +381,35 @@ class RealtimeLiveScoreRead(BaseModel):
     metrics: list[RealtimeLiveScoreMetricRead]
 
 
+class RealtimeLiveStateRead(BaseModel):
+    call_id: Annotated[str | None, Field(alias="callId")] = None
+    state: str
+    label: str
+    status: str
+    close_reason: Annotated[str | None, Field(alias="closeReason")] = None
+    can_auto_close: Annotated[bool, Field(alias="canAutoClose")]
+    auto_close_scheduled: Annotated[bool, Field(alias="autoCloseScheduled")]
+    human_speech_confirmed: Annotated[bool, Field(alias="humanSpeechConfirmed")]
+    call_screening_detected: Annotated[bool, Field(alias="callScreeningDetected")]
+    voicemail_detected: Annotated[bool, Field(alias="voicemailDetected")]
+    silence_detected: Annotated[bool, Field(alias="silenceDetected")]
+    no_response_detected: Annotated[bool, Field(alias="noResponseDetected")]
+    hangup_detected: Annotated[bool, Field(alias="hangupDetected")]
+    ai_speech_confirmed: Annotated[bool, Field(alias="aiSpeechConfirmed")]
+    customer_speech_confirmed: Annotated[bool, Field(alias="customerSpeechConfirmed")]
+    interruption_detected: Annotated[bool, Field(alias="interruptionDetected")]
+    turn_taking_status: Annotated[str, Field(alias="turnTakingStatus")]
+    latest_turn_response_ms: Annotated[int | None, Field(alias="latestTurnResponseMs")] = None
+    last_customer_text: Annotated[str | None, Field(alias="lastCustomerText")] = None
+    last_ai_reply: Annotated[str | None, Field(alias="lastAiReply")] = None
+    last_event_at: Annotated[str | None, Field(alias="lastEventAt")] = None
+    issues: list[str]
+
+
 class RealtimeLiveEventsRead(BaseModel):
     log_path: Annotated[str, Field(alias="logPath")]
     has_events: Annotated[bool, Field(alias="hasEvents")]
     latest_at: Annotated[str | None, Field(alias="latestAt")]
     score: RealtimeLiveScoreRead | None = None
+    state: RealtimeLiveStateRead | None = None
     events: list[RealtimeLiveEventRead]
