@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     realtime_audio_quality_enabled: bool = True
     realtime_answer_classification_seconds: float = 1.2
     realtime_call_screening_hangup_seconds: float = 12.0
+    realtime_no_response_hangup_seconds: float = 20.0
     cors_origins: list[str] = ["http://localhost:5173"]
     admin_username: str = "admin"
     admin_password: str = "admin123456"

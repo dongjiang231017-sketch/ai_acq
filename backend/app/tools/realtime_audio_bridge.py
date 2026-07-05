@@ -111,6 +111,7 @@ class BridgeConfig:
     audio_quality_enabled: bool = True
     answer_classification_seconds: float = 7.0
     call_screening_hangup_seconds: float = 12.0
+    no_response_hangup_seconds: float = 20.0
 
 
 class JsonlEventLogger:
@@ -345,6 +346,7 @@ class AudioSocketCallSession:
         self._call_screening_seen = False
         self._call_screening_answered = False
         self._call_screening_hangup_generation = 0
+        self._no_response_hangup_generation = 0
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
@@ -525,6 +527,8 @@ class AudioSocketCallSession:
         self._handle_answer_classification(answer_type, text="", source="audio")
 
     def handle_answer_text(self, text: str, *, is_final: bool) -> None:
+        if text.strip():
+            self._last_remote_audio_at = time.monotonic()
         classifier_text = text
         if classify_realtime_call_input(text) == "system_prompt":
             human_tail = extract_human_text_after_system_prompt(text)
@@ -655,6 +659,56 @@ class AudioSocketCallSession:
             detail="电话助理后未等到真人转接，主动结束本次通话。",
         )
         self._close_after_terminal_reply("call_screening_no_human")
+
+    def _schedule_no_response_hangup(self, reason: str) -> None:
+        if reason == "call_screening":
+            return
+        wait_seconds = max(0.0, self.config.no_response_hangup_seconds)
+        if wait_seconds <= 0:
+            return
+        self._no_response_hangup_generation += 1
+        generation = self._no_response_hangup_generation
+        baseline_remote_audio_at = self._last_remote_audio_at
+        self.logger.emit(
+            "no_response_hangup_scheduled",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            reason=reason,
+            detail="AI 说完后进入短等待；若客户没有新语音，将主动结束通话，避免长时间空等计费。",
+        )
+        threading.Thread(
+            target=self._close_if_no_response_after_speech,
+            args=(generation, wait_seconds, baseline_remote_audio_at, reason),
+            daemon=True,
+        ).start()
+
+    def _close_if_no_response_after_speech(
+        self,
+        generation: int,
+        wait_seconds: float,
+        baseline_remote_audio_at: float,
+        reason: str,
+    ) -> None:
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            if self._last_remote_audio_at > baseline_remote_audio_at:
+                return
+            time.sleep(0.2)
+        if (
+            self.stop_event.is_set()
+            or self.speaking_event.is_set()
+            or self._last_remote_audio_at > baseline_remote_audio_at
+            or generation != self._no_response_hangup_generation
+        ):
+            return
+        self.logger.emit(
+            "no_response_hangup_timeout",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            reason=reason,
+            detail="AI 说完后没有检测到客户新语音，主动结束本次通话。",
+        )
+        self._close_after_terminal_reply("no_customer_response")
 
     def _speak_opening_after_grace(self) -> None:
         grace = max(0.0, self.config.opening_grace_seconds)
@@ -1034,6 +1088,8 @@ class AudioSocketCallSession:
         )
         if close_after and not interrupted:
             self._close_after_terminal_reply("customer_rejected")
+        elif not close_after and not interrupted:
+            self._schedule_no_response_hangup(reason)
 
     def _send_audio_frame_at_cadence(
         self,
@@ -1181,6 +1237,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._call_screening_seen = False
         self._call_screening_answered = False
         self._call_screening_hangup_generation = 0
+        self._no_response_hangup_generation = 0
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
@@ -1887,6 +1944,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             firstAudioMs=first_audio_ms,
             generation=generation,
         )
+        if not interrupted:
+            self._schedule_no_response_hangup("omni_response")
 
 
 def synthesize_tts_pcm(text: str, config: BridgeConfig) -> bytes:
@@ -2079,6 +2138,7 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         audio_quality_enabled=settings.realtime_audio_quality_enabled,
         answer_classification_seconds=max(0.5, min(10.0, settings.realtime_answer_classification_seconds)),
         call_screening_hangup_seconds=max(0.0, min(45.0, settings.realtime_call_screening_hangup_seconds)),
+        no_response_hangup_seconds=max(0.0, min(90.0, settings.realtime_no_response_hangup_seconds)),
     )
 
 
@@ -2233,6 +2293,7 @@ def config_summary(config: BridgeConfig) -> dict[str, object]:
         "audioQualityEnabled": config.audio_quality_enabled,
         "answerClassificationSeconds": config.answer_classification_seconds,
         "callScreeningHangupSeconds": config.call_screening_hangup_seconds,
+        "noResponseHangupSeconds": config.no_response_hangup_seconds,
     }
 
 
