@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from app.services.realtime_call_state import latest_realtime_call_events, reduce_realtime_call_events
+from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 
 
 @dataclass(frozen=True)
@@ -28,19 +29,19 @@ class SalesBrainReply:
 
 
 EMOTION_ACKS = {
-    "busy": ["可以，我短说。", "明白，不耽误您。"],
-    "annoyed": ["明白，我不硬推。", "懂，我直接答重点。"],
+    "busy": ["我短说。", "不耽误您。"],
+    "annoyed": ["我直接答重点。", "不硬推。"],
     "skeptical": ["您这个担心正常。", "对，这点要讲清楚。"],
-    "confused": ["我换短点说。", "我重新说简单点。"],
-    "interested": ["可以，我直接说重点。", "好，那我按重点说。"],
-    "neutral": ["明白。", ""],
+    "confused": ["我换短点说。", "我说简单点。"],
+    "interested": ["可以，我说重点。", "好，那我按重点说。"],
+    "neutral": ["", ""],
 }
 
 TOPIC_ANSWERS = {
     "identity": [
-        "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
-        "我这边是本地生活服务顾问，来电是确认视频号团购到店获客和微信同城曝光。",
-        "简单说，我是做视频号团购到店获客服务的，主要确认微信同城曝光需求。",
+        "我是做视频号团购到店获客的，想看您门店有没有微信同城曝光需求。",
+        "我这边是本地生活服务顾问，主要做视频号团购和到店获客。",
+        "简单说，我是帮门店做视频号团购获客的，不是平台官方。",
     ],
     "price": [
         "这是付费服务，费用看套餐设计和投放节奏，不合适不建议做。",
@@ -57,6 +58,7 @@ TOPIC_ANSWERS = {
     "process": [
         "流程是先看品类，再设计团购套餐，接着做同城曝光测试。",
         "先判断门店适不适合，再做套餐、页面和小范围投放。",
+        "团购套餐就是客户能线上下单、到店核销的优惠套餐。",
     ],
     "materials": [
         "可以，后面发案例和流程给您，您看完再判断。",
@@ -75,12 +77,12 @@ TOPIC_ANSWERS = {
         "我短说：做团购套餐加微信同城曝光，目标是到店客。",
     ],
     "correction": [
-        "明白，是我刚才理解错了。您是想问我是谁，还是让我直接说来电目的？",
+        "是我刚才理解错了。您是想问我是谁，还是让我直接说来电目的？",
         "对，是我刚才猜错了。您刚才是问身份，还是问这通电话具体干嘛？",
     ],
     "rejection": [
         "好的，不打扰了，再见。",
-        "明白，那我不打扰了，再见。",
+        "那我不打扰了，再见。",
     ],
     "busy": [
         "那我不展开，您看今天晚点还是明天上午方便？",
@@ -111,11 +113,15 @@ def render_sales_reply(
     conversation_history: list[dict[str, str]] | None = None,
 ) -> SalesBrainReply:
     history = conversation_history or []
-    plan = plan_sales_turn(text, intent, history)
+    normalization = normalize_realtime_sales_text(text)
+    customer_text = normalization.normalized_text or text
+    plan = plan_sales_turn(customer_text, intent, history)
     last_assistant = _last_history_content(history, "assistant")
     answers = TOPIC_ANSWERS.get(plan.topic) or []
-    answer = _choose_variant(answers, text, last_assistant) if answers else fallback_reply
-    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    answer = _choose_variant(answers, customer_text, last_assistant) if answers else fallback_reply
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", customer_text.lower())
+    if normalization.has_fix("group_buying_package"):
+        answer = "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
     if plan.topic == "identity" and _recently_answered_identity(history):
         answer = "简单说，我是做视频号团购到店获客服务的，主要确认微信同城曝光需求。"
     if plan.topic == "identity" and compact in {"喂", "喂喂", "你好", "您好"}:
@@ -129,7 +135,7 @@ def render_sales_reply(
             if _recently_answered_identity(history)
             else "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
         )
-    ack = _choose_variant(EMOTION_ACKS.get(plan.emotion, EMOTION_ACKS["neutral"]), text + intent, last_assistant)
+    ack = _choose_variant(EMOTION_ACKS.get(plan.emotion, EMOTION_ACKS["neutral"]), customer_text + intent, last_assistant)
     if plan.direct_answer_only and plan.topic == "open_need":
         answer = "不推材料，我直接答。您问费用、效果或流程，我就按这个说。"
     if plan.direct_answer_only and plan.topic == "quality":
@@ -149,13 +155,15 @@ def render_sales_reply(
     if plan.should_advance and advance and not _push_forbidden(text, history):
         pieces.append(advance)
     reply = _polish_reply("".join(piece for piece in pieces if piece))
+    reply = _suppress_habitual_ack(reply, last_assistant, plan)
     reply = _avoid_repeat(reply, last_assistant, plan)
     return SalesBrainReply(reply=reply, strategy=f"sales_brain_{plan.topic}_{plan.emotion}", plan=plan)
 
 
 def plan_sales_turn(text: str, intent: str = "", conversation_history: list[dict[str, str]] | None = None) -> SalesTurnPlan:
     history = conversation_history or []
-    clean = " ".join(text.strip().split())
+    normalized = normalize_realtime_sales_text(text)
+    clean = normalized.normalized_text
     topic = _detect_topic(clean, intent, history)
     emotion = _detect_emotion(clean, history)
     repeat_risk = _repeat_risk(clean, history)
@@ -233,6 +241,8 @@ def score_realtime_events(events: list[dict[str, object]]) -> dict[str, object] 
 
 
 def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
+    normalized = normalize_realtime_sales_text(text)
+    text = normalized.normalized_text
     combined = " ".join([text, _last_history_content(history, "user"), _last_history_content(history, "assistant")])
     compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
     if _has_any(text, ["放个屁", "滚", "扯淡", "骗子", "神经病", "有病"]):
@@ -286,6 +296,10 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         return "correction"
     if _has_any(text, ["多少钱", "费用", "价格", "收费", "付费", "要钱", "花钱", "贵"]):
         return "price"
+    if normalized.has_fix("group_buying_package") or (
+        "团购套餐" in text and _has_any(text, ["什么意思", "什么", "怎么做", "怎么弄", "要帮我"])
+    ):
+        return "process"
     if _has_any(text, ["美团", "大众点评", "抖音团购", "小红书", "高德", "已经做", "在做团购"]):
         return "channel_difference"
     if _has_any(text, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "靠谱吗", "有用吗"]):
@@ -296,7 +310,23 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         return "guarantee"
     if _has_any(text, ["哪来的", "哪里来的", "怎么知道", "电话来源", "号码来源", "个人信息"]):
         return "source"
-    if _has_any(text, ["重复", "总说", "老说", "别重复", "不要重复", "没回答", "没解决", "不是问这个"]):
+    if _has_any(
+        text,
+        [
+            "重复",
+            "总说",
+            "老说",
+            "老是说",
+            "老是说明白",
+            "总说明白",
+            "一直说明白",
+            "别重复",
+            "不要重复",
+            "没回答",
+            "没解决",
+            "不是问这个",
+        ],
+    ):
         return _infer_previous_topic(history) or "quality"
     if _push_forbidden(text, history):
         return "open_need"
@@ -314,9 +344,30 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
 
 
 def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
+    text = normalize_realtime_sales_text(text).normalized_text
     if _has_any(text, ["忙", "没空", "开会", "不方便", "快点", "赶时间"]):
         return "busy"
-    if _has_any(text, ["别", "不要", "重复", "烦", "没解决", "没回答", "不需要", "不用", "挂了", "放个屁", "滚", "扯淡", "骗子"]):
+    if _has_any(
+        text,
+        [
+            "别",
+            "不要",
+            "重复",
+            "老是说明白",
+            "总说明白",
+            "一直说明白",
+            "烦",
+            "没解决",
+            "没回答",
+            "不需要",
+            "不用",
+            "挂了",
+            "放个屁",
+            "滚",
+            "扯淡",
+            "骗子",
+        ],
+    ):
         return "annoyed"
     if _has_any(text, ["保证", "靠谱吗", "真的假的", "有用吗", "怎么保证", "凭什么"]):
         return "skeptical"
@@ -348,12 +399,14 @@ def _customer_summary(topic: str, emotion: str) -> str:
 
 
 def _push_forbidden(text: str, history: list[dict[str, str]]) -> bool:
+    text = normalize_realtime_sales_text(text).normalized_text
     combined = " ".join([text, _last_history_content(history, "user"), _last_history_content(history, "assistant")])
     return _has_any(combined, ["不需要资料", "不用资料", "不要资料", "别发资料", "不用发资料", "不用加微信", "不加微信", "直接回答", "说重点", "别推"])
 
 
 def _repeat_risk(text: str, history: list[dict[str, str]]) -> bool:
-    if _has_any(text, ["重复", "总说", "老说", "别重复", "不要重复"]):
+    text = normalize_realtime_sales_text(text).normalized_text
+    if _has_any(text, ["重复", "总说", "老说", "老是说", "老是说明白", "总说明白", "一直说明白", "别重复", "不要重复"]):
         return True
     current = _normalize_reply(text)
     if current:
@@ -427,6 +480,19 @@ def _avoid_repeat(reply: str, last_assistant: str, plan: SalesTurnPlan) -> str:
         polished = _polish_reply(candidate)
         if _normalize_reply(polished) != _normalize_reply(last_assistant):
             return polished
+    return reply
+
+
+def _suppress_habitual_ack(reply: str, last_assistant: str, plan: SalesTurnPlan) -> str:
+    if plan.topic in {"rejection", "materials", "busy"}:
+        return reply
+    if not reply.startswith(("明白", "好的", "好，", "好。", "可以，")):
+        return reply
+    stripped = re.sub(r"^(明白|好的|好|可以)[，。,.\s]+", "", reply, count=1)
+    if len(stripped) >= 6:
+        return stripped
+    if _normalize_reply(last_assistant).startswith(("明白", "好的", "好", "可以")) and stripped:
+        return stripped
     return reply
 
 

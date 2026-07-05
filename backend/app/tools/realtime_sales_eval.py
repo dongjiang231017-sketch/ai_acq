@@ -15,6 +15,7 @@ from app.services.realtime_sales_playbook import (
     extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
+from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
 from app.tools.realtime_call_replay_eval import evaluate_replay_cases
 
 
@@ -41,10 +42,17 @@ SCENARIOS = [
     Scenario("跟抖音团购有什么区别？", "channel_difference", ("视频号", "微信", "同城", "私域")),
     Scenario("具体怎么做？", "process", ("套餐", "投放", "流程", "品类")),
     Scenario("怎么合作，流程说一下。", "process", ("套餐", "品类", "投放", "测试")),
+    Scenario(
+        "好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？",
+        "process",
+        ("不是4G", "团购套餐", "到店核销"),
+        ("美团偏搜索", "私域沉淀", "已有美团也能做补充"),
+    ),
     Scenario("不需要资料，直接回答。", "open_need", ("费用", "效果", "流程", "美团"), ("微信", "资料")),
     Scenario("不用加微信，你直接说效果。", "guarantee", ("效果", "测试", "数据", "保底"), ("加微信",)),
     Scenario("别老说发资料，和美团区别是什么？", "channel_difference", ("美团", "视频号", "微信"), ("资料", "加微信")),
     Scenario("你总是重复，能不能说重点？", "quality", ("费用", "效果", "美团", "重点"), ("资料", "加微信")),
+    Scenario("你老是说明白，能不能直接说？", "quality", ("不重复", "费用", "效果", "美团"), ("明白", "资料", "加微信")),
     Scenario("我没听清，你说什么？", "quality", ("视频号", "团购", "到店")),
     Scenario("信号断断续续，讲短点。", "quality", ("视频号", "团购", "到店")),
     Scenario("我现在很忙。", "busy", ("晚点", "稍后", "不耽误")),
@@ -69,7 +77,7 @@ SCENARIOS = [
     Scenario("你先讲重点。", "open_need", ("到店", "曝光", "客流", "费用", "效果")),
     Scenario("我们做餐饮的适合吗？", "open_need", ("餐饮", "套餐", "到店", "品类")),
     Scenario("美业能不能做？", "open_need", ("美业", "套餐", "到店", "品类")),
-    Scenario("你不要像机器人一样念稿。", "quality", ("明白", "短", "视频号", "到店"), ("系统", "模型")),
+    Scenario("你不要像机器人一样念稿。", "quality", ("短", "视频号", "到店"), ("明白", "系统", "模型")),
     Scenario("放个屁，别说了。", "rejection", ("再见", "不打扰"), ("标记", "不再跟进", "资料", "加微信")),
 ]
 
@@ -395,6 +403,59 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             and real_mixed_signal == "audio_issue"
             and real_mixed_answer_type == CallAnswerType.HUMAN
             else [f"tail:{real_mixed_tail}", f"signal:{real_mixed_signal}", f"type:{real_mixed_answer_type}"],
+        }
+    )
+    repaired = normalize_realtime_sales_text("好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？")
+    gates.append(
+        {
+            "text": "sales_asr_repairs_4g_package_to_group_buying",
+            "reply": repaired.normalized_text,
+            "score": 100 if repaired.has_fix("group_buying_package") and "团购套餐" in repaired.normalized_text else 35,
+            "issues": []
+            if repaired.has_fix("group_buying_package") and "团购套餐" in repaired.normalized_text
+            else [f"normalized:{repaired.normalized_text}", f"fixes:{','.join(repaired.fixes)}"],
+        }
+    )
+    four_g_reply = render_sales_reply(
+        "好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？",
+        "合作咨询",
+        "测试门店",
+        "先看品类，定团购套餐，小范围测试。",
+        [],
+    ).reply
+    gates.append(
+        {
+            "text": "sales_reply_corrects_4g_package_mishearing",
+            "reply": four_g_reply,
+            "score": 100
+            if "不是4G" in four_g_reply and "团购套餐" in four_g_reply and "美团偏搜索" not in four_g_reply
+            else 35,
+            "issues": []
+            if "不是4G" in four_g_reply and "团购套餐" in four_g_reply and "美团偏搜索" not in four_g_reply
+            else ["four_g_not_corrected"],
+        }
+    )
+    gates.append(
+        {
+            "text": "incomplete_asr_partial_waits_for_more_words",
+            "score": 100 if has_incomplete_realtime_partial("好，如果我有需") else 35,
+            "issues": [] if has_incomplete_realtime_partial("好，如果我有需") else ["partial_not_marked_incomplete"],
+        }
+    )
+    ack_history = [{"role": "assistant", "content": "明白。美团偏搜索下单，视频号偏微信同城推荐。"}]
+    ack_reply = render_sales_reply(
+        "你老是说明白，能不能直接说？",
+        "听不清/澄清",
+        "测试门店",
+        "我换短点说：视频号团购就是帮门店到店获客。",
+        ack_history,
+    ).reply
+    gates.append(
+        {
+            "text": "sales_reply_suppresses_habitual_mingbai",
+            "reply": ack_reply,
+            "score": 100 if not ack_reply.startswith("明白") and "明白" not in ack_reply else 35,
+            "issues": [] if not ack_reply.startswith("明白") and "明白" not in ack_reply else ["habitual_ack"],
         }
     )
     human_classifier = AnswerClassifier()

@@ -41,6 +41,7 @@ from app.services.realtime_sales_playbook import (
     extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
+from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
 from app.services.runtime_ai_config import get_runtime_ai_config
 
 
@@ -123,6 +124,8 @@ def _compact_customer_text(text: str) -> str:
 def should_commit_stable_asr_partial(text: str) -> bool:
     compact = _compact_customer_text(text)
     if len(compact) < 2:
+        return False
+    if has_incomplete_realtime_partial(text):
         return False
     signal = classify_realtime_call_input(text)
     if signal in {"empty", "system_prompt"}:
@@ -1030,13 +1033,24 @@ class AudioSocketCallSession:
                 continue
             if not self._human_speech_confirmed:
                 self._confirm_human_speech(text, detail="已识别到真人客户语音，可以进入实时对话。")
-            intent, node = _classify_intent(text)
-            stage = self._sales_fsm.update(text, intent, signal)
+            normalization = normalize_realtime_sales_text(text)
+            routed_text = normalization.normalized_text
+            if normalization.changed:
+                self.logger.emit(
+                    "asr_sales_text_normalized",
+                    callId=self.call_id,
+                    text=text,
+                    normalizedText=routed_text,
+                    fixes=list(normalization.fixes),
+                    detail="ASR 文本进入销售脑前已做高置信语境纠错，原始转写仍保留在 ASR 事件中。",
+                )
+            intent, node = _classify_intent(routed_text)
+            stage = self._sales_fsm.update(routed_text, intent, signal)
             stage_instruction = self._sales_fsm.get_stage_instruction()
             if intent == "系统提示":
                 self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
                 continue
-            turn_count, fallback_reply = self._reply_for_turn(text, intent)
+            turn_count, fallback_reply = self._reply_for_turn(routed_text, intent)
             history_snapshot = list(self._conversation_history)
             reply_result = generate_realtime_reply(
                 text,
@@ -1651,8 +1665,20 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 detail="识别到运营商或手机系统提示，已忽略，不触发销售回复。",
             )
             return
-        intent, _node = _classify_intent(clean)
-        stage = self._sales_fsm.update(clean, intent, signal)
+        normalization = normalize_realtime_sales_text(clean)
+        routed_clean = normalization.normalized_text
+        if normalization.changed:
+            self.logger.emit(
+                "asr_sales_text_normalized",
+                callId=self.call_id,
+                text=clean,
+                normalizedText=routed_clean,
+                provider="qwen_omni",
+                fixes=list(normalization.fixes),
+                detail="Omni 转写进入销售脑前已做高置信语境纠错，原始转写仍保留在 ASR 事件中。",
+            )
+        intent, _node = _classify_intent(routed_clean)
+        stage = self._sales_fsm.update(routed_clean, intent, signal)
         stage_instruction = self._sales_fsm.get_stage_instruction()
         if signal in {"terminal_close", "rejection"}:
             if self._omni:
@@ -1915,7 +1941,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
 
     def _local_omni_timeout_reply(self, pending_text: str, pending_signal: str) -> str:
         signal = (pending_signal or "").strip()
-        text = (pending_text or "").strip()
+        normalization = normalize_realtime_sales_text(pending_text or "")
+        text = normalization.normalized_text
         if signal == "call_screening":
             return "您好，我这边做视频号团购到店获客，来电想确认门店微信同城曝光合作，麻烦转接负责人，谢谢。"
         if signal in {"identity_handoff", "human_greeting"}:
@@ -1923,11 +1950,13 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if signal == "audio_issue":
             return "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
         if signal == "repetition_complaint":
-            return "明白，我不重复。您想听费用、效果，还是和美团区别？"
+            return "我不重复。您想听费用、效果，还是和美团区别？"
         if signal == "direct_answer_only":
-            return "明白，不推资料。您直接问费用、效果或流程，我按问题答。"
+            return "不推资料。您直接问费用、效果或流程，我按问题答。"
         if signal in {"terminal_close", "rejection"}:
             return "好的，不打扰了，再见。"
+        if normalization.has_fix("group_buying_package"):
+            return "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
         if any(keyword in text for keyword in ["费用", "价格", "收费", "要钱", "付费"]):
             return "这是付费服务，费用看套餐和投放节奏，不合适不建议做。"
         if any(keyword in text for keyword in ["美团", "抖音", "大众点评"]):

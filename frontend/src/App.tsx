@@ -1599,6 +1599,7 @@ function realtimeLiveEventTitle(type: string) {
   if (type === "audio_capture_started") return "开始录音证据";
   if (type === "audio_capture_saved") return "录音证据已保存";
   if (type === "asr_final") return "客户语音";
+  if (type === "asr_sales_text_normalized") return "ASR语境纠错";
   if (type === "asr_partial_stable") return "客户语音稳定";
   if (type === "no_response_hangup_cancelled") return "取消空等挂断";
   if (type === "llm_reply") return "AI 回复";

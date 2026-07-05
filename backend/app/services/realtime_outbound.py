@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
 from app.services.realtime_call_state import summarize_realtime_call_state
 from app.services.realtime_sales_brain import score_realtime_events
+from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.voice_gateway_profiles import voice_gateway_label
 
@@ -346,16 +347,27 @@ def handle_customer_utterance(session_id: str, text: str, barge_in: bool = True)
         interrupted = _interrupt_session(session, "客户插话，停止当前 TTS 播放队列。")
 
     clean_text = " ".join(text.strip().split())
+    normalization = normalize_realtime_sales_text(clean_text)
+    routed_text = normalization.normalized_text
     session.status = "thinking"
     session.add_event("customer_audio", "customer", "received", clean_text, "模拟媒体入口收到客户语音。")
     session.add_event("asr_final", "asr", "final", clean_text, "Paraformer 实时识别最终文本。", latency_ms=380)
+    if normalization.changed:
+        session.add_event(
+            "asr_sales_text_normalized",
+            "router",
+            "matched",
+            routed_text,
+            f"销售语境纠错：{normalization.raw_text} -> {routed_text}",
+            latency_ms=0,
+        )
 
-    intent, node = _classify_intent(clean_text)
+    intent, node = _classify_intent(routed_text)
     session.current_intent = intent
     session.current_node = node
     session.add_event("intent", "router", "matched", intent, f"路由到话术节点：{node}。", latency_ms=50)
 
-    fallback_reply = _build_reply(clean_text, intent, session.merchant_name)
+    fallback_reply = _build_reply(routed_text, intent, session.merchant_name)
     reply_result = generate_realtime_reply(
         clean_text,
         intent,
@@ -482,7 +494,8 @@ def _optional_text(value: object) -> str | None:
 
 
 def _classify_intent(text: str) -> tuple[str, str]:
-    clean = text.strip()
+    normalization = normalize_realtime_sales_text(text)
+    clean = normalization.normalized_text
     lower = clean.lower()
     compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
     system_prompt_keywords = [
@@ -585,6 +598,10 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "一直重复",
         "总是重复",
         "老说",
+        "老是说",
+        "老是说明白",
+        "总说明白",
+        "一直说明白",
     ]
     if any(keyword in clean for keyword in style_or_repeat_complaint_keywords):
         return "听不清/澄清", "体验修复"
@@ -710,6 +727,10 @@ def _classify_intent(text: str) -> tuple[str, str]:
     ]
     if any(keyword in clean for keyword in owner_keywords):
         return "找负责人", "转接负责人"
+    if normalization.has_fix("group_buying_package") or (
+        "团购套餐" in clean and any(keyword in clean for keyword in ["什么意思", "什么", "怎么做", "要帮我"])
+    ):
+        return "合作咨询", "套餐解释"
     existing_channel_keywords = [
         "已经做",
         "在做",
@@ -808,6 +829,10 @@ def _classify_intent(text: str) -> tuple[str, str]:
 
 
 def _build_reply(text: str, intent: str, merchant_name: str) -> str:
+    normalization = normalize_realtime_sales_text(text)
+    text = normalization.normalized_text
+    if normalization.has_fix("group_buying_package"):
+        return "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
     replies = {
         "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
         "明确拒绝": "好的，不打扰了，再见。",
