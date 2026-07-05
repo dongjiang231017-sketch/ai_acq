@@ -206,7 +206,7 @@ def should_commit_stable_asr_partial(text: str) -> bool:
         return True
     if any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
         return True
-    return len(compact) >= ASR_PARTIAL_MIN_COMPACT_CHARS
+    return False
 
 
 def _asr_partial_stable_delay_seconds(text: str) -> float:
@@ -336,17 +336,24 @@ class CallRecognitionCallback(RecognitionCallback):
         text = str(sentence.get("text") or "").strip()
         is_final = RecognitionResult.is_sentence_end(sentence)
         if text and text != self.last_text:
+            event_text = text
+            normalization = normalize_realtime_sales_text(text) if is_final else None
+            if normalization and normalization.changed and normalization.normalized_text:
+                event_text = normalization.normalized_text
             self.call.customer_activity_event.set()
-            self.call.logger.emit(
-                "asr_final" if is_final else "asr_partial",
-                callId=self.call.call_id,
-                text=text,
-                beginMs=sentence.get("begin_time"),
-                endMs=sentence.get("end_time"),
-            )
+            asr_fields: dict[str, Any] = {
+                "callId": self.call.call_id,
+                "text": event_text,
+                "beginMs": sentence.get("begin_time"),
+                "endMs": sentence.get("end_time"),
+            }
+            if normalization and normalization.changed:
+                asr_fields["rawText"] = text
+                asr_fields["fixes"] = list(normalization.fixes)
+            self.call.logger.emit("asr_final" if is_final else "asr_partial", **asr_fields)
             self.call.handle_answer_text(text, is_final=is_final)
             if is_final:
-                self.call.commit_asr_final_text(text)
+                self.call.commit_asr_final_text(event_text)
             else:
                 self.call.note_asr_partial_text(text)
             self.last_text = text

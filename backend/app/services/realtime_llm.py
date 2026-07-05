@@ -50,6 +50,7 @@ _CONTEXT_LOCAL_FIRST_INTENTS = {
     "身份确认",
     "听不清/澄清",
     "合作咨询",
+    "需求探索",
     "效果询问",
     "找负责人",
     "已有渠道",
@@ -435,6 +436,12 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
     ):
         return DialogueSignal("process", direct_question=True, from_context_repair=normalization.changed)
 
+    if _has_any(clean, ["我都说了", "刚说了", "刚才说了", "不是说了", "都说了"]) and _has_any(
+        clean,
+        ["新客到店", "到店客", "到店", "客流", "获客", "新客"],
+    ):
+        return DialogueSignal("need_confirmed", direct_question=True)
+
     if _has_any(last_assistant, ["更关心到店客流", "还是怎么合作", "效果，还是费用"]) and _has_any(
         clean,
         ["到店", "客流", "引流", "获客"],
@@ -467,6 +474,10 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
             "具体讲",
             "详细讲",
             "详细讲解",
+            "详细说",
+            "说详细",
+            "细说",
+            "展开说",
             "讲解一下",
         ],
     ):
@@ -507,6 +518,7 @@ def _should_answer_locally_first(signal: DialogueSignal) -> bool:
         "context_repair",
         "repetition_complaint",
         "direct_answer_only",
+        "need_confirmed",
     }
 
 

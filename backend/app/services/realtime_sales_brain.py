@@ -66,6 +66,10 @@ TOPIC_ANSWERS = {
         "先判断门店适不适合，再做团购套餐和页面，小范围投放看数据。",
         "团购套餐就是客户能线上下单、到店核销的优惠套餐。",
     ],
+    "need_confirmed": [
+        "对，您刚才说的是新客到店。那就按到店目标走：先做团购套餐和同城曝光，小范围测到店数据。",
+        "明白，您的重点是新客到店。后面就围绕到店客流做套餐、曝光和核销数据，不再反复问需求。",
+    ],
     "visibility": [
         "客户不一定主动搜索；视频号有同城推荐和团购券入口，视频只是曝光承载。",
         "需要一点视频内容承载，同时走同城推荐和团购券入口；不是天天拍大片。",
@@ -112,6 +116,7 @@ ADVANCE_LINES = {
     "channel_difference": "已有美团也能做补充，不冲突。",
     "advantage": "如果您已有美团，就把视频号当补充测试，不替代原渠道。",
     "process": "如果品类合适，再看套餐怎么设计。",
+    "need_confirmed": "",
     "visibility": "",
     "quality": "您更想听费用、效果，还是和美团区别？",
     "open_need": "",
@@ -193,6 +198,7 @@ def plan_sales_turn(text: str, intent: str = "", conversation_history: list[dict
         "identity",
         "correction",
         "visibility",
+        "need_confirmed",
     } and not direct_answer_only
     if emotion in {"annoyed", "busy", "confused"}:
         should_advance = should_advance and topic == "open_need"
@@ -326,13 +332,15 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         return "process"
     if _is_visibility_or_video_question(text):
         return "visibility"
+    if _is_need_already_answered(text):
+        return "need_confirmed"
     if _has_any(text, ["优势", "为什么要用", "为什么用", "凭什么", "比美团", "美团来讲"]):
         return "advantage"
     if _has_any(text, ["美团", "大众点评", "抖音团购", "小红书", "高德", "已经做", "在做团购"]):
         return "channel_difference"
     if _has_any(text, ["保证", "承诺", "保底", "效果", "客流", "到店", "曝光", "转化", "靠谱吗", "有用吗"]):
         return "guarantee"
-    if _has_any(text, ["怎么做", "怎么合作", "流程", "怎么弄", "具体讲", "详细讲", "介绍一下"]):
+    if _has_any(text, ["怎么做", "怎么合作", "流程", "怎么弄", "具体讲", "详细讲", "详细说", "说详细", "细说", "展开说", "介绍一下"]):
         return "process"
     if _has_any(text, ["多少单", "带来多少", "能带多少", "能来多少"]):
         return "guarantee"
@@ -395,6 +403,15 @@ def _is_visibility_or_video_question(text: str) -> bool:
     return has_question and (_has_any(compact, visibility_markers) or _has_any(compact, video_markers))
 
 
+def _is_need_already_answered(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if not compact:
+        return False
+    has_answered_marker = _has_any(compact, ["我都说了", "刚说了", "刚才说了", "不是说了", "都说了"])
+    has_need_marker = _has_any(compact, ["新客到店", "到店客", "到店客流", "客流", "获客", "新客"])
+    return has_answered_marker and has_need_marker
+
+
 def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
     text = normalize_realtime_sales_text(text).normalized_text
     if _has_any(text, ["忙", "没空", "开会", "不方便", "快点", "赶时间"]):
@@ -411,6 +428,9 @@ def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
             "烦",
             "没解决",
             "没回答",
+            "我都说了",
+            "刚说了",
+            "不是说了",
             "不需要",
             "不用",
             "挂了",
@@ -437,7 +457,7 @@ def _detect_stage(topic: str, intent: str, history: list[dict[str, str]]) -> str
         return "opening_repair"
     if topic in {"price", "guarantee", "channel_difference", "advantage", "source", "visibility"}:
         return "objection_handling"
-    if topic in {"process", "open_need"}:
+    if topic in {"process", "open_need", "need_confirmed"}:
         return "discovery"
     if topic in {"materials", "owner"}:
         return "next_step"

@@ -314,6 +314,31 @@ def _replay_cases() -> list[ReplayCase]:
             max_turn_response_ms=1000,
         ),
         ReplayCase(
+            name="cumulative_need_partial_waits_for_final_need_confirmed",
+            note="来自 2026-07-05 实测：同一 ASR 分段反复带出旧前缀“你需求什么”时，不应按多轮客户发言重复追问。",
+            events=[
+                _event("call_connected", "needpartial", "2026-07-05T06:18:35.000Z"),
+                _event("human_speech_confirmed", "needpartial", "2026-07-05T06:18:36.000Z", text="你需求什么？"),
+                _event("asr_partial", "needpartial", "2026-07-05T06:18:41.946Z", text="你需求什么？"),
+                _event("asr_partial", "needpartial", "2026-07-05T06:18:52.047Z", text="你需求什么？你什么新客？"),
+                _event("asr_partial", "needpartial", "2026-07-05T06:19:01.725Z", text="你需求什么？你什么新客到店我都说了"),
+                _event("asr_final", "needpartial", "2026-07-05T06:19:02.000Z", text="新客到店我都说了。"),
+                _event(
+                    "llm_reply",
+                    "needpartial",
+                    "2026-07-05T06:19:02.560Z",
+                    reply="对，您刚才说的是新客到店。那就按到店目标走：先做团购套餐和同城曝光，小范围测到店数据。",
+                ),
+                _event("tts_start", "needpartial", "2026-07-05T06:19:02.780Z", raw={"sentBytes": 800, "firstAudioMs": 420}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("humanSpeechConfirmed", "customerSpeechConfirmed", "aiSpeechConfirmed"),
+            expected_last_customer_contains="新客到店",
+            expected_last_ai_contains="按到店目标",
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+        ),
+        ReplayCase(
             name="turn_taking_fast_after_customer_final",
             events=[
                 _event("call_connected", "turnfast", "2026-07-05T02:00:00.000Z"),

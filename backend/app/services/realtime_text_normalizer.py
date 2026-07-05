@@ -29,6 +29,7 @@ def normalize_realtime_sales_text(text: str) -> RealtimeTextNormalization:
     normalized = _dedupe_incremental_asr(normalized, fixes)
     normalized = _repair_group_buying_terms(normalized, fixes)
     normalized = _repair_video_account_terms(normalized, fixes)
+    normalized = _repair_repeated_need_question_artifact(normalized, fixes)
     normalized = _repair_common_question_fragments(normalized, fixes)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return RealtimeTextNormalization(raw, normalized, tuple(dict.fromkeys(fixes)))
@@ -106,6 +107,23 @@ def _repair_video_account_terms(text: str, fixes: list[str]) -> str:
         text = text.replace("视屏号", "视频号").replace("是频号", "视频号")
     if text != before:
         fixes.append("video_account_term")
+    return text
+
+
+def _repair_repeated_need_question_artifact(text: str, fixes: list[str]) -> str:
+    before = text
+    compact = _compact(text)
+    local_life_need_answer = any(marker in compact for marker in ("新客到店", "新课到店", "客流", "获客", "到店"))
+    repeated_prefix = compact.startswith("你需求什么") and any(marker in compact for marker in ("我都说了", "刚说了", "不是说了", "新客", "新课"))
+    if not (local_life_need_answer and repeated_prefix):
+        return text
+
+    text = re.sub(r"^你需求什么[？?，,。；;\s]*", "", text).strip()
+    text = re.sub(r"^你什么(?=新客|新课|到店)", "", text).strip()
+    text = re.sub(r"新课(?=到店)", "新客", text)
+    text = re.sub(r"新课$", "新客", text)
+    if text != before:
+        fixes.append("repeated_need_question_asr_artifact")
     return text
 
 

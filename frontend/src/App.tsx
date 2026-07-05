@@ -606,9 +606,12 @@ function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone
       const disconnected = sorted.some((event) => event.type === "call_disconnected");
       const error = [...sorted].reverse().find((event) => event.type === "call_error");
       const softClose = Boolean(error?.detail?.includes("AudioSocket connection closed"));
+      const normalSocketClose =
+        softClose && (disconnected || state?.status === "closed" || state?.closeReason === "remote_hangup");
       const asrCount = sorted.filter((event) => event.type === "asr_final").length;
       const replyCount = sorted.filter((event) => event.type === "llm_reply").length;
       const messages = sorted
+        .filter((event) => !(normalSocketClose && event.type === "call_error" && event.detail?.includes("AudioSocket connection closed")))
         .map(realtimeEventToMonitorMessage)
         .filter((message): message is MonitorMessage => Boolean(message))
         .slice(-24);

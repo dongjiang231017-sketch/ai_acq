@@ -44,6 +44,7 @@ SCENARIOS = [
     Scenario("跟抖音团购有什么区别？", "channel_difference", ("视频号", "微信", "同城", "私域")),
     Scenario("具体怎么做？", "process", ("套餐", "投放", "流程", "品类")),
     Scenario("怎么合作，流程说一下。", "process", ("套餐", "品类", "投放", "测试")),
+    Scenario("你详细说一下。", "process", ("流程", "套餐", "测试"), ("更缺新客", "团购套餐转化")),
     Scenario(
         "好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？",
         "process",
@@ -55,6 +56,18 @@ SCENARIOS = [
         "visibility",
         ("同城推荐", "团购券", "视频", "推荐流", "门店主页"),
         ("更缺新客", "团购套餐转化", "更想提升到店", "费用、效果"),
+    ),
+    Scenario(
+        "新客到店我都说了。",
+        "need_confirmed",
+        ("新客到店", "套餐", "曝光", "到店数据"),
+        ("更缺新客", "团购套餐转化", "效果不能", "保底"),
+    ),
+    Scenario(
+        "你需求什么？你什么新客到店我都说了。",
+        "need_confirmed",
+        ("新客到店", "套餐", "曝光", "到店数据"),
+        ("更缺新客", "团购套餐转化", "效果不能", "保底"),
     ),
     Scenario("不需要资料，直接回答。", "open_need", ("费用", "效果", "流程", "美团"), ("微信", "资料")),
     Scenario("不用加微信，你直接说效果。", "guarantee", ("效果", "测试", "数据", "保底"), ("加微信",)),
@@ -469,6 +482,29 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": []
             if _adds_significant_business_question(video_final, video_partial)
             else ["video_final_marked_duplicate"],
+        }
+    )
+    cumulative_need_partial = "你需求什么？你什么新客？"
+    gates.append(
+        {
+            "text": "cumulative_need_partial_waits_for_final",
+            "score": 100 if not should_commit_stable_asr_partial(cumulative_need_partial) else 35,
+            "issues": [] if not should_commit_stable_asr_partial(cumulative_need_partial) else ["cumulative_partial_committed"],
+        }
+    )
+    repaired_need = normalize_realtime_sales_text("你需求什么？你什么新客到店我都说了。")
+    gates.append(
+        {
+            "text": "sales_asr_removes_repeated_need_question_prefix",
+            "reply": repaired_need.normalized_text,
+            "score": 100
+            if repaired_need.has_fix("repeated_need_question_asr_artifact")
+            and repaired_need.normalized_text == "新客到店我都说了。"
+            else 35,
+            "issues": []
+            if repaired_need.has_fix("repeated_need_question_asr_artifact")
+            and repaired_need.normalized_text == "新客到店我都说了。"
+            else [f"normalized:{repaired_need.normalized_text}", f"fixes:{','.join(repaired_need.fixes)}"],
         }
     )
     ack_history = [{"role": "assistant", "content": "明白。美团偏搜索下单，视频号偏微信同城推荐。"}]
