@@ -688,17 +688,29 @@ def _metric_turn_taking(events: list[dict[str, object]], latest_turn_response_ms
     if latest_turn_response_ms is not None:
         latency_score = 100 if latest_turn_response_ms <= 1000 else 78 if latest_turn_response_ms <= 1500 else 45
         if not barge_events:
-            return _metric("轮次衔接", latency_score, 1.1, f"客户说完到AI响应约 {latest_turn_response_ms}ms")
+            return _metric("轮次衔接", latency_score, 1.1, f"客户说完到AI首个声音约 {latest_turn_response_ms}ms")
+    stopped = _has_event_after(
+        scored_events,
+        "barge_in",
+        {"tts_interrupted", "barge_recovery_ready", "barge_playback_drained"},
+        within_seconds=0.3,
+    )
     recovered = any(
         _has_event_after(scored_events, start_type, {"tts_start", "llm_reply", "omni_response_slow_fallback"}, within_seconds=1.0)
         for start_type in ("barge_recovery_ready", "barge_turn_committed", "barge_in", "tts_interrupted")
     )
     if not barge_events:
         return _metric("轮次衔接", 78, 0.9, "本轮没有明显打断，按基础稳定分")
-    score = 92 if recovered else 48
+    score = 100 if recovered else 88 if stopped else 48
     if latest_turn_response_ms is not None:
         score = min(score, 100 if latest_turn_response_ms <= 1000 else 78 if latest_turn_response_ms <= 1500 else 45)
-    return _metric("打断恢复", score, 1.1, "打断后1秒内已重新回复" if recovered else "打断后未在1秒内恢复回复")
+    if recovered:
+        detail = "打断后1秒内已重新回复"
+    elif stopped:
+        detail = "客户打断后已快速停嘴并回到监听，等待客户说完"
+    else:
+        detail = "打断后未及时停嘴或恢复监听"
+    return _metric("打断恢复", score, 1.1, detail)
 
 
 def _metric_understanding(events: list[dict[str, object]]) -> dict[str, object]:

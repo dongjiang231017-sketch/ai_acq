@@ -25,7 +25,9 @@ class ReplayCase:
     expected_state: str
     required_true_flags: tuple[str, ...] = ()
     expected_turn_taking_status: str | None = None
+    expected_current_phase: str | None = None
     max_turn_response_ms: int | None = None
+    max_barge_stop_ms: int | None = None
     min_score: int | None = None
     expected_score_status: str | None = None
     expected_last_customer_contains: str = ""
@@ -55,10 +57,17 @@ def _evaluate_case(case: ReplayCase) -> dict[str, object]:
             issues.append(f"flag_false:{flag}")
     if case.expected_turn_taking_status and state.get("turnTakingStatus") != case.expected_turn_taking_status:
         issues.append(f"turn:{state.get('turnTakingStatus')} expected:{case.expected_turn_taking_status}")
+    if case.expected_current_phase and state.get("currentPhase") != case.expected_current_phase:
+        issues.append(f"phase:{state.get('currentPhase')} expected:{case.expected_current_phase}")
     if case.max_turn_response_ms is not None:
         latency = state.get("latestTurnResponseMs")
         if not isinstance(latency, int) or latency > case.max_turn_response_ms:
             issues.append(f"turn_latency:{latency} max:{case.max_turn_response_ms}")
+    if case.max_barge_stop_ms is not None:
+        latency_breakdown = state.get("latencyBreakdown") if isinstance(state.get("latencyBreakdown"), dict) else {}
+        barge_stop = latency_breakdown.get("bargeStopMs") if isinstance(latency_breakdown, dict) else None
+        if not isinstance(barge_stop, int) or barge_stop > case.max_barge_stop_ms:
+            issues.append(f"barge_stop:{barge_stop} max:{case.max_barge_stop_ms}")
     if case.expected_last_customer_contains and case.expected_last_customer_contains not in str(state.get("lastCustomerText") or ""):
         issues.append(f"last_customer_missing:{case.expected_last_customer_contains}")
     if case.expected_last_ai_contains and case.expected_last_ai_contains not in str(state.get("lastAiReply") or ""):
@@ -173,6 +182,7 @@ def _replay_cases() -> list[ReplayCase]:
                 _event("human_speech_confirmed", "idle", "2026-07-05T01:20:00.700Z", text="你好。"),
                 _event("asr_final", "idle", "2026-07-05T01:20:00.900Z", text="你好。"),
                 _event("llm_reply", "idle", "2026-07-05T01:20:01.600Z", reply="您好，我是做视频号团购到店获客的。"),
+                _event("tts_start", "idle", "2026-07-05T01:20:01.900Z", raw={"sentBytes": 320, "firstAudioMs": 300}),
                 _event("tts_done", "idle", "2026-07-05T01:20:03.100Z", raw={"sentBytes": 800, "firstAudioMs": 510}),
                 _event("no_response_hangup_scheduled", "idle", "2026-07-05T01:20:03.120Z", waitMs=20000),
                 _event("no_response_hangup_timeout", "idle", "2026-07-05T01:20:23.130Z", waitMs=20000),
@@ -337,6 +347,66 @@ def _replay_cases() -> list[ReplayCase]:
             expected_last_ai_contains="按到店目标",
             expected_turn_taking_status="pass",
             max_turn_response_ms=1000,
+        ),
+        ReplayCase(
+            name="incomplete_partial_waits_for_final_without_reply",
+            note="客户问题还没说完时，只能显示等待 final，不能抢答旧主题。",
+            events=[
+                _event("call_connected", "waitfinal", "2026-07-05T07:00:00.000Z"),
+                _event("remote_speech_started", "waitfinal", "2026-07-05T07:00:00.300Z", rms=3100),
+                _event("asr_partial", "waitfinal", "2026-07-05T07:00:00.800Z", text="我是说我是不是还"),
+                _event(
+                    "turn_waiting_final",
+                    "waitfinal",
+                    "2026-07-05T07:00:00.810Z",
+                    text="我是说我是不是还",
+                    reason="incomplete_or_nonactionable_partial",
+                ),
+            ],
+            expected_state="customer_speaking",
+            required_true_flags=("customerSpeechConfirmed",),
+            expected_current_phase="waiting_asr_final",
+            expected_turn_taking_status="unknown",
+        ),
+        ReplayCase(
+            name="complete_business_partial_gets_first_audio_under_one_second",
+            note="完整可答的问题不必等慢 final，应该从 stable partial 到首个声音在 1 秒内。",
+            events=[
+                _event("call_connected", "fastpartial", "2026-07-05T07:05:00.000Z"),
+                _event("human_speech_confirmed", "fastpartial", "2026-07-05T07:05:00.300Z", text="同城曝光，你能详细说一下吗？"),
+                _event("asr_partial", "fastpartial", "2026-07-05T07:05:00.520Z", text="同城曝光，你能详细说一下吗？"),
+                _event("turn_endpoint_candidate", "fastpartial", "2026-07-05T07:05:00.530Z", waitMs=450),
+                _event("asr_partial_stable", "fastpartial", "2026-07-05T07:05:00.980Z", text="同城曝光，你能详细说一下吗？", waitMs=450),
+                _event("turn_reply_preparing", "fastpartial", "2026-07-05T07:05:00.990Z", text="同城曝光，你能详细说一下吗？"),
+                _event("turn_llm_start", "fastpartial", "2026-07-05T07:05:01.000Z", text="同城曝光，你能详细说一下吗？"),
+                _event("llm_reply", "fastpartial", "2026-07-05T07:05:01.250Z", reply="同城曝光就是让附近的人刷到门店套餐。", latencyMs=240),
+                _event("tts_start", "fastpartial", "2026-07-05T07:05:01.620Z", raw={"sentBytes": 640, "firstAudioMs": 360}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("humanSpeechConfirmed", "customerSpeechConfirmed", "aiSpeechConfirmed"),
+            expected_current_phase="ai_speaking",
+            expected_turn_taking_status="pass",
+            max_turn_response_ms=1000,
+        ),
+        ReplayCase(
+            name="barge_in_stops_ai_and_returns_to_listening_fast",
+            note="客户打断时必须可见停嘴耗时，不能继续播旧答案。",
+            events=[
+                _event("call_connected", "bargefast", "2026-07-05T07:10:00.000Z"),
+                _event("human_speech_confirmed", "bargefast", "2026-07-05T07:10:00.400Z", text="多少钱？"),
+                _event("asr_final", "bargefast", "2026-07-05T07:10:00.700Z", text="多少钱？"),
+                _event("llm_reply", "bargefast", "2026-07-05T07:10:01.100Z", reply="先看门店适不适合。", latencyMs=300),
+                _event("tts_start", "bargefast", "2026-07-05T07:10:01.260Z", raw={"sentBytes": 640, "firstAudioMs": 350}),
+                _event("barge_in", "bargefast", "2026-07-05T07:10:01.560Z"),
+                _event("barge_playback_drained", "bargefast", "2026-07-05T07:10:01.640Z", waitMs=80),
+                _event("barge_recovery_ready", "bargefast", "2026-07-05T07:10:01.650Z", waitMs=90),
+                _event("asr_partial", "bargefast", "2026-07-05T07:10:01.900Z", text="别绕，直接说费用"),
+                _event("turn_waiting_final", "bargefast", "2026-07-05T07:10:01.910Z", text="别绕，直接说费用"),
+            ],
+            expected_state="customer_speaking",
+            required_true_flags=("humanSpeechConfirmed", "interruptionDetected", "aiSpeechConfirmed"),
+            expected_current_phase="waiting_asr_final",
+            max_barge_stop_ms=200,
         ),
         ReplayCase(
             name="turn_taking_fast_after_customer_final",

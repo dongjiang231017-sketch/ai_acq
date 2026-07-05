@@ -535,6 +535,7 @@ class AudioSocketCallSession:
         self._opening_raw_barge_protect_until = 0.0
         self._opening_raw_barge_protected_logged = False
         self._last_remote_audio_at = 0.0
+        self._last_remote_speech_started_at = 0.0
         self._asr_partial_generation = 0
         self._asr_partial_text = ""
         self._last_committed_customer_text = ""
@@ -710,6 +711,15 @@ class AudioSocketCallSession:
         self._emit_remote_audio_sample(rms, now)
         self._handle_answer_audio(rms, now)
         if rms >= self.config.barge_rms_threshold:
+            if now - self._last_remote_speech_started_at > 1.5:
+                self._last_remote_speech_started_at = now
+                self.logger.emit(
+                    "remote_speech_started",
+                    callId=self.call_id,
+                    source="rms",
+                    rms=rms,
+                    detail="检测到客户开始说话，进入听完本轮再回复。",
+                )
             self._note_customer_activity("remote_audio", now=now)
         if self.speaking_event.is_set():
             if now < self._barge_forward_until:
@@ -793,13 +803,28 @@ class AudioSocketCallSession:
         if not clean:
             return
         self._note_customer_activity("asr_partial", text=clean)
-        if not should_commit_stable_asr_partial(clean):
+        should_commit = should_commit_stable_asr_partial(clean)
+        if not should_commit:
+            self.logger.emit(
+                "turn_waiting_final",
+                callId=self.call_id,
+                text=clean,
+                reason="incomplete_or_nonactionable_partial",
+                detail="客户这句话还没有足够完整，继续听最终转写，避免抢答或重复旧问题。",
+            )
             return
         with self.asr_partial_lock:
             self._asr_partial_generation += 1
             generation = self._asr_partial_generation
             self._asr_partial_text = clean
         delay = _asr_partial_stable_delay_seconds(clean)
+        self.logger.emit(
+            "turn_endpoint_candidate",
+            callId=self.call_id,
+            text=clean,
+            waitMs=int(delay * 1000),
+            detail="客户短句或完整问题已足够可答，若 ASR final 未到会先接话。",
+        )
         threading.Thread(
             target=self._commit_stable_asr_partial_after_delay,
             args=(generation, clean, delay),
@@ -809,6 +834,12 @@ class AudioSocketCallSession:
 
     def commit_asr_final_text(self, text: str) -> None:
         self._cancel_pending_asr_partial_turn("asr_final")
+        self.logger.emit(
+            "turn_endpoint_final",
+            callId=self.call_id,
+            text=text,
+            detail="ASR final 到达，客户本轮说话完成。",
+        )
         self._commit_customer_text(text, source="asr_final", detail="客户说话完成，取消旧 TTS 队列。")
 
     def _commit_stable_asr_partial_after_delay(self, generation: int, text: str, delay: float) -> None:
@@ -843,6 +874,13 @@ class AudioSocketCallSession:
                 detail="ASR final 与前面的稳定 partial 内容重复，避免重复回复或打断刚开始的回复。",
             )
             return
+        self.logger.emit(
+            "turn_reply_preparing",
+            callId=self.call_id,
+            text=clean,
+            source=source,
+            detail="客户本轮已提交给销售脑，准备生成回复。",
+        )
         generation = self.cancel_pending_speech(detail, source=source)
         self._remember_committed_customer_text(clean)
         self.customer_texts.put((generation, clean))
@@ -1238,6 +1276,16 @@ class AudioSocketCallSession:
                 continue
             turn_count, fallback_reply = self._reply_for_turn(routed_text, intent)
             history_snapshot = list(self._conversation_history)
+            self.logger.emit(
+                "turn_llm_start",
+                callId=self.call_id,
+                text=routed_text,
+                intent=intent,
+                signal=signal,
+                salesStage=stage.value,
+                historyTurns=len(history_snapshot),
+                detail="客户本轮已进入回复生成，等待 LLM/本地话术返回。",
+            )
             reply_result = generate_realtime_reply(
                 text,
                 intent,
@@ -1321,6 +1369,9 @@ class AudioSocketCallSession:
 
     def cancel_pending_speech(self, detail: str, source: str, rms: int | None = None) -> int:
         now = time.monotonic()
+        with self.speech_state_lock:
+            active_jobs_at_start = self.speech_jobs
+            was_speaking = self.speaking_event.is_set() or active_jobs_at_start > 0
         with self.generation_lock:
             self.speech_generation += 1
             generation = self.speech_generation
@@ -1339,7 +1390,7 @@ class AudioSocketCallSession:
             if remaining_jobs > 0:
                 self.speech_jobs = 0
             self.speaking_event.clear()
-        if remaining_jobs > 0 or drained:
+        if was_speaking and (remaining_jobs > 0 or drained):
             self.logger.emit(
                 "barge_playback_drained",
                 callId=self.call_id,
@@ -1349,7 +1400,7 @@ class AudioSocketCallSession:
                 remainingJobs=remaining_jobs,
                 waitMs=int((time.monotonic() - now) * 1000),
             )
-        if now - self._last_barge_at > 0.8:
+        if was_speaking and now - self._last_barge_at > 0.8:
             self._last_barge_at = now
             fields: dict[str, Any] = {
                 "callId": self.call_id,
@@ -1360,6 +1411,22 @@ class AudioSocketCallSession:
             if rms is not None:
                 fields["rms"] = rms
             self.logger.emit("barge_in", **fields)
+            self.logger.emit(
+                "barge_recovery_ready",
+                callId=self.call_id,
+                source=source,
+                generation=generation,
+                waitMs=int((time.monotonic() - now) * 1000),
+                detail="已停止当前 AI 语音，恢复监听客户本轮问题。",
+            )
+        elif not was_speaking:
+            self.logger.emit(
+                "turn_generation_advanced",
+                callId=self.call_id,
+                source=source,
+                generation=generation,
+                detail="客户新一轮输入到达，更新回复代次；当前没有正在播放的 AI 语音。",
+            )
         return generation
 
     def _speak(self, text: str, reason: str, generation: int, close_after: bool = False) -> None:
@@ -1846,6 +1913,13 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if raw_clean != clean:
             asr_fields["rawText"] = raw_clean
         self.logger.emit("asr_final", **asr_fields)
+        self.logger.emit(
+            "turn_endpoint_final",
+            callId=self.call_id,
+            text=clean,
+            provider="qwen_omni",
+            detail="Omni 转写 final 到达，客户本轮说话完成。",
+        )
         if signal == "system_prompt":
             if classify_answer_text(clean) == CallAnswerType.VOICEMAIL:
                 self.logger.emit(
@@ -1942,6 +2016,24 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 detail="打断后的文字转写先于强制回复音频到达，改用文字转写生成更准确回复。",
             )
         history_snapshot = list(self._conversation_history)
+        self.logger.emit(
+            "turn_reply_preparing",
+            callId=self.call_id,
+            text=routed_clean,
+            source="omni_transcription",
+            detail="客户本轮已提交给实时语音模型，准备生成回复。",
+        )
+        self.logger.emit(
+            "turn_llm_start",
+            callId=self.call_id,
+            text=routed_clean,
+            intent=intent,
+            signal=signal,
+            salesStage=stage.value,
+            historyTurns=len(history_snapshot),
+            provider="qwen_omni",
+            detail="客户本轮已进入 Omni 回复生成，等待首个音频块。",
+        )
         with self._omni_lock:
             self._omni_pending_customer_text = clean
             self._omni_pending_signal = signal

@@ -548,9 +548,15 @@ function realtimeEventToMonitorMessage(event: RealtimeLiveEvent): MonitorMessage
   if (event.type === "human_speech_confirmed") return { speaker: "customer", label: "客户", text: event.text || "已确认真人客户语音。" };
   if (event.type === "asr_final") return { speaker: "customer", label: "客户", text: event.text || "客户语音已识别。" };
   if (event.type === "asr_partial_stable") return { speaker: "customer", label: "客户", text: event.text || "客户语音已稳定，先触发回复。" };
+  if (event.type === "turn_waiting_final") return { speaker: "system", label: "听完", text: event.detail || "客户这句话还没完整，继续等待最终转写。" };
+  if (event.type === "turn_endpoint_candidate") return { speaker: "system", label: "可回", text: event.detail || "客户问题已足够完整，可提前接话。" };
+  if (event.type === "turn_endpoint_final") return { speaker: "system", label: "说完", text: event.detail || "客户本轮说话完成。" };
+  if (event.type === "turn_reply_preparing") return { speaker: "system", label: "准备", text: event.detail || "客户本轮已进入回复准备。" };
+  if (event.type === "turn_llm_start") return { speaker: "system", label: "思考", text: event.detail || "正在生成回复。" };
   if (event.type === "llm_reply") return { speaker: "ai", label: "AI", text: event.reply || event.text || "AI 已生成回复。" };
   if (event.type === "tts_start") return { speaker: "system", label: "播放", text: "AI 语音开始播放。" };
   if (event.type === "tts_done") return { speaker: "system", label: "播放", text: "AI 语音播放完成，继续监听客户。" };
+  if (event.type === "barge_playback_drained") return { speaker: "system", label: "停嘴", text: event.detail || "已停止当前播放。" };
   if (event.type === "barge_recovery_ready") return { speaker: "system", label: "打断", text: event.detail || "客户插话，AI 已停止播报并恢复监听。" };
   if (event.type === "omni_input_buffer_event") return { speaker: "system", label: "语音缓冲", text: event.detail || "客户语音缓冲已更新。" };
   if (event.type === "remote_audio_sample") {
@@ -576,12 +582,26 @@ function realtimeStateTone(state?: RealtimeLiveState | null) {
 
 function realtimeStateOutcome(state?: RealtimeLiveState | null) {
   if (!state) return "";
-  const parts = [state.label];
+  const parts = [state.phaseLabel || state.label];
   if (state.latestTurnResponseMs !== null && state.latestTurnResponseMs !== undefined) {
-    parts.push(`轮次 ${state.latestTurnResponseMs}ms`);
+    parts.push(`首声 ${state.latestTurnResponseMs}ms`);
   }
   if (state.autoCloseScheduled && state.status !== "closed") parts.push("已启用自动关闭");
   return parts.join(" · ");
+}
+
+function formatLatencyMs(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value}ms` : "待测";
+}
+
+function realtimeLatencySummary(state?: RealtimeLiveState | null) {
+  const breakdown = state?.latencyBreakdown || {};
+  return [
+    `ASR ${formatLatencyMs(breakdown.asrPartialToFinalMs ?? breakdown.stablePartialWaitMs)}`,
+    `LLM ${formatLatencyMs(breakdown.llmMs)}`,
+    `TTS ${formatLatencyMs(breakdown.ttsFirstAudioMs)}`,
+    `停嘴 ${formatLatencyMs(breakdown.bargeStopMs)}`,
+  ].join(" · ");
 }
 
 function realtimeEventsToMonitorCalls(events: RealtimeLiveEvent[], fallbackPhone?: string, liveState?: RealtimeLiveState | null): MonitorCall[] {
@@ -1643,12 +1663,19 @@ function realtimeLiveEventTitle(type: string) {
   if (type === "asr_final") return "客户语音";
   if (type === "asr_sales_text_normalized") return "ASR语境纠错";
   if (type === "asr_partial_stable") return "客户语音稳定";
+  if (type === "turn_waiting_final") return "等待客户说完";
+  if (type === "turn_endpoint_candidate") return "可提前回复";
+  if (type === "turn_endpoint_final") return "客户已说完";
+  if (type === "turn_reply_preparing") return "准备回复";
+  if (type === "turn_llm_start") return "生成回复";
+  if (type === "turn_generation_advanced") return "轮次更新";
   if (type === "no_response_hangup_cancelled") return "取消空等挂断";
   if (type === "llm_reply") return "AI 回复";
   if (type === "tts_start") return "开始播放";
   if (type === "tts_interrupted") return "播放打断";
   if (type === "tts_done") return "播放完成";
   if (type === "barge_in") return "客户插话";
+  if (type === "barge_playback_drained") return "停嘴完成";
   if (type === "barge_recovery_ready") return "恢复监听";
   if (type === "barge_turn_committed") return "打断兜底回复";
   if (type === "barge_transcription_replaces_forced_response") return "转写接管回复";
@@ -4535,6 +4562,11 @@ function App() {
               <strong>{realtimeLiveEvents.state.label}</strong>
               <span>{realtimeStateOutcome(realtimeLiveEvents.state)}</span>
               <small>{realtimeLiveEvents.state.callId ? `Call ${realtimeLiveEvents.state.callId.slice(0, 8)}` : "最近真实通话"}</small>
+            </div>
+            <div className="line-test-result">
+              <strong>{realtimeLiveEvents.state.phaseLabel || realtimeLiveEvents.state.currentPhase || "阶段待识别"}</strong>
+              <span>{realtimeLiveEvents.state.turnAction || "等待下一步事件。"}</span>
+              <small>{realtimeLatencySummary(realtimeLiveEvents.state)}</small>
             </div>
             <div className="realtime-state-grid">
               {[

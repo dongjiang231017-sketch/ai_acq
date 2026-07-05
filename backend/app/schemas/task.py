@@ -400,6 +400,10 @@ class RealtimeLiveStateRead(BaseModel):
     interruption_detected: Annotated[bool, Field(alias="interruptionDetected")]
     turn_taking_status: Annotated[str, Field(alias="turnTakingStatus")]
     latest_turn_response_ms: Annotated[int | None, Field(alias="latestTurnResponseMs")] = None
+    current_phase: Annotated[str, Field(alias="currentPhase")] = "unknown"
+    phase_label: Annotated[str, Field(alias="phaseLabel")] = "状态未知"
+    turn_action: Annotated[str, Field(alias="turnAction")] = ""
+    latency_breakdown: Annotated[dict[str, int | None], Field(default_factory=dict, alias="latencyBreakdown")]
     last_customer_text: Annotated[str | None, Field(alias="lastCustomerText")] = None
     last_ai_reply: Annotated[str | None, Field(alias="lastAiReply")] = None
     last_event_at: Annotated[str | None, Field(alias="lastEventAt")] = None

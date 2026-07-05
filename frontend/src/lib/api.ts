@@ -621,6 +621,10 @@ export type RealtimeLiveState = {
   interruptionDetected: boolean;
   turnTakingStatus: "pass" | "warn" | "fail" | "unknown" | string;
   latestTurnResponseMs?: number | null;
+  currentPhase?: string;
+  phaseLabel?: string;
+  turnAction?: string;
+  latencyBreakdown?: Record<string, number | null | undefined>;
   lastCustomerText?: string | null;
   lastAiReply?: string | null;
   lastEventAt?: string | null;

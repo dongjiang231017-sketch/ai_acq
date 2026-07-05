@@ -36,6 +36,10 @@ class RealtimeCallState:
     interruption_detected: bool
     turn_taking_status: str
     latest_turn_response_ms: int | None
+    current_phase: str
+    phase_label: str
+    turn_action: str
+    latency_breakdown: dict[str, int | None]
     last_customer_text: str | None
     last_ai_reply: str | None
     last_event_at: str | None
@@ -61,6 +65,10 @@ class RealtimeCallState:
             "interruptionDetected": self.interruption_detected,
             "turnTakingStatus": self.turn_taking_status,
             "latestTurnResponseMs": self.latest_turn_response_ms,
+            "currentPhase": self.current_phase,
+            "phaseLabel": self.phase_label,
+            "turnAction": self.turn_action,
+            "latencyBreakdown": self.latency_breakdown,
             "lastCustomerText": self.last_customer_text,
             "lastAiReply": self.last_ai_reply,
             "lastEventAt": self.last_event_at,
@@ -114,7 +122,8 @@ def reduce_realtime_call_events(events: list[dict[str, object]]) -> RealtimeCall
     )
     scheduled_auto_close = _active_auto_close_scheduled(sorted_events)
 
-    latest_turn_response_ms = _latest_turn_response_ms(sorted_events)
+    latency_breakdown = _latency_breakdown(sorted_events)
+    latest_turn_response_ms = latency_breakdown.get("turnToFirstAudioMs")
     turn_taking_status = _turn_taking_status(latest_turn_response_ms, sorted_events)
     last_customer_text = _last_text(sorted_events, {"asr_final", "asr_partial_stable", "human_speech_confirmed"})
     last_ai_reply = _last_reply(sorted_events)
@@ -141,6 +150,11 @@ def reduce_realtime_call_events(events: list[dict[str, object]]) -> RealtimeCall
         ai_speech=ai_speech,
         latest_turn_response_ms=latest_turn_response_ms,
     )
+    current_phase, phase_label, turn_action = _derive_current_phase(
+        sorted_events,
+        state=state,
+        scheduled_auto_close=scheduled_auto_close,
+    )
 
     return RealtimeCallState(
         call_id=call_id,
@@ -161,6 +175,10 @@ def reduce_realtime_call_events(events: list[dict[str, object]]) -> RealtimeCall
         interruption_detected=interruption,
         turn_taking_status=turn_taking_status,
         latest_turn_response_ms=latest_turn_response_ms,
+        current_phase=current_phase,
+        phase_label=phase_label,
+        turn_action=turn_action,
+        latency_breakdown=latency_breakdown,
         last_customer_text=last_customer_text,
         last_ai_reply=last_ai_reply,
         last_event_at=last_event_at,
@@ -203,9 +221,11 @@ def _derive_state(
         return "silence", "接通后静音/无有效语音", "attention", None
     if scheduled_auto_close and "no_response_hangup_scheduled" in event_types:
         return "waiting_customer_response", "AI已回复，等待客户回应", "active", None
-    if _last_event_type(events) == "tts_start":
+    if _last_meaningful_event_type(events) == "tts_start":
         return "ai_speaking", "AI正在说话", "active", None
-    if _last_event_type(events) in {"asr_final", "asr_partial_stable", "human_speech_confirmed", "remote_speech_started"}:
+    if _last_meaningful_event_type(events) in {"asr_partial", "turn_waiting_final"}:
+        return "customer_speaking", "客户正在说话/等待转写完成", "active", None
+    if _last_meaningful_event_type(events) in {"asr_final", "asr_partial_stable", "human_speech_confirmed", "remote_speech_started"}:
         return "customer_speaking", "客户正在说话/刚说完", "active", None
     if human:
         return "human", "真人客户已接听", "active", None
@@ -235,11 +255,75 @@ def _derive_issues(
     if no_response:
         issues.append("客户在AI回复后没有继续说话，系统已自动关闭以避免空等。")
     if latest_turn_response_ms is not None and latest_turn_response_ms > 1000:
-        issues.append(f"客户说完到AI响应约 {latest_turn_response_ms}ms，超过1秒目标。")
+        issues.append(f"客户说完到AI首个声音约 {latest_turn_response_ms}ms，超过1秒目标。")
     return issues
 
 
 def _latest_turn_response_ms(events: list[dict[str, object]]) -> int | None:
+    return _latency_breakdown(events).get("turnToFirstAudioMs")
+
+
+def _latency_breakdown(events: list[dict[str, object]]) -> dict[str, int | None]:
+    latest_turn = _latest_event(events, {"asr_final", "asr_partial_stable", "barge_turn_committed"})
+    turn_to_reply_ms = _diff_to_next_event(events, latest_turn, {"llm_reply", "omni_response_slow_fallback"})
+    turn_to_first_audio_ms = _diff_to_next_event(events, latest_turn, {"tts_start"})
+    latest_stable = _latest_event(events, {"asr_partial_stable"})
+    latest_final = _latest_event(events, {"asr_final"})
+    latest_llm = _latest_event(events, {"llm_reply"})
+    latest_tts = _latest_event(events, {"tts_start"})
+    return {
+        "turnToReplyMs": turn_to_reply_ms,
+        "turnToFirstAudioMs": turn_to_first_audio_ms,
+        "asrPartialToFinalMs": _asr_partial_to_final_ms(events, latest_final),
+        "stablePartialWaitMs": _event_int(latest_stable, "waitMs"),
+        "llmMs": _event_int(latest_llm, "latencyMs"),
+        "ttsFirstAudioMs": _event_int(latest_tts, "firstAudioMs") or _event_int(latest_tts, "synthMs"),
+        "bargeStopMs": _barge_stop_ms(events),
+    }
+
+
+def _derive_current_phase(
+    events: list[dict[str, object]],
+    *,
+    state: str,
+    scheduled_auto_close: bool,
+) -> tuple[str, str, str]:
+    if state in {"closed", "hangup", "voicemail", "no_response_timeout", "call_screening_timeout", "error"}:
+        labels = {
+            "closed": ("closed", "通话已结束", "复盘本通电话。"),
+            "hangup": ("closed", "客户已挂断", "结束并保存记录。"),
+            "voicemail": ("closed", "语音信箱", "不留言，直接关闭。"),
+            "no_response_timeout": ("closed", "无响应关闭", "避免继续空等计费。"),
+            "call_screening_timeout": ("closed", "电话助理超时", "未转真人，已关闭。"),
+            "error": ("error", "链路异常", "检查 AudioSocket/ASR/TTS。"),
+        }
+        return labels.get(state, ("closed", "通话已结束", "复盘本通电话。"))
+
+    last_type = _last_meaningful_event_type(events)
+    if last_type in {"asr_partial", "remote_speech_started"}:
+        return "waiting_asr_final", "客户说话中/等待最终转写", "先听完，不抢答。"
+    if last_type == "turn_waiting_final":
+        return "waiting_asr_final", "等待客户说完", "ASR partial 还不完整，继续听。"
+    if last_type in {"asr_final", "asr_partial_stable", "turn_endpoint_final", "turn_reply_preparing"}:
+        return "reply_preparing", "客户已说完，准备回复", "取消旧播放，进入销售脑。"
+    if last_type in {"turn_llm_start", "intent", "llm_reply"}:
+        return "reply_generating", "正在生成/等待首个声音", "目标 1 秒内开始播。"
+    if last_type == "tts_start":
+        return "ai_speaking", "AI正在说话", "客户插话要立刻停。"
+    if last_type in {"barge_in", "tts_interrupted", "barge_playback_drained", "barge_recovery_ready", "barge_turn_committed"}:
+        return "barge_listening", "客户打断，已停嘴听", "等客户说完后再回。"
+    if scheduled_auto_close or last_type in {"tts_done", "no_response_hangup_scheduled"}:
+        return "listening_after_ai", "AI已说完，监听客户", "客户无响应会自动关闭。"
+    if state == "phone_assistant_waiting":
+        return "phone_assistant_waiting", "电话助理，等待真人", "短等待后自动关闭。"
+    if state == "silence":
+        return "silence", "接通后静音", "短开场或关闭，避免空等。"
+    if state == "answer_classifying":
+        return "answer_classifying", "正在判断接听方", "区分真人、电话助理、语音信箱。"
+    return "listening", "监听客户", "等待客户下一句话。"
+
+
+def _latest_turn_response_ms_legacy(events: list[dict[str, object]]) -> int | None:
     customer_events = [
         event
         for event in events
@@ -309,6 +393,21 @@ def _last_event_type(events: list[dict[str, object]]) -> str:
     return str(events[-1].get("type") or "") if events else ""
 
 
+def _last_meaningful_event_type(events: list[dict[str, object]]) -> str:
+    skip_types = {
+        "remote_audio_sample",
+        "idle_keepalive_done",
+        "asr_partial_turn_cancelled",
+        "audio_capture_saved",
+        "audio_capture_started",
+    }
+    for event in reversed(events):
+        event_type = str(event.get("type") or "")
+        if event_type and event_type not in skip_types:
+            return event_type
+    return ""
+
+
 def _has_event(events: list[dict[str, object]], event_type: str) -> bool:
     return any(event.get("type") == event_type for event in events)
 
@@ -364,6 +463,80 @@ def _raw(event: dict[str, object]) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
     return event
+
+
+def _latest_event(events: list[dict[str, object]], event_types: set[str]) -> dict[str, object] | None:
+    for event in reversed(events):
+        if event.get("type") in event_types:
+            return event
+    return None
+
+
+def _diff_to_next_event(
+    events: list[dict[str, object]],
+    start_event: dict[str, object] | None,
+    response_types: set[str],
+) -> int | None:
+    if not start_event:
+        return None
+    start_at = _parse_event_time(start_event)
+    if not start_at:
+        return None
+    best: int | None = None
+    for event in events:
+        if event.get("type") not in response_types:
+            continue
+        event_at = _parse_event_time(event)
+        if not event_at or event_at < start_at:
+            continue
+        diff = int((event_at - start_at).total_seconds() * 1000)
+        if best is None or diff < best:
+            best = diff
+    return best
+
+
+def _asr_partial_to_final_ms(
+    events: list[dict[str, object]],
+    final_event: dict[str, object] | None,
+) -> int | None:
+    if not final_event:
+        return None
+    final_at = _parse_event_time(final_event)
+    if not final_at:
+        return None
+    previous_partial: dict[str, object] | None = None
+    for event in events:
+        event_at = _parse_event_time(event)
+        if not event_at or event_at >= final_at:
+            break
+        if event.get("type") in {"asr_partial", "remote_speech_started"}:
+            previous_partial = event
+        elif event.get("type") in {"llm_reply", "tts_start", "tts_done", "asr_final", "asr_partial_stable"}:
+            previous_partial = None
+    if not previous_partial:
+        return None
+    partial_at = _parse_event_time(previous_partial)
+    if not partial_at:
+        return None
+    return int((final_at - partial_at).total_seconds() * 1000)
+
+
+def _barge_stop_ms(events: list[dict[str, object]]) -> int | None:
+    latest_barge = _latest_event(events, {"barge_in"})
+    return _diff_to_next_event(events, latest_barge, {"tts_interrupted", "barge_recovery_ready", "barge_playback_drained"})
+
+
+def _event_int(event: dict[str, object] | None, key: str) -> int | None:
+    if not event:
+        return None
+    raw = _raw(event)
+    value = event.get(key)
+    if value is None:
+        value = raw.get(key)
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_event_time(event: dict[str, object]) -> datetime | None:
