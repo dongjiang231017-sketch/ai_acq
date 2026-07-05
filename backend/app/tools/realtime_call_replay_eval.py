@@ -406,6 +406,25 @@ def _replay_cases() -> list[ReplayCase]:
             expected_current_phase="ai_speaking",
         ),
         ReplayCase(
+            name="omni_start_timeout_falls_back_to_pipeline_opening",
+            note="来自 2026-07-05 20:24 实测：Omni WebSocket 5 秒未建立时，不能让接通电话直接挂断，必须降级并播本地首句。",
+            events=[
+                _event("call_connected", "omnifallback", "2026-07-05T12:24:03.808Z"),
+                _event(
+                    "omni_start_failed_fallback",
+                    "omnifallback",
+                    "2026-07-05T12:24:08.854Z",
+                    error="websocket connection could not established within 5s",
+                    fallbackMode="pipeline",
+                ),
+                _event("opening_start", "omnifallback", "2026-07-05T12:24:08.900Z", text="喂，您好，我在。"),
+                _event("tts_start", "omnifallback", "2026-07-05T12:24:09.260Z", raw={"sentBytes": 640, "firstAudioMs": 360}),
+            ],
+            expected_state="ai_speaking",
+            required_true_flags=("aiSpeechConfirmed",),
+            expected_current_phase="ai_speaking",
+        ),
+        ReplayCase(
             name="barge_in_stops_ai_and_returns_to_listening_fast",
             note="客户打断时必须可见停嘴耗时，不能继续播旧答案。",
             events=[

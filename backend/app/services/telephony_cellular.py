@@ -15,6 +15,7 @@ def build_cellular_diagnostic(
     human_speech_confirmed: bool = False,
     ai_speech_confirmed: bool = False,
     call_screening_detected: bool = False,
+    bridge_error: str = "",
 ) -> dict[str, object]:
     profile = current_voice_gateway_profile()
     events = _events_from_raw_payload(result.raw_payload if result else "")
@@ -31,6 +32,23 @@ def build_cellular_diagnostic(
             summary="已确认手机侧真人语音和 AI 音频回放，可以作为本轮实时通话验收证据。",
             detail="AudioSocket、ASR、TTS 和真人响应都已进入同一通电话。",
             action_items=["保存本轮通话录音和评分结果。", "继续用单号小批量复测稳定性，批量外呼仍需单独打开开关。"],
+            technical_detail=compact_chain,
+            can_retry=True,
+            customer_action_required=False,
+        )
+
+    if bridge_error:
+        return _diagnostic(
+            status="fail",
+            stage="realtime_bridge_error",
+            title="实时语音桥连接失败",
+            summary="电话已经接入 AudioSocket，但实时语音模型/媒体桥在本通电话内报错，导致接通后很快断开或没有 AI 回复。",
+            detail=bridge_error[:300],
+            action_items=[
+                "先不要连续重拨同一个号码，等待系统自动降级或恢复实时模型连接。",
+                "如果再次试拨，接通后保持 10 秒以上，观察实时监听是否出现 AI 首句。",
+                "若连续出现该错误，需要检查实时模型 WebSocket 网络、供应商状态或切换到 pipeline 路线。",
+            ],
             technical_detail=compact_chain,
             can_retry=True,
             customer_action_required=False,

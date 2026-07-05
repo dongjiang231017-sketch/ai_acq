@@ -6797,8 +6797,11 @@ function App() {
                       </small>
                       <small>
                         请求路线：{telephonyTestResult.requestedRoute}；实际 bridge：{telephonyTestResult.actualBridgeRoute}
+                        ；本次执行：{telephonyTestResult.effectiveRoute || telephonyTestResult.requestedRoute}
                         {telephonyTestResult.routeMatched ? "；路线一致" : "；路线不一致"}
                       </small>
+                      {telephonyTestResult.routeFallbackReason && <small>路线降级：{telephonyTestResult.routeFallbackReason}</small>}
+                      {telephonyTestResult.bridgeError && <small>实时语音桥错误：{telephonyTestResult.bridgeError}</small>}
                       <small>{telephonyVerificationSummary(telephonyTestResult)}</small>
                       {telephonyTestPayloadSummary(telephonyTestResult) && (
                         <code>线路事件：{telephonyTestPayloadSummary(telephonyTestResult)}</code>

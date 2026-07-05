@@ -34,6 +34,7 @@ from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analy
 from app.services.realtime_call_learning import record_realtime_call_learning
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
+from app.services.realtime_route_health import mark_omni_route_unavailable, omni_route_unavailable_reason
 from app.services.realtime_sales_playbook import (
     build_barge_recovery_instruction,
     build_omni_turn_instruction,
@@ -1704,6 +1705,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._omni_tts_started = False
         self._omni_session_ready = False
         self._omni_closed = False
+        self._omni_pipeline_fallback = False
         self._omni_unavailable_closing = False
         self._omni_barge_collecting = False
         self._omni_barge_started_at = 0.0
@@ -1748,7 +1750,15 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 mode="omni",
             )
             self._start_startup_keepalive()
-            self._start_omni()
+            circuit_reason = omni_route_unavailable_reason()
+            if circuit_reason:
+                self._enable_omni_pipeline_fallback("omni_circuit_open", RuntimeError(circuit_reason))
+            else:
+                try:
+                    self._start_omni()
+                except Exception as exc:  # noqa: BLE001
+                    mark_omni_route_unavailable(str(exc))
+                    self._enable_omni_pipeline_fallback("omni_start", exc)
             self._start_omni_sidecar_asr()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
@@ -1804,6 +1814,32 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             instructions=build_video_group_buying_sales_instructions(),
         )
 
+    def _enable_omni_pipeline_fallback(self, source: str, exc: Exception) -> None:
+        with self._omni_lock:
+            if self._omni_pipeline_fallback:
+                return
+            self._omni_pipeline_fallback = True
+            self._omni = None
+            self._omni_closed = True
+        self.logger.emit(
+            "omni_start_failed_fallback",
+            callId=self.call_id,
+            source=source,
+            error=str(exc),
+            mode="omni",
+            fallbackMode="pipeline",
+            detail="Omni 实时连接启动失败，本通电话自动降级到本地 ASR+LLM+TTS pipeline，避免接通后直接挂断。",
+        )
+        try:
+            if not self._turn_thread.is_alive():
+                self._turn_thread.start()
+        except RuntimeError:
+            pass
+
+    def _is_omni_pipeline_fallback(self) -> bool:
+        with self._omni_lock:
+            return self._omni_pipeline_fallback
+
     def _start_omni_sidecar_asr(self) -> None:
         try:
             self._start_asr()
@@ -1856,6 +1892,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._speak("这边线路有点不稳，我稍后再联系您。", "omni_unavailable", generation, close_after=True)
 
     def _speak_opening_after_grace(self) -> None:
+        if self._is_omni_pipeline_fallback():
+            super()._speak_opening_after_grace()
+            return
         grace = max(0.0, self.config.opening_grace_seconds)
         if grace and self.customer_activity_event.wait(grace):
             self.logger.emit("opening_deferred", callId=self.call_id, reason="remote_audio_detected", mode="omni")
@@ -1918,6 +1957,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._schedule_call_screening_hangup(source)
 
     def note_asr_partial_text(self, text: str) -> None:
+        if self._is_omni_pipeline_fallback():
+            super().note_asr_partial_text(text)
+            return
         clean = " ".join(text.strip().split())
         if not clean:
             return
@@ -1956,6 +1998,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         ).start()
 
     def commit_asr_final_text(self, text: str) -> None:
+        if self._is_omni_pipeline_fallback():
+            super().commit_asr_final_text(text)
+            return
         self._cancel_pending_asr_partial_turn("omni_sidecar_asr_final")
         self.logger.emit(
             "turn_endpoint_final",
@@ -2224,6 +2269,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         )
 
     def _handle_audio(self, payload: bytes) -> None:
+        if self._is_omni_pipeline_fallback():
+            super()._handle_audio(payload)
+            return
         if self._audio_capture:
             self._audio_capture.write_inbound(payload)
         rms = _pcm_rms(payload)

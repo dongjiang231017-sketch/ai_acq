@@ -476,6 +476,8 @@ export type TelephonyTestCallResult = {
   channel: string;
   requestedRoute: "pipeline" | "omni" | string;
   actualBridgeRoute: "pipeline" | "omni" | string;
+  effectiveRoute: "pipeline" | "omni" | string;
+  routeFallbackReason: string;
   routeMatched: boolean;
   gatewayStatus: string;
   message: string;
@@ -486,6 +488,7 @@ export type TelephonyTestCallResult = {
   humanSpeechConfirmed: boolean;
   aiSpeechConfirmed: boolean;
   callScreeningDetected: boolean;
+  bridgeError: string;
   conversationConfirmed: boolean;
   acceptanceReady: boolean;
   acceptanceNote: string;

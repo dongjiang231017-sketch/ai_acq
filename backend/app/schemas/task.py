@@ -237,6 +237,8 @@ class TelephonyTestCallRead(BaseModel):
     channel: str
     requested_route: Annotated[str, Field(alias="requestedRoute")]
     actual_bridge_route: Annotated[str, Field(alias="actualBridgeRoute")]
+    effective_route: Annotated[str, Field(alias="effectiveRoute")] = ""
+    route_fallback_reason: Annotated[str, Field(alias="routeFallbackReason")] = ""
     route_matched: Annotated[bool, Field(alias="routeMatched")]
     gateway_status: Annotated[str, Field(alias="gatewayStatus")]
     message: str
@@ -247,6 +249,7 @@ class TelephonyTestCallRead(BaseModel):
     human_speech_confirmed: Annotated[bool, Field(alias="humanSpeechConfirmed")] = False
     ai_speech_confirmed: Annotated[bool, Field(alias="aiSpeechConfirmed")] = False
     call_screening_detected: Annotated[bool, Field(alias="callScreeningDetected")] = False
+    bridge_error: Annotated[str, Field(alias="bridgeError")] = ""
     conversation_confirmed: Annotated[bool, Field(alias="conversationConfirmed")] = False
     acceptance_ready: Annotated[bool, Field(alias="acceptanceReady")]
     acceptance_note: Annotated[str, Field(alias="acceptanceNote")]
