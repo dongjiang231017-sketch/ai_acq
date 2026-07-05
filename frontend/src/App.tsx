@@ -312,9 +312,9 @@ const fallbackRealtimePipeline: RealtimePipeline = {
     },
     {
       key: "pipeline",
-      label: "低成本分段 Pipeline",
+      label: "稳定分段语音 Pipeline",
       mode: "half_duplex_interruptible",
-      summary: "ASR、语义路由/LLM、流式 TTS 分段执行，适合成本敏感场景。",
+      summary: "ASR、语义路由/LLM、流式 TTS 分段执行，适合在实时模型不可用时保持真实电话不断线。",
       estimatedLatencyMs: 1055,
       estimatedAiCostPerMinute: 0.04,
       readyForAsteriskMedia: false,
@@ -324,14 +324,14 @@ const fallbackRealtimePipeline: RealtimePipeline = {
   routeBenchmark: {
     recommendedRoute: "pipeline",
     status: "warn",
-    summary: "暂无真实通话样本，默认低成本 Pipeline，下一步用同一号码做 Pipeline/Omni 单号对照。",
+    summary: "暂无真实通话样本，先保持稳定备用路线，再用同一号码做 Pipeline/Omni 单号对照。",
     lowCostFirst: true,
     latestScore: null,
     latestTurnResponseMs: null,
     benchmarks: [
       {
         key: "pipeline",
-        label: "低成本分段 Pipeline",
+        label: "稳定分段语音 Pipeline",
         status: "warn",
         qualityScore: 78,
         readinessScore: 72,
@@ -2289,10 +2289,12 @@ function App() {
   );
   const activeRealtimeVoiceOption = realtimeVoiceOptions.find((option) => option.key === realtimeForm.voiceChoice) ?? realtimeVoiceOptions[0];
   const backendActiveRealtimeRoute = realtimePipeline.routeOptions.find((option) => option.isActive);
+  const realCallRouteOptions = realtimePipeline.routeOptions.filter((option) => option.readyForAsteriskMedia);
   const activeRealtimeRoute =
     backendActiveRealtimeRoute ??
     realtimePipeline.routeOptions.find((option) => option.key === realtimeForm.conversationRoute) ??
     fallbackRealtimePipeline.routeOptions[0];
+  const selectedRealCallRoute = realCallRouteOptions.find((option) => option.key === activeRealtimeRoute.key) ?? realCallRouteOptions[0] ?? null;
   useEffect(() => {
     if (!backendActiveRealtimeRoute || realtimeSession) return;
     if (backendActiveRealtimeRoute.key === realtimeForm.conversationRoute) return;
@@ -3045,7 +3047,7 @@ function App() {
       const result = await api.createTelephonyTestCall({
         phone: telephonyTestForm.phone.trim(),
         callerId: telephonyTestForm.callerId.trim() || null,
-        conversationRoute: activeRealtimeRoute.key,
+        conversationRoute: selectedRealCallRoute?.key ?? activeRealtimeRoute.key,
       });
       setTelephonyTestResult(result);
       setTelephonyLineRecovery(result.autoRecovery ?? null);
@@ -4507,7 +4509,7 @@ function App() {
               <strong>推荐：{recommendedBenchmark?.label ?? routeBenchmark.recommendedRoute}</strong>
               <span>{routeBenchmark.summary}</span>
               <small>
-                {routeBenchmark.lowCostFirst ? "低成本优先" : "质量优先对照"}
+                {routeBenchmark.lowCostFirst ? "稳定备用" : "质量优先对照"}
                 {routeBenchmark.latestScore !== null && routeBenchmark.latestScore !== undefined ? ` · 最近 ${routeBenchmark.latestScore} 分` : ""}
                 {routeBenchmark.latestTurnResponseMs !== null && routeBenchmark.latestTurnResponseMs !== undefined
                   ? ` · 首音频 ${routeBenchmark.latestTurnResponseMs}ms`
@@ -6743,23 +6745,29 @@ function App() {
                 </label>
                 <label className="wide">
                   真实语音路线
-                  <select
-                    value={activeRealtimeRoute.key}
-                    onChange={(event) => {
-                      const nextRoute = event.target.value as "pipeline" | "omni";
-                      setRealtimeForm((current) => ({ ...current, conversationRoute: nextRoute }));
-                      setRealtimeSession(null);
-                      setRealtimeLastReply("");
-                    }}
-                  >
-                    {realtimePipeline.routeOptions.map((option) => (
-                      <option key={option.key} value={option.key} disabled={!option.readyForAsteriskMedia}>
-                        {option.label} {option.readyForAsteriskMedia ? "可用于真实电话" : "未接入当前电话桥"}
-                      </option>
-                    ))}
-                  </select>
+                  {realCallRouteOptions.length > 1 ? (
+                    <select
+                      value={selectedRealCallRoute?.key ?? activeRealtimeRoute.key}
+                      onChange={(event) => {
+                        const nextRoute = event.target.value as "pipeline" | "omni";
+                        setRealtimeForm((current) => ({ ...current, conversationRoute: nextRoute }));
+                        setRealtimeSession(null);
+                        setRealtimeLastReply("");
+                      }}
+                    >
+                      {realCallRouteOptions.map((option) => (
+                        <option key={option.key} value={option.key}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="readonly-field">
+                      {selectedRealCallRoute?.label ?? "等待电话桥接入真实语音路线"}
+                    </div>
+                  )}
                   <small>
-                    当前 bridge：{realtimePipeline.actualBridgeRoute}；后台配置：{realtimePipeline.configuredRoute}
+                    当前使用：{selectedRealCallRoute?.label ?? activeRealtimeRoute.label}
                     {realtimePipeline.routeMatched ? "" : "；两者不一致，需重启 bridge 后再测。"}
                   </small>
                 </label>
@@ -6769,7 +6777,7 @@ function App() {
                     isTestingTelephony
                     || !telephonyHealth.readyForTestCall
                     || !telephonyConfig.asteriskLiveCallEnabled
-                    || !activeRealtimeRoute.readyForAsteriskMedia
+                    || !selectedRealCallRoute
                   }
                   type="submit"
                 >

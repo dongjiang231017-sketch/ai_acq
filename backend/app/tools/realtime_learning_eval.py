@@ -77,7 +77,7 @@ def evaluate_learning_and_route_benchmark() -> dict[str, object]:
                 },
                 {
                     "key": "pipeline",
-                    "label": "低成本分段 Pipeline",
+                    "label": "稳定分段语音 Pipeline",
                     "estimatedLatencyMs": 1075,
                     "estimatedAiCostPerMinute": 0.04,
                 },

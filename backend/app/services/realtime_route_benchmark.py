@@ -156,7 +156,7 @@ def _route_risks(
 def _route_strengths(key: str, *, deepseek_ready: bool) -> list[str]:
     if key == "omni":
         return ["端到端实时语音，天然更利于打断和轮次衔接。", "适合单号 A/B 验证真人感和低延迟。"]
-    strengths = ["成本最低，适合默认批量外呼预算控制。", "ASR、销售脑、TTS 分层可观测，便于定位问题。"]
+    strengths = ["分段链路可观测，适合在实时模型不可用时保持通话不断线。", "ASR、销售脑、TTS 分层可观测，便于定位问题。"]
     if deepseek_ready:
         strengths.append("复杂追问可用 DeepSeek 增强，慢时仍有本地规则兜底。")
     return strengths
@@ -175,7 +175,7 @@ def _next_action(key: str, status: str, risks: list[str], latest_turn_ms: int | 
     if key == "omni" and status != "pass":
         return "先补齐 DashScope/媒体桥，再用同一号码和同一话术做单号 A/B。"
     if key == "pipeline" and latest_turn_ms is not None and latest_turn_ms > 1000:
-        return "优先查 ASR 终点、TTS 首包和打断日志；保留低成本路线但不能直接放量。"
+        return "优先查 ASR 终点、TTS 首包和打断日志；保留备用路线但不能直接放量。"
     if risks:
         return "先处理风险项，再做真实单号回归。"
     return "可作为当前默认路线，继续用真实通话回放压测。"
@@ -209,14 +209,14 @@ def _recommendation_summary(
     benchmarks: list[dict[str, object]],
 ) -> str:
     if latest_score is None:
-        return "暂无真实通话样本，默认低成本 Pipeline，下一步用同一号码做 Pipeline/Omni 单号对照。"
+        return "暂无真实通话样本，先保持稳定备用路线，下一步用同一号码做 Pipeline/Omni 单号对照。"
     if recommended_route == "omni" and current_route == "pipeline":
         return "最近 Pipeline 真实通话延迟或质量偏弱，建议用 Omni 做同号 A/B，对比真人感和首音频延迟。"
     if recommended_route == "pipeline":
         detail = f"最近真实通话评分 {latest_score}"
         if latest_turn_ms is not None:
             detail += f"，首音频 {latest_turn_ms}ms"
-        return detail + "；仍优先低成本 Pipeline，但低于阈值时必须先修 ASR/TTS/轮次。"
+        return detail + "；仍优先稳定备用路线，但低于阈值时必须先修 ASR/TTS/轮次。"
     active = next((item for item in benchmarks if item.get("key") == recommended_route), None)
     return str((active or {}).get("nextAction") or "按推荐路线继续拨测。")
 

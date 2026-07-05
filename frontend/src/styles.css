@@ -607,6 +607,20 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(36, 115, 246, 0.14);
 }
 
+.readonly-field {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  min-height: 43px;
+  align-items: center;
+  border: 1px solid #d7e4f3;
+  border-radius: 11px;
+  background: #fff;
+  color: #18243a;
+  padding: 0 12px;
+  font-weight: 850;
+}
+
 .table-wrap {
   overflow-x: auto;
 }

@@ -191,9 +191,9 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
         },
         {
             "key": "pipeline",
-            "label": "低成本分段 Pipeline",
+            "label": "稳定分段语音 Pipeline",
             "mode": "half_duplex_interruptible",
-            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行，成本更低，适合低频授权回访和成本敏感客户。",
+            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行，适合在实时模型不可用时保持真实电话不断线。",
             "estimatedLatencyMs": _route_latency("pipeline", llm_ready),
             "estimatedAiCostPerMinute": _route_cost("pipeline"),
             "readyForAsteriskMedia": bridge_ready and current_route == "pipeline",
