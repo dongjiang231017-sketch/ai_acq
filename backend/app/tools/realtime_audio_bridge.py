@@ -15,6 +15,7 @@ import uuid
 import wave
 from dataclasses import dataclass, field
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -28,17 +29,22 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.growth import VoiceCloneRecord
-from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType
+from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
+from app.services.realtime_call_learning import record_realtime_call_learning
+from app.services.realtime_intent_capture import claim_realtime_call_context, record_realtime_intent_signal
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
+from app.services.realtime_route_health import mark_omni_route_unavailable, omni_route_unavailable_reason
 from app.services.realtime_sales_playbook import (
     build_barge_recovery_instruction,
     build_omni_turn_instruction,
     build_video_group_buying_sales_instructions,
     classify_realtime_call_input,
+    extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
+from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
 from app.services.runtime_ai_config import get_runtime_ai_config
 
 
@@ -49,16 +55,128 @@ AUDIO_SOCKET_KIND_AUDIO = 0x10
 AUDIO_SOCKET_KIND_ERROR = 0xFF
 PCM_FRAME_BYTES = 320
 PCM_FRAME_SECONDS = 0.02
+AUDIOSOCKET_IDLE_KEEPALIVE_GAP_SECONDS = PCM_FRAME_SECONDS * 2
+REMOTE_AUDIO_SAMPLE_INTERVAL_SECONDS = 1.0
 OMNI_LOCAL_BARGE_MIN_SENT_BYTES = PCM_FRAME_BYTES * 12
 OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_MAX_SECONDS = 1.0
+OMNI_BARGE_RECOVERY_WATCHDOG_SECONDS = OMNI_BARGE_RECOVERY_MAX_SECONDS + 0.05
 OMNI_BARGE_FORCED_RESPONSE_SKIP_SECONDS = 4.0
 OMNI_FIRST_AUDIO_DEADLINE_SECONDS = 1.15
 OMNI_NO_AUDIO_FALLBACK_TEXT = "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
 REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS = 7.0
 REMOTE_AUDIO_SILENCE_SECONDS = 1.3
 BARGE_AUDIO_FORWARD_SECONDS = 2.8
+ASR_PARTIAL_STABLE_SECONDS = 0.45
+ASR_PARTIAL_DUPLICATE_SECONDS = 6.0
+ASR_PARTIAL_MIN_COMPACT_CHARS = 5
+ASR_PARTIAL_FAST_SIGNALS = {
+    "identity_handoff",
+    "audio_issue",
+    "repetition_complaint",
+    "direct_answer_only",
+    "terminal_close",
+    "rejection",
+    "call_screening",
+}
+ASR_PARTIAL_FAST_MARKERS = (
+    "喂",
+    "你谁",
+    "谁啊",
+    "谁呀",
+    "你是谁",
+    "哪位",
+    "干嘛",
+    "做什么",
+    "什么事",
+    "听不清",
+    "没听清",
+    "不说话",
+    "不会说话",
+    "直接说",
+    "别绕",
+    "收费",
+    "怎么收费",
+    "价格",
+    "报价",
+    "多少钱",
+    "费用",
+    "不需要",
+    "不需",
+    "不用",
+    "不要",
+    "不行",
+    "加微信",
+    "加我微信",
+    "发资料",
+    "发案例",
+    "发给我",
+    "给我发",
+)
+ASR_PARTIAL_COMPLETE_QUESTION_MARKERS = (
+    "详细说一下",
+    "详细讲一下",
+    "具体说一下",
+    "介绍一下",
+    "说一下吗",
+    "讲一下吗",
+    "怎么做",
+    "怎么合作",
+    "流程",
+    "有什么优势",
+    "有什么用",
+    "有啥用",
+    "多少钱",
+    "费用",
+    "收费",
+    "价格",
+    "报价",
+    "成本",
+    "手机号",
+    "手机号码",
+    "电话号码",
+    "号码",
+    "加微信",
+    "加我微信",
+    "发资料",
+    "发案例",
+    "达不到",
+    "保证",
+    "多少客户",
+    "多少单",
+    "到店客流",
+)
+ASR_SIGNIFICANT_QUESTION_MARKERS = (
+    "是不是",
+    "要不要",
+    "是否",
+    "怎么",
+    "怎么能",
+    "怎么看",
+    "吗",
+    "呢",
+    "还是",
+)
+ASR_SIGNIFICANT_BUSINESS_KEYWORDS = (
+    "团购券",
+    "券",
+    "搜索",
+    "不搜索",
+    "客户看到",
+    "用户看到",
+    "看到我",
+    "看到券",
+    "同城推荐",
+    "推荐流",
+    "视频",
+    "做视频",
+    "拍视频",
+    "发视频",
+    "主页",
+    "入口",
+)
+OPENING_RAW_BARGE_PROTECT_SECONDS = 1.8
 _DOWNSAMPLE_FACTOR = 3
 _DOWNSAMPLE_FIR_TAPS = 31
 _DOWNSAMPLE_CUTOFF = 3600 / 24000
@@ -80,6 +198,94 @@ def _build_downsample_taps() -> tuple[float, ...]:
 
 
 _DOWNSAMPLE_TAPS = _build_downsample_taps()
+
+
+def _compact_customer_text(text: str) -> str:
+    return "".join(
+        char.lower()
+        for char in text
+        if char not in " \t\r\n。！？?!，,、.；;：:\"'“”‘’（）()[]【】"
+    )
+
+
+def _has_significant_business_question(text: str) -> bool:
+    normalized = normalize_realtime_sales_text(text).normalized_text or text
+    compact = _compact_customer_text(normalized)
+    if not compact:
+        return False
+    has_question = any(marker in compact for marker in ASR_SIGNIFICANT_QUESTION_MARKERS)
+    has_business_keyword = any(keyword in compact for keyword in ASR_SIGNIFICANT_BUSINESS_KEYWORDS)
+    return has_question and has_business_keyword
+
+
+def _adds_significant_business_question(current: str, previous: str) -> bool:
+    if not current or not previous:
+        return False
+    if has_incomplete_realtime_partial(previous) and not has_incomplete_realtime_partial(current):
+        return _has_significant_business_question(current)
+    current_norm = normalize_realtime_sales_text(current).normalized_text or current
+    previous_norm = normalize_realtime_sales_text(previous).normalized_text or previous
+    current_compact = _compact_customer_text(current_norm)
+    previous_compact = _compact_customer_text(previous_norm)
+    if not current_compact or not previous_compact:
+        return False
+    if len(current_compact) <= len(previous_compact) + 6:
+        return False
+    previous_keywords = {
+        keyword for keyword in ASR_SIGNIFICANT_BUSINESS_KEYWORDS if keyword in previous_compact
+    }
+    current_keywords = {
+        keyword for keyword in ASR_SIGNIFICANT_BUSINESS_KEYWORDS if keyword in current_compact
+    }
+    added_keywords = current_keywords - previous_keywords
+    if added_keywords and _has_significant_business_question(current_norm):
+        return True
+    if previous_compact in current_compact:
+        suffix = current_compact.split(previous_compact, 1)[-1]
+        return len(suffix) >= 6 and _has_significant_business_question(suffix)
+    return False
+
+
+def _is_complete_actionable_asr_partial(text: str) -> bool:
+    normalized = normalize_realtime_sales_text(text).normalized_text or text
+    compact = _compact_customer_text(normalized)
+    if len(compact) < ASR_PARTIAL_MIN_COMPACT_CHARS:
+        return False
+    if compact.startswith("你需求什么"):
+        return False
+    has_question_shape = any(marker in text for marker in ("？", "?")) or compact.endswith(("吗", "呢", "嘛"))
+    has_actionable_marker = any(marker in compact for marker in ASR_PARTIAL_COMPLETE_QUESTION_MARKERS)
+    return has_question_shape and has_actionable_marker
+
+
+def should_commit_stable_asr_partial(text: str) -> bool:
+    compact = _compact_customer_text(text)
+    if compact == "喂":
+        return True
+    if len(compact) < 2:
+        return False
+    if has_incomplete_realtime_partial(text):
+        return False
+    signal = classify_realtime_call_input(text)
+    if signal in {"empty", "system_prompt"}:
+        return False
+    if signal in ASR_PARTIAL_FAST_SIGNALS:
+        return True
+    if any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
+        return True
+    if _is_complete_actionable_asr_partial(text):
+        return True
+    return False
+
+
+def _asr_partial_stable_delay_seconds(text: str) -> float:
+    compact = _compact_customer_text(text)
+    signal = classify_realtime_call_input(text)
+    if signal in ASR_PARTIAL_FAST_SIGNALS or any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
+        return ASR_PARTIAL_STABLE_SECONDS
+    if _is_complete_actionable_asr_partial(text):
+        return 0.25
+    return ASR_PARTIAL_STABLE_SECONDS + 0.35
 
 
 @dataclass(frozen=True)
@@ -107,6 +313,8 @@ class BridgeConfig:
     debug_audio_capture_dir: Path = Path("/tmp/ai-acq-realtime-audio")
     audio_quality_enabled: bool = True
     answer_classification_seconds: float = 7.0
+    call_screening_hangup_seconds: float = 12.0
+    no_response_hangup_seconds: float = 20.0
 
 
 class JsonlEventLogger:
@@ -199,19 +407,27 @@ class CallRecognitionCallback(RecognitionCallback):
         text = str(sentence.get("text") or "").strip()
         is_final = RecognitionResult.is_sentence_end(sentence)
         if text and text != self.last_text:
+            event_text = text
+            normalization = normalize_realtime_sales_text(text) if is_final else None
+            if normalization and normalization.changed and normalization.normalized_text:
+                event_text = normalization.normalized_text
             self.call.customer_activity_event.set()
-            self.call.logger.emit(
-                "asr_final" if is_final else "asr_partial",
-                callId=self.call.call_id,
-                text=text,
-                beginMs=sentence.get("begin_time"),
-                endMs=sentence.get("end_time"),
-            )
+            asr_fields: dict[str, Any] = {
+                "callId": self.call.call_id,
+                "text": event_text,
+                "beginMs": sentence.get("begin_time"),
+                "endMs": sentence.get("end_time"),
+            }
+            if normalization and normalization.changed:
+                asr_fields["rawText"] = text
+                asr_fields["fixes"] = list(normalization.fixes)
+            self.call.logger.emit("asr_final" if is_final else "asr_partial", **asr_fields)
             self.call.handle_answer_text(text, is_final=is_final)
+            if is_final:
+                self.call.commit_asr_final_text(event_text)
+            else:
+                self.call.note_asr_partial_text(text)
             self.last_text = text
-        if is_final and text:
-            generation = self.call.cancel_pending_speech("客户说话完成，取消旧 TTS 队列。", source="asr_final")
-            self.call.customer_texts.put((generation, text))
 
     def on_error(self, message: object) -> None:
         self.call.logger.emit("asr_error", callId=self.call.call_id, error=_safe_error_text(message))
@@ -243,6 +459,7 @@ class CallOmniCallback(OmniRealtimeCallback):
         event_type = str(response.get("type") or "")
         if event_type == "session.updated":
             session = response.get("session") if isinstance(response.get("session"), dict) else {}
+            self.call.mark_omni_session_ready()
             self.call.logger.emit(
                 "omni_session_updated",
                 callId=self.call.call_id,
@@ -322,6 +539,7 @@ class AudioSocketCallSession:
         self.send_lock = threading.Lock()
         self.playback_lock = threading.Lock()
         self.generation_lock = threading.Lock()
+        self.asr_partial_lock = threading.Lock()
         self.speech_state_lock = threading.Lock()
         self.speech_generation = 0
         self.speech_jobs = 0
@@ -332,6 +550,7 @@ class AudioSocketCallSession:
         self._audio_capture: CallAudioCapture | None = None
         self._intent_counts: dict[str, int] = {}
         self._conversation_history: list[dict[str, str]] = []
+        self._call_history: list[dict[str, str]] = []
         self._sales_fsm = SalesStateMachine()
         self._answer_classifier = AnswerClassifier(max_wait_seconds=self.config.answer_classification_seconds)
         self._answer_classification_reported: CallAnswerType | None = None
@@ -340,9 +559,27 @@ class AudioSocketCallSession:
         self._human_speech_confirmed = False
         self._call_screening_seen = False
         self._call_screening_answered = False
+        self._call_screening_hangup_generation = 0
+        self._no_response_hangup_generation = 0
+        self._no_response_hangup_active = False
         self._system_prompt_seen = False
         self._opening_started = False
+        self._opening_started_at = 0.0
+        self._opening_raw_barge_protect_until = 0.0
+        self._opening_raw_barge_protected_logged = False
         self._last_remote_audio_at = 0.0
+        self._last_remote_speech_started_at = 0.0
+        self._asr_partial_generation = 0
+        self._asr_partial_text = ""
+        self._last_committed_customer_text = ""
+        self._last_committed_customer_at = 0.0
+        self._last_remote_audio_sample_at = 0.0
+        self._remote_audio_sample_peak = 0
+        self._last_outbound_audio_at = 0.0
+        self._startup_keepalive_active = threading.Event()
+        self._intentional_close_reason = ""
+        self._learning_recorded = False
+        self._call_context: dict[str, Any] = {}
         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
 
     def run(self) -> None:
@@ -352,15 +589,26 @@ class AudioSocketCallSession:
             if not self._await_call_uuid():
                 return
             self.logger.emit("call_connected", callId=self.call_id, peer=f"{self.peer[0]}:{self.peer[1]}", voice=self.config.tts_voice_name)
+            self._start_startup_keepalive()
             self._start_asr()
             self._turn_thread.start()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
-            self.logger.emit("call_error", callId=self.call_id, error=str(exc))
+            if self._is_intentional_socket_close(exc):
+                self.logger.emit(
+                    "call_closed",
+                    callId=self.call_id,
+                    reason=self._intentional_close_reason,
+                    detail="客户明确结束后系统主动关闭 AudioSocket。",
+                )
+            else:
+                self.logger.emit("call_error", callId=self.call_id, error=str(exc))
         finally:
             self.stop_event.set()
             self.interrupt_event.set()
+            self._record_learning_summary()
+            self._stop_startup_keepalive()
             self._stop_asr()
             self._stop_audio_capture()
             try:
@@ -368,6 +616,100 @@ class AudioSocketCallSession:
             except OSError:
                 pass
             self.logger.emit("call_disconnected", callId=self.call_id)
+
+    def _is_intentional_socket_close(self, exc: Exception) -> bool:
+        return bool(self._intentional_close_reason) and "AudioSocket connection closed" in str(exc)
+
+    def _record_learning_summary(self) -> None:
+        if self._learning_recorded or not self.call_id:
+            return
+        self._learning_recorded = True
+        try:
+            lesson = record_realtime_call_learning(
+                call_id=self.call_id,
+                conversation_history=list(self._call_history or self._conversation_history),
+                close_reason=self._intentional_close_reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("call_learning_error", callId=self.call_id, error=str(exc))
+            return
+        if lesson:
+            self.logger.emit(
+                "call_learning_summary",
+                callId=self.call_id,
+                topics=lesson.get("topics", {}),
+                avoidPhrases=lesson.get("avoidPhrases", []),
+                nextGuidance=lesson.get("nextGuidance", []),
+            )
+
+    def _record_realtime_intent_signal(self, text: str, intent: str, signal: str, source: str) -> None:
+        try:
+            result = record_realtime_intent_signal(
+                call_id=self.call_id,
+                context=self._call_context,
+                text=text,
+                intent=intent,
+                signal=signal,
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("intent_capture_error", callId=self.call_id, text=text, intent=intent, error=str(exc))
+            return
+        if result:
+            self.logger.emit(
+                "intent_customer_upserted",
+                callId=self.call_id,
+                text=text,
+                intent=intent,
+                customerId=result.get("customerId"),
+                intentLevel=result.get("intentLevel"),
+                sourceRecordId=result.get("sourceRecordId"),
+                summary=result.get("summary"),
+            )
+
+    def _start_startup_keepalive(self) -> None:
+        self._startup_keepalive_active.set()
+        threading.Thread(target=self._startup_keepalive_loop, name="ai-acq-audiosocket-keepalive", daemon=True).start()
+
+    def _stop_startup_keepalive(self) -> None:
+        self._startup_keepalive_active.clear()
+
+    def _startup_keepalive_loop(self) -> None:
+        silence = b"\x00" * PCM_FRAME_BYTES
+        sent = 0
+        next_frame_at = time.perf_counter()
+        while self._startup_keepalive_active.is_set() and not self.stop_event.is_set():
+            if time.monotonic() - self._last_outbound_audio_at >= AUDIOSOCKET_IDLE_KEEPALIVE_GAP_SECONDS:
+                try:
+                    self._send_frame(AUDIO_SOCKET_KIND_AUDIO, silence)
+                    self._last_outbound_audio_at = time.monotonic()
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.emit("idle_keepalive_error", callId=self.call_id, error=str(exc))
+                    self._close_after_socket_write_error("idle_keepalive", exc)
+                    break
+                sent += 1
+            next_frame_at += PCM_FRAME_SECONDS
+            time.sleep(max(0.0, next_frame_at - time.perf_counter()))
+        self._startup_keepalive_active.clear()
+        if sent:
+            self.logger.emit("idle_keepalive_done", callId=self.call_id, frames=sent)
+
+    def _close_after_socket_write_error(self, source: str, exc: Exception) -> None:
+        if self.stop_event.is_set():
+            return
+        self.logger.emit(
+            "socket_write_closed",
+            callId=self.call_id,
+            source=source,
+            error=str(exc),
+            detail="向 AudioSocket 写入音频失败，判定电话媒体链路已断开并立即结束本次会话。",
+        )
+        self.stop_event.set()
+        self.interrupt_event.set()
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def _await_call_uuid(self) -> bool:
         started = time.monotonic()
@@ -379,6 +721,16 @@ class AudioSocketCallSession:
             if frame_type == AUDIO_SOCKET_KIND_UUID:
                 self.call_id = _decode_call_id(payload)
                 self.logger.emit("call_uuid", callId=self.call_id)
+                self._call_context = claim_realtime_call_context(self.call_id)
+                if self._call_context:
+                    self.logger.emit(
+                        "call_context_attached",
+                        callId=self.call_id,
+                        source="realtime_test_call",
+                        merchantName=self._call_context.get("merchantName"),
+                        requestedRoute=self._call_context.get("requestedRoute"),
+                        effectiveRoute=self._call_context.get("effectiveRoute"),
+                    )
                 self._start_audio_capture()
                 return True
             if frame_type == AUDIO_SOCKET_KIND_HANGUP:
@@ -443,12 +795,26 @@ class AudioSocketCallSession:
             self._audio_capture.write_inbound(payload)
         rms = _pcm_rms(payload)
         now = time.monotonic()
+        self._emit_remote_audio_sample(rms, now)
         self._handle_answer_audio(rms, now)
         if rms >= self.config.barge_rms_threshold:
-            self.customer_activity_event.set()
-            self._last_remote_audio_at = now
+            if now - self._last_remote_speech_started_at > 1.5:
+                self._last_remote_speech_started_at = now
+                self.logger.emit(
+                    "remote_speech_started",
+                    callId=self.call_id,
+                    source="rms",
+                    rms=rms,
+                    detail="检测到客户开始说话，进入听完本轮再回复。",
+                )
+            self._note_customer_activity("remote_audio", now=now)
         if self.speaking_event.is_set():
             if now < self._barge_forward_until:
+                if self._recognition:
+                    self._recognition.send_audio_frame(payload)
+                return
+            if self._should_protect_opening_from_raw_barge(now, rms):
+                self._loud_frames = 0
                 if self._recognition:
                     self._recognition.send_audio_frame(payload)
                 return
@@ -466,13 +832,209 @@ class AudioSocketCallSession:
         if self._recognition:
             self._recognition.send_audio_frame(payload)
 
+    def _should_protect_opening_from_raw_barge(self, now: float, rms: int) -> bool:
+        if not self._opening_started or now > self._opening_raw_barge_protect_until:
+            return False
+        if self._human_speech_confirmed or self._last_committed_customer_text:
+            return False
+        if rms < self.config.barge_rms_threshold:
+            return False
+        if not self._opening_raw_barge_protected_logged:
+            self._opening_raw_barge_protected_logged = True
+            self.logger.emit(
+                "opening_raw_barge_protected",
+                callId=self.call_id,
+                rms=rms,
+                protectMs=int(max(0.0, self._opening_raw_barge_protect_until - now) * 1000),
+                detail="首句刚开始播放时检测到对端问候音，先不断开首句，等待ASR确认后再接话。",
+            )
+        return True
+
+    def _emit_remote_audio_sample(self, rms: int, now: float) -> None:
+        self._remote_audio_sample_peak = max(self._remote_audio_sample_peak, rms)
+        if now - self._last_remote_audio_sample_at < REMOTE_AUDIO_SAMPLE_INTERVAL_SECONDS:
+            return
+        self._last_remote_audio_sample_at = now
+        peak = self._remote_audio_sample_peak
+        self._remote_audio_sample_peak = rms
+        self.logger.emit(
+            "remote_audio_sample",
+            callId=self.call_id,
+            rms=rms,
+            peakRms=peak,
+            threshold=self.config.barge_rms_threshold,
+            active=peak >= max(120, int(self.config.barge_rms_threshold * 0.35)),
+        )
+
     def _handle_answer_audio(self, rms: int, now: float) -> None:
         answer_type = self._answer_classifier.on_audio_frame(rms, now)
         self._handle_answer_classification(answer_type, text="", source="audio")
 
     def handle_answer_text(self, text: str, *, is_final: bool) -> None:
-        answer_type = self._answer_classifier.on_asr_text(text, is_final=is_final)
-        self._handle_answer_classification(answer_type, text=text, source="asr_final" if is_final else "asr_partial")
+        if text.strip():
+            self._last_remote_audio_at = time.monotonic()
+        classifier_text = text
+        if classify_realtime_call_input(text) == "system_prompt":
+            human_tail = extract_human_text_after_system_prompt(text)
+            if human_tail:
+                classifier_text = human_tail
+        answer_type = self._answer_classifier.on_asr_text(classifier_text, is_final=is_final)
+        self._handle_answer_classification(
+            answer_type,
+            text=classifier_text,
+            source="asr_final" if is_final else "asr_partial",
+        )
+
+    def note_asr_partial_text(self, text: str) -> None:
+        clean = " ".join(text.strip().split())
+        if not clean:
+            return
+        self._note_customer_activity("asr_partial", text=clean)
+        should_commit = should_commit_stable_asr_partial(clean)
+        if not should_commit:
+            with self.asr_partial_lock:
+                if self._asr_partial_text and clean != self._asr_partial_text:
+                    self._asr_partial_generation += 1
+                    self._asr_partial_text = ""
+            self.logger.emit(
+                "turn_waiting_final",
+                callId=self.call_id,
+                text=clean,
+                reason="incomplete_or_nonactionable_partial",
+                detail="客户这句话还没有足够完整，继续听最终转写，避免抢答或重复旧问题。",
+            )
+            return
+        with self.asr_partial_lock:
+            self._asr_partial_generation += 1
+            generation = self._asr_partial_generation
+            self._asr_partial_text = clean
+        delay = _asr_partial_stable_delay_seconds(clean)
+        self.logger.emit(
+            "turn_endpoint_candidate",
+            callId=self.call_id,
+            text=clean,
+            waitMs=int(delay * 1000),
+            detail="客户短句或完整问题已足够可答，若 ASR final 未到会先接话。",
+        )
+        threading.Thread(
+            target=self._commit_stable_asr_partial_after_delay,
+            args=(generation, clean, delay),
+            name="ai-acq-asr-partial-turn",
+            daemon=True,
+        ).start()
+
+    def commit_asr_final_text(self, text: str) -> None:
+        self._cancel_pending_asr_partial_turn("asr_final")
+        self.logger.emit(
+            "turn_endpoint_final",
+            callId=self.call_id,
+            text=text,
+            detail="ASR final 到达，客户本轮说话完成。",
+        )
+        self._commit_customer_text(text, source="asr_final", detail="客户说话完成，取消旧 TTS 队列。")
+
+    def _commit_stable_asr_partial_after_delay(self, generation: int, text: str, delay: float) -> None:
+        time.sleep(delay)
+        if self.stop_event.is_set():
+            return
+        with self.asr_partial_lock:
+            if generation != self._asr_partial_generation or text != self._asr_partial_text:
+                return
+        if not should_commit_stable_asr_partial(text):
+            return
+        self.logger.emit(
+            "asr_partial_stable",
+            callId=self.call_id,
+            text=text,
+            waitMs=int(delay * 1000),
+            detail="ASR 最终文本尚未到达，但客户短句已稳定，先触发回复避免客户空等。",
+        )
+        self._commit_customer_text(text, source="asr_partial_stable", detail="客户语音已稳定，先接话并取消旧 TTS 队列。")
+
+    def _commit_customer_text(self, text: str, *, source: str, detail: str) -> None:
+        clean = " ".join(text.strip().split())
+        if not clean or self.stop_event.is_set():
+            return
+        self._note_customer_activity(source, text=clean)
+        if self._is_recent_committed_customer_text(clean):
+            self.logger.emit(
+                "customer_turn_duplicate_ignored",
+                callId=self.call_id,
+                text=clean,
+                source=source,
+                detail="ASR final 与前面的稳定 partial 内容重复，避免重复回复或打断刚开始的回复。",
+            )
+            return
+        self.logger.emit(
+            "turn_reply_preparing",
+            callId=self.call_id,
+            text=clean,
+            source=source,
+            detail="客户本轮已提交给销售脑，准备生成回复。",
+        )
+        generation = self.cancel_pending_speech(detail, source=source)
+        self._remember_committed_customer_text(clean)
+        self.customer_texts.put((generation, clean))
+
+    def _note_customer_activity(self, source: str, *, text: str = "", now: float | None = None) -> None:
+        self.customer_activity_event.set()
+        self._last_remote_audio_at = now or time.monotonic()
+        self._cancel_no_response_hangup(source, text=text)
+
+    def _cancel_no_response_hangup(self, source: str, *, text: str = "") -> None:
+        if not self._no_response_hangup_active:
+            return
+        self._no_response_hangup_active = False
+        self._no_response_hangup_generation += 1
+        self.logger.emit(
+            "no_response_hangup_cancelled",
+            callId=self.call_id,
+            source=source,
+            text=text[:100],
+            detail="检测到客户新语音，取消 AI 回复后的无响应挂断计时。",
+        )
+
+    def _cancel_pending_asr_partial_turn(self, source: str) -> None:
+        with self.asr_partial_lock:
+            self._asr_partial_generation += 1
+            self._asr_partial_text = ""
+        self.logger.emit("asr_partial_turn_cancelled", callId=self.call_id, source=source)
+
+    def _remember_committed_customer_text(self, text: str) -> None:
+        with self.asr_partial_lock:
+            self._last_committed_customer_text = text
+            self._last_committed_customer_at = time.monotonic()
+
+    def _is_recent_committed_customer_text(self, text: str) -> bool:
+        compact = _compact_customer_text(text)
+        if not compact:
+            return False
+        with self.asr_partial_lock:
+            previous = self._last_committed_customer_text
+            previous_at = self._last_committed_customer_at
+        if not previous or time.monotonic() - previous_at > ASR_PARTIAL_DUPLICATE_SECONDS:
+            return False
+        previous_compact = _compact_customer_text(previous)
+        if not previous_compact:
+            return False
+        if _adds_significant_business_question(text, previous):
+            return False
+        if compact == previous_compact:
+            return True
+        shorter, longer = sorted((compact, previous_compact), key=len)
+        if len(shorter) >= 3 and shorter in longer:
+            return True
+        similarity = SequenceMatcher(None, compact, previous_compact).ratio()
+        if similarity >= 0.72:
+            return True
+        signal = classify_realtime_call_input(text)
+        previous_signal = classify_realtime_call_input(previous)
+        return (
+            similarity >= 0.62
+            and signal == previous_signal
+            and signal in ASR_PARTIAL_FAST_SIGNALS
+            and min(len(compact), len(previous_compact)) >= 2
+        )
 
     def _handle_answer_classification(self, answer_type: CallAnswerType | None, *, text: str, source: str) -> None:
         if not answer_type or answer_type == CallAnswerType.UNKNOWN:
@@ -492,14 +1054,7 @@ class AudioSocketCallSession:
             longestSpeechMs=int(state.longest_speech * 1000),
         )
         if answer_type == CallAnswerType.HUMAN:
-            if not self._human_speech_confirmed:
-                self._human_speech_confirmed = True
-                self.logger.emit(
-                    "human_speech_confirmed",
-                    callId=self.call_id,
-                    text=text,
-                    detail="接听判定确认是真人，进入实时对话。",
-                )
+            self._confirm_human_speech(text, detail="接听判定确认是真人，进入实时对话。")
             return
         if answer_type == CallAnswerType.PHONE_ASSISTANT:
             self._respond_to_call_screening(text or "电话助理提示", source=f"answer_classifier:{source}")
@@ -548,6 +1103,113 @@ class AudioSocketCallSession:
         with self.generation_lock:
             generation = self.speech_generation
         threading.Thread(target=self._speak, args=(reply, "call_screening", generation), daemon=True).start()
+        self._schedule_call_screening_hangup(source)
+
+    def _confirm_human_speech(self, text: str, *, detail: str) -> None:
+        if self._human_speech_confirmed:
+            return
+        self._human_speech_confirmed = True
+        self.logger.emit(
+            "human_speech_confirmed",
+            callId=self.call_id,
+            text=text,
+            detail=detail,
+        )
+
+    def _schedule_call_screening_hangup(self, source: str) -> None:
+        wait_seconds = max(0.0, self.config.call_screening_hangup_seconds)
+        if wait_seconds <= 0:
+            return
+        self._call_screening_hangup_generation += 1
+        generation = self._call_screening_hangup_generation
+        self.logger.emit(
+            "call_screening_hangup_scheduled",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            source=source,
+            detail="电话助理说明来意后进入短等待；若无人转接真人，将主动挂断避免空等计费。",
+        )
+        threading.Thread(
+            target=self._close_if_no_human_after_call_screening,
+            args=(generation, wait_seconds),
+            daemon=True,
+        ).start()
+
+    def _close_if_no_human_after_call_screening(self, generation: int, wait_seconds: float) -> None:
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            if self._human_speech_confirmed:
+                return
+            time.sleep(0.1)
+        if (
+            self.stop_event.is_set()
+            or self._human_speech_confirmed
+            or generation != self._call_screening_hangup_generation
+        ):
+            return
+        self.logger.emit(
+            "call_screening_hangup_timeout",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            detail="电话助理后未等到真人转接，主动结束本次通话。",
+        )
+        self._close_after_terminal_reply("call_screening_no_human")
+
+    def _schedule_no_response_hangup(self, reason: str) -> None:
+        if reason == "call_screening":
+            return
+        wait_seconds = max(0.0, self.config.no_response_hangup_seconds)
+        if wait_seconds <= 0:
+            return
+        self._no_response_hangup_generation += 1
+        generation = self._no_response_hangup_generation
+        self._no_response_hangup_active = True
+        baseline_remote_audio_at = self._last_remote_audio_at
+        self.logger.emit(
+            "no_response_hangup_scheduled",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            reason=reason,
+            detail="AI 说完后进入短等待；若客户没有新语音，将主动结束通话，避免长时间空等计费。",
+        )
+        threading.Thread(
+            target=self._close_if_no_response_after_speech,
+            args=(generation, wait_seconds, baseline_remote_audio_at, reason),
+            daemon=True,
+        ).start()
+
+    def _close_if_no_response_after_speech(
+        self,
+        generation: int,
+        wait_seconds: float,
+        baseline_remote_audio_at: float,
+        reason: str,
+    ) -> None:
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            if self._last_remote_audio_at > baseline_remote_audio_at:
+                if generation == self._no_response_hangup_generation:
+                    self._no_response_hangup_active = False
+                return
+            time.sleep(0.2)
+        if (
+            self.stop_event.is_set()
+            or self.speaking_event.is_set()
+            or self._last_remote_audio_at > baseline_remote_audio_at
+            or generation != self._no_response_hangup_generation
+        ):
+            if generation == self._no_response_hangup_generation:
+                self._no_response_hangup_active = False
+            return
+        self._no_response_hangup_active = False
+        self.logger.emit(
+            "no_response_hangup_timeout",
+            callId=self.call_id,
+            waitMs=int(wait_seconds * 1000),
+            reason=reason,
+            detail="AI 说完后没有检测到客户新语音，主动结束本次通话。",
+        )
+        self._close_after_terminal_reply("no_customer_response")
 
     def _speak_opening_after_grace(self) -> None:
         grace = max(0.0, self.config.opening_grace_seconds)
@@ -582,8 +1244,17 @@ class AudioSocketCallSession:
         if not self._answer_classifier.state.done:
             answer_type = self._answer_classifier.classify_after_wait()
             self._handle_answer_classification(answer_type, text="", source="opening_wait_timeout")
-        if answer_type in {CallAnswerType.PHONE_ASSISTANT, CallAnswerType.VOICEMAIL, CallAnswerType.SYSTEM_PROMPT, CallAnswerType.HUMAN}:
+        if answer_type in {CallAnswerType.PHONE_ASSISTANT, CallAnswerType.VOICEMAIL, CallAnswerType.SYSTEM_PROMPT}:
             return False
+        if answer_type == CallAnswerType.HUMAN:
+            self.logger.emit(
+                "opening_after_human_audio",
+                callId=self.call_id,
+                mode=mode,
+                waitMs=int(wait_seconds * 1000),
+                detail="已确认对端是真人但还没有最终转写，先播短开场避免电话里长时间沉默。",
+            )
+            return True
         if saw_remote_audio:
             self.logger.emit(
                 "opening_after_unknown_remote",
@@ -607,7 +1278,6 @@ class AudioSocketCallSession:
             self.stop_event.is_set()
             or self.speaking_event.is_set()
             or self._opening_started
-            or self._human_speech_confirmed
             or self._call_screening_seen
             or self._system_prompt_seen
         )
@@ -616,6 +1286,9 @@ class AudioSocketCallSession:
         if self._opening_blocked():
             return False
         self._opening_started = True
+        self._opening_started_at = time.monotonic()
+        self._opening_raw_barge_protect_until = self._opening_started_at + OPENING_RAW_BARGE_PROTECT_SECONDS
+        self._opening_raw_barge_protected_logged = False
         return True
 
     def _turn_worker(self) -> None:
@@ -631,14 +1304,37 @@ class AudioSocketCallSession:
                 continue
             signal = classify_realtime_call_input(text)
             if signal == "system_prompt":
-                self._system_prompt_seen = True
-                self.logger.emit(
-                    "system_prompt_ignored",
-                    callId=self.call_id,
-                    text=text,
-                    detail="识别到运营商、手机系统或语音留言提示，已忽略，不触发销售回复。",
-                )
-                continue
+                human_tail = extract_human_text_after_system_prompt(text)
+                if human_tail:
+                    self.logger.emit(
+                        "system_prompt_stripped",
+                        callId=self.call_id,
+                        text=text,
+                        strippedText=human_tail,
+                        detail="ASR 同一句里包含系统提示和真人客户语音，已只剥离系统提示并继续回复真人内容。",
+                    )
+                    text = human_tail
+                    signal = classify_realtime_call_input(text)
+                    if signal == "system_prompt":
+                        signal = "human_speech"
+                else:
+                    if classify_answer_text(text) == CallAnswerType.VOICEMAIL:
+                        self.logger.emit(
+                            "voicemail_detected",
+                            callId=self.call_id,
+                            text=text,
+                            detail="识别到语音信箱/留言提示，直接挂断不留言。",
+                        )
+                        self.stop_event.set()
+                        continue
+                    self._system_prompt_seen = True
+                    self.logger.emit(
+                        "system_prompt_ignored",
+                        callId=self.call_id,
+                        text=text,
+                        detail="识别到运营商、手机系统或语音留言提示，已忽略，不触发销售回复。",
+                    )
+                    continue
             if signal == "call_screening":
                 if self._call_screening_answered:
                     self.logger.emit(
@@ -651,21 +1347,37 @@ class AudioSocketCallSession:
                 self._respond_to_call_screening(text, source="pipeline_turn")
                 continue
             if not self._human_speech_confirmed:
-                self._human_speech_confirmed = True
+                self._confirm_human_speech(text, detail="已识别到真人客户语音，可以进入实时对话。")
+            normalization = normalize_realtime_sales_text(text)
+            routed_text = normalization.normalized_text
+            if normalization.changed:
                 self.logger.emit(
-                    "human_speech_confirmed",
+                    "asr_sales_text_normalized",
                     callId=self.call_id,
                     text=text,
-                    detail="已识别到真人客户语音，可以进入实时对话。",
+                    normalizedText=routed_text,
+                    fixes=list(normalization.fixes),
+                    detail="ASR 文本进入销售脑前已做高置信语境纠错，原始转写仍保留在 ASR 事件中。",
                 )
-            intent, node = _classify_intent(text)
-            stage = self._sales_fsm.update(text, intent, signal)
+            intent, node = _classify_intent(routed_text)
+            stage = self._sales_fsm.update(routed_text, intent, signal)
             stage_instruction = self._sales_fsm.get_stage_instruction()
             if intent == "系统提示":
                 self.logger.emit("intent", callId=self.call_id, text=text, intent=intent, node=node)
                 continue
-            turn_count, fallback_reply = self._reply_for_turn(text, intent)
+            self._record_realtime_intent_signal(routed_text, intent, signal, "pipeline_turn")
+            turn_count, fallback_reply = self._reply_for_turn(routed_text, intent)
             history_snapshot = list(self._conversation_history)
+            self.logger.emit(
+                "turn_llm_start",
+                callId=self.call_id,
+                text=routed_text,
+                intent=intent,
+                signal=signal,
+                salesStage=stage.value,
+                historyTurns=len(history_snapshot),
+                detail="客户本轮已进入回复生成，等待 LLM/本地话术返回。",
+            )
             reply_result = generate_realtime_reply(
                 text,
                 intent,
@@ -731,10 +1443,12 @@ class AudioSocketCallSession:
         return turn_count, _build_reply(text, intent, "您的门店")
 
     def _append_conversation_turn(self, customer_text: str, assistant_reply: str) -> None:
+        self._call_history.append({"role": "user", "content": customer_text.strip()})
+        self._call_history.append({"role": "assistant", "content": assistant_reply.strip()})
         self._conversation_history.append({"role": "user", "content": customer_text.strip()})
         self._conversation_history.append({"role": "assistant", "content": assistant_reply.strip()})
-        if len(self._conversation_history) > 8:
-            del self._conversation_history[: len(self._conversation_history) - 8]
+        if len(self._conversation_history) > 12:
+            del self._conversation_history[: len(self._conversation_history) - 12]
 
     def _drain_latest_customer_text(self, generation: int, text: str) -> tuple[int, str]:
         latest_generation = generation
@@ -747,6 +1461,9 @@ class AudioSocketCallSession:
 
     def cancel_pending_speech(self, detail: str, source: str, rms: int | None = None) -> int:
         now = time.monotonic()
+        with self.speech_state_lock:
+            active_jobs_at_start = self.speech_jobs
+            was_speaking = self.speaking_event.is_set() or active_jobs_at_start > 0
         with self.generation_lock:
             self.speech_generation += 1
             generation = self.speech_generation
@@ -765,7 +1482,7 @@ class AudioSocketCallSession:
             if remaining_jobs > 0:
                 self.speech_jobs = 0
             self.speaking_event.clear()
-        if remaining_jobs > 0 or drained:
+        if was_speaking and (remaining_jobs > 0 or drained):
             self.logger.emit(
                 "barge_playback_drained",
                 callId=self.call_id,
@@ -775,7 +1492,7 @@ class AudioSocketCallSession:
                 remainingJobs=remaining_jobs,
                 waitMs=int((time.monotonic() - now) * 1000),
             )
-        if now - self._last_barge_at > 0.8:
+        if was_speaking and now - self._last_barge_at > 0.8:
             self._last_barge_at = now
             fields: dict[str, Any] = {
                 "callId": self.call_id,
@@ -786,6 +1503,22 @@ class AudioSocketCallSession:
             if rms is not None:
                 fields["rms"] = rms
             self.logger.emit("barge_in", **fields)
+            self.logger.emit(
+                "barge_recovery_ready",
+                callId=self.call_id,
+                source=source,
+                generation=generation,
+                waitMs=int((time.monotonic() - now) * 1000),
+                detail="已停止当前 AI 语音，恢复监听客户本轮问题。",
+            )
+        elif not was_speaking:
+            self.logger.emit(
+                "turn_generation_advanced",
+                callId=self.call_id,
+                source=source,
+                generation=generation,
+                detail="客户新一轮输入到达，更新回复代次；当前没有正在播放的 AI 语音。",
+            )
         return generation
 
     def _speak(self, text: str, reason: str, generation: int, close_after: bool = False) -> None:
@@ -902,6 +1635,8 @@ class AudioSocketCallSession:
         )
         if close_after and not interrupted:
             self._close_after_terminal_reply("customer_rejected")
+        elif not close_after and not interrupted:
+            self._schedule_no_response_hangup(reason)
 
     def _send_audio_frame_at_cadence(
         self,
@@ -948,7 +1683,12 @@ class AudioSocketCallSession:
             )
         if self._audio_capture:
             self._audio_capture.write_outbound(processed_frame)
-        self._send_frame(AUDIO_SOCKET_KIND_AUDIO, processed_frame)
+        try:
+            self._send_frame(AUDIO_SOCKET_KIND_AUDIO, processed_frame)
+        except Exception as exc:  # noqa: BLE001
+            self._close_after_socket_write_error("tts_playback", exc)
+            raise
+        self._last_outbound_audio_at = time.monotonic()
         return next_frame_at + PCM_FRAME_SECONDS, lag_events
 
     def _read_frame(self) -> tuple[int, bytes]:
@@ -980,6 +1720,7 @@ class AudioSocketCallSession:
                 self.speaking_event.clear()
 
     def _close_after_terminal_reply(self, reason: str) -> None:
+        self._intentional_close_reason = reason
         self.logger.emit("call_closing", callId=self.call_id, reason=reason)
         self.stop_event.set()
         try:
@@ -1033,7 +1774,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._omni_audio_total = 0
         self._omni_response_started_at = 0.0
         self._omni_tts_started = False
+        self._omni_session_ready = False
         self._omni_closed = False
+        self._omni_pipeline_fallback = False
         self._omni_unavailable_closing = False
         self._omni_barge_collecting = False
         self._omni_barge_started_at = 0.0
@@ -1043,10 +1786,15 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._omni_barge_forced_requested = False
         self._omni_barge_server_stopped = False
         self._omni_barge_server_committed = False
+        self._omni_barge_recovery_generation = 0
+        self._omni_barge_last_text = ""
         self._human_speech_confirmed = False
         self._last_remote_speech_started_at = 0.0
         self._call_screening_seen = False
         self._call_screening_answered = False
+        self._call_screening_hangup_generation = 0
+        self._no_response_hangup_generation = 0
+        self._no_response_hangup_active = False
         self._system_prompt_seen = False
         self._opening_started = False
         self._last_remote_audio_at = 0.0
@@ -1072,14 +1820,43 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 voice=self.config.omni_voice,
                 mode="omni",
             )
-            self._start_omni()
+            self._start_startup_keepalive()
+            requested_route = self._context_conversation_route()
+            if requested_route == "pipeline":
+                self._enable_omni_pipeline_fallback(
+                    "requested_pipeline_route",
+                    RuntimeError("本通电话在前端选择稳定分段语音 Pipeline。"),
+                )
+            else:
+                circuit_reason = omni_route_unavailable_reason()
+                if circuit_reason:
+                    self._enable_omni_pipeline_fallback("omni_circuit_open", RuntimeError(circuit_reason))
+                else:
+                    try:
+                        self._start_omni()
+                    except Exception as exc:  # noqa: BLE001
+                        mark_omni_route_unavailable(str(exc))
+                        self._enable_omni_pipeline_fallback("omni_start", exc)
+            self._start_omni_sidecar_asr()
             threading.Thread(target=self._speak_opening_after_grace, daemon=True).start()
             self._read_loop()
         except Exception as exc:  # noqa: BLE001
-            self.logger.emit("call_error", callId=self.call_id, error=str(exc), mode="omni")
+            if self._is_intentional_socket_close(exc):
+                self.logger.emit(
+                    "call_closed",
+                    callId=self.call_id,
+                    reason=self._intentional_close_reason,
+                    detail="客户明确结束后系统主动关闭 AudioSocket。",
+                    mode="omni",
+                )
+            else:
+                self.logger.emit("call_error", callId=self.call_id, error=str(exc), mode="omni")
         finally:
             self.stop_event.set()
             self.interrupt_event.set()
+            self._record_learning_summary()
+            self._stop_startup_keepalive()
+            self._stop_asr()
             self._stop_omni()
             self._stop_audio_capture()
             try:
@@ -1113,6 +1890,64 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             turn_detection_silence_duration_ms=650,
             turn_detection_param={"interrupt_response": True, "create_response": False},
             instructions=build_video_group_buying_sales_instructions(),
+        )
+
+    def _enable_omni_pipeline_fallback(self, source: str, exc: Exception) -> None:
+        with self._omni_lock:
+            if self._omni_pipeline_fallback:
+                return
+            self._omni_pipeline_fallback = True
+            self._omni = None
+            self._omni_closed = True
+        self.logger.emit(
+            "omni_start_failed_fallback",
+            callId=self.call_id,
+            source=source,
+            error=str(exc),
+            mode="omni",
+            fallbackMode="pipeline",
+            detail=(
+                "本通电话前端选择稳定分段语音 Pipeline，当前 Omni bridge 已按单通话切到本地 ASR+LLM+TTS pipeline。"
+                if source == "requested_pipeline_route"
+                else "Omni 实时连接启动失败，本通电话自动降级到本地 ASR+LLM+TTS pipeline，避免接通后直接挂断。"
+            ),
+        )
+        try:
+            if not self._turn_thread.is_alive():
+                self._turn_thread.start()
+        except RuntimeError:
+            pass
+
+    def _context_conversation_route(self) -> str:
+        value = str(
+            self._call_context.get("effectiveRoute")
+            or self._call_context.get("requestedRoute")
+            or ""
+        ).strip().lower()
+        if value in {"pipeline", "omni"}:
+            return value
+        return ""
+
+    def _is_omni_pipeline_fallback(self) -> bool:
+        with self._omni_lock:
+            return self._omni_pipeline_fallback
+
+    def _start_omni_sidecar_asr(self) -> None:
+        try:
+            self._start_asr()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit(
+                "omni_sidecar_asr_error",
+                callId=self.call_id,
+                error=str(exc),
+                detail="Omni 旁路实时 ASR 启动失败，将退回仅等待 Omni final 转写。",
+            )
+            return
+        self.logger.emit(
+            "omni_sidecar_asr_started",
+            callId=self.call_id,
+            model=self.config.asr_model,
+            detail="已启动旁路实时 ASR，用于快速断句和低延迟回复兜底。",
         )
 
     def _stop_omni(self) -> None:
@@ -1149,6 +1984,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._speak("这边线路有点不稳，我稍后再联系您。", "omni_unavailable", generation, close_after=True)
 
     def _speak_opening_after_grace(self) -> None:
+        if self._is_omni_pipeline_fallback():
+            super()._speak_opening_after_grace()
+            return
         grace = max(0.0, self.config.opening_grace_seconds)
         if grace and self.customer_activity_event.wait(grace):
             self.logger.emit("opening_deferred", callId=self.call_id, reason="remote_audio_detected", mode="omni")
@@ -1156,7 +1994,30 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 return
         if self._mark_opening_started():
             self.logger.emit("opening_start", callId=self.call_id, mode="omni", text=self.config.opening_text)
+            if not self._is_omni_session_ready():
+                with self.generation_lock:
+                    generation = self.speech_generation
+                self.logger.emit(
+                    "omni_opening_local_fallback",
+                    callId=self.call_id,
+                    generation=generation,
+                    detail="真人已接听但 Omni session 尚未 ready，先用本地实时 TTS 播短开场，避免电话里沉默。",
+                )
+                threading.Thread(
+                    target=self._speak,
+                    args=(self.config.opening_text, "omni_opening_local_fallback", generation),
+                    daemon=True,
+                ).start()
+                return
             self._request_omni_response(f"电话刚接通。只说这一句，不要改写，不要加问句，不要展开：{self.config.opening_text}")
+
+    def mark_omni_session_ready(self) -> None:
+        with self._omni_lock:
+            self._omni_session_ready = True
+
+    def _is_omni_session_ready(self) -> bool:
+        with self._omni_lock:
+            return self._omni_session_ready
 
     def _request_omni_response(self, instruction: str) -> None:
         if not self._omni or self.stop_event.is_set():
@@ -1185,11 +2046,89 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni_pending_customer_text = text
             self._omni_pending_signal = "call_screening"
         self._request_omni_response(build_omni_turn_instruction(text, "call_screening"))
+        self._schedule_call_screening_hangup(source)
+
+    def note_asr_partial_text(self, text: str) -> None:
+        if self._is_omni_pipeline_fallback():
+            super().note_asr_partial_text(text)
+            return
+        clean = " ".join(text.strip().split())
+        if not clean:
+            return
+        self._note_customer_activity("omni_sidecar_asr_partial", text=clean)
+        with self._omni_lock:
+            if self._omni_barge_collecting:
+                self._omni_barge_last_text = clean
+        if not should_commit_stable_asr_partial(clean):
+            with self.asr_partial_lock:
+                if self._asr_partial_text and clean != self._asr_partial_text:
+                    self._asr_partial_generation += 1
+                    self._asr_partial_text = ""
+            self.logger.emit(
+                "turn_waiting_final",
+                callId=self.call_id,
+                text=clean,
+                provider="qwen_asr_sidecar",
+                reason="incomplete_or_nonactionable_partial",
+                detail="旁路 ASR partial 还不够完整，继续等 final 或更稳定的短句。",
+            )
+            return
+        with self.asr_partial_lock:
+            self._asr_partial_generation += 1
+            generation = self._asr_partial_generation
+            self._asr_partial_text = clean
+        delay = _asr_partial_stable_delay_seconds(clean)
+        self.logger.emit(
+            "turn_endpoint_candidate",
+            callId=self.call_id,
+            text=clean,
+            provider="qwen_asr_sidecar",
+            waitMs=int(delay * 1000),
+            detail="旁路 ASR 已拿到可回答短句；若 Omni final 未到，将先触发回复。",
+        )
+        threading.Thread(
+            target=self._commit_omni_sidecar_asr_partial_after_delay,
+            args=(generation, clean, delay),
+            name="ai-acq-omni-sidecar-asr-partial-turn",
+            daemon=True,
+        ).start()
+
+    def commit_asr_final_text(self, text: str) -> None:
+        if self._is_omni_pipeline_fallback():
+            super().commit_asr_final_text(text)
+            return
+        self._cancel_pending_asr_partial_turn("omni_sidecar_asr_final")
+        self.logger.emit(
+            "turn_endpoint_final",
+            callId=self.call_id,
+            text=text,
+            provider="qwen_asr_sidecar",
+            detail="旁路 ASR final 已到达，先触发 Omni 回复，避免等待 Omni 自身 final。",
+        )
+        self.handle_omni_transcription(text, provider="qwen_asr_sidecar", source="omni_sidecar_asr_final")
+
+    def _commit_omni_sidecar_asr_partial_after_delay(self, generation: int, text: str, delay: float) -> None:
+        time.sleep(delay)
+        if self.stop_event.is_set():
+            return
+        with self.asr_partial_lock:
+            if generation != self._asr_partial_generation or text != self._asr_partial_text:
+                return
+        if not should_commit_stable_asr_partial(text):
+            return
+        self.logger.emit(
+            "asr_partial_stable",
+            callId=self.call_id,
+            text=text,
+            provider="qwen_asr_sidecar",
+            waitMs=int(delay * 1000),
+            detail="Omni final 尚未到达，旁路 ASR 短句已稳定，先接话避免客户空等。",
+        )
+        self.handle_omni_transcription(text, provider="qwen_asr_sidecar", source="omni_sidecar_asr_partial_stable")
 
     def handle_omni_speech_started(self) -> None:
-        self.customer_activity_event.set()
         now = time.monotonic()
-        self._last_remote_audio_at = now
+        self._note_customer_activity("omni_speech_started", now=now)
         if self.speaking_event.is_set():
             self.cancel_pending_speech("Omni 检测到客户插话，停止当前语音回复。", source="omni_vad")
             self._release_omni_playback_after_barge("omni_vad", now=now)
@@ -1216,13 +2155,62 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     self._omni_barge_server_committed = True
         self.logger.emit("omni_input_buffer_event", **fields)
 
-    def handle_omni_transcription(self, text: str) -> None:
+    def handle_omni_transcription(
+        self,
+        text: str,
+        *,
+        provider: str = "qwen_omni",
+        source: str = "omni_transcription",
+    ) -> None:
         clean = " ".join(text.strip().split())
         if not clean:
             return
-        self.customer_activity_event.set()
+        self._note_customer_activity(source, text=clean)
+        raw_clean = clean
+        signal = classify_realtime_call_input(clean)
+        if signal == "system_prompt":
+            human_tail = extract_human_text_after_system_prompt(clean)
+            if human_tail:
+                self.logger.emit(
+                    "system_prompt_stripped",
+                    callId=self.call_id,
+                    text=raw_clean,
+                    strippedText=human_tail,
+                    provider=provider,
+                    detail="ASR 同一句里包含系统提示和真人客户语音，已只剥离系统提示并继续回复真人内容。",
+                )
+                clean = human_tail
+                signal = classify_realtime_call_input(clean)
+                if signal == "system_prompt":
+                    signal = "human_speech"
         human_confirmed_before = self._human_speech_confirmed
         self.handle_answer_text(clean, is_final=True)
+        duplicate_turn = self._is_recent_committed_customer_text(clean)
+        with self._omni_lock:
+            barge_collecting = self._omni_barge_collecting
+        if duplicate_turn:
+            if barge_collecting:
+                with self._omni_lock:
+                    self._omni_barge_last_text = clean
+                    self._omni_barge_last_voice_at = time.monotonic()
+                self.logger.emit(
+                    "customer_turn_duplicate_ignored",
+                    callId=self.call_id,
+                    text=clean,
+                    provider=provider,
+                    source=source,
+                    detail="打断恢复期间只收到重复转写，继续等待恢复兜底，不能让 AI 静默。",
+                )
+                return
+            self.logger.emit(
+                "customer_turn_duplicate_ignored",
+                callId=self.call_id,
+                text=clean,
+                provider=provider,
+                source=source,
+                detail="同一句客户话已经由更快的 ASR/Omni 通道触发过回复，避免重复回答。",
+            )
+            return
         skip_response_after_forced_barge = False
         replace_forced_barge_response = False
         with self._omni_lock:
@@ -1232,9 +2220,30 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     skip_response_after_forced_barge = True
                 else:
                     replace_forced_barge_response = True
-        signal = classify_realtime_call_input(clean)
-        self.logger.emit("asr_final", callId=self.call_id, text=clean, provider="qwen_omni", signal=signal)
+        asr_fields: dict[str, Any] = {"callId": self.call_id, "text": clean, "provider": provider, "signal": signal}
+        if source != "omni_transcription":
+            asr_fields["source"] = source
+        if raw_clean != clean:
+            asr_fields["rawText"] = raw_clean
+        self.logger.emit("asr_final", **asr_fields)
+        self.logger.emit(
+            "turn_endpoint_final",
+            callId=self.call_id,
+            text=clean,
+            provider=provider,
+            source=source,
+            detail="客户本轮说话已由实时 ASR 端点提交，可以触发回复。",
+        )
         if signal == "system_prompt":
+            if classify_answer_text(clean) == CallAnswerType.VOICEMAIL:
+                self.logger.emit(
+                    "voicemail_detected",
+                    callId=self.call_id,
+                    text=clean,
+                    detail="识别到语音信箱/留言提示，直接挂断不留言。",
+                )
+                self.stop_event.set()
+                return
             self._system_prompt_seen = True
             self.logger.emit(
                 "system_prompt_ignored",
@@ -1243,8 +2252,20 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 detail="识别到运营商或手机系统提示，已忽略，不触发销售回复。",
             )
             return
-        intent, _node = _classify_intent(clean)
-        stage = self._sales_fsm.update(clean, intent, signal)
+        normalization = normalize_realtime_sales_text(clean)
+        routed_clean = normalization.normalized_text
+        if normalization.changed:
+            self.logger.emit(
+                "asr_sales_text_normalized",
+                callId=self.call_id,
+                text=clean,
+                normalizedText=routed_clean,
+                provider=provider,
+                fixes=list(normalization.fixes),
+                detail="实时 ASR 文本进入销售脑前已做高置信语境纠错，原始转写仍保留在 ASR 事件中。",
+            )
+        intent, _node = _classify_intent(routed_clean)
+        stage = self._sales_fsm.update(routed_clean, intent, signal)
         stage_instruction = self._sales_fsm.get_stage_instruction()
         if signal in {"terminal_close", "rejection"}:
             if self._omni:
@@ -1284,16 +2305,13 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 text=clean,
                 detail="识别到电话助理/秘书提示，先说明身份和来电原因，等待真人转接。",
             )
+            self._schedule_call_screening_hangup("omni_transcription")
         elif not human_confirmed_before:
             first_human_after_screening = self._call_screening_seen
             if not self._human_speech_confirmed:
-                self._human_speech_confirmed = True
-                self.logger.emit(
-                    "human_speech_confirmed",
-                    callId=self.call_id,
-                    text=clean,
-                    detail="已识别到真人客户语音，可以进入实时对话。",
-                )
+                self._confirm_human_speech(clean, detail="已识别到真人客户语音，可以进入实时对话。")
+        if signal != "call_screening":
+            self._record_realtime_intent_signal(routed_clean, intent, signal, source)
         if skip_response_after_forced_barge:
             self.logger.emit(
                 "barge_transcription_after_forced_response",
@@ -1314,6 +2332,25 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 detail="打断后的文字转写先于强制回复音频到达，改用文字转写生成更准确回复。",
             )
         history_snapshot = list(self._conversation_history)
+        self._remember_committed_customer_text(clean)
+        self.logger.emit(
+            "turn_reply_preparing",
+            callId=self.call_id,
+            text=routed_clean,
+            source=source,
+            detail="客户本轮已提交给实时语音模型，准备生成回复。",
+        )
+        self.logger.emit(
+            "turn_llm_start",
+            callId=self.call_id,
+            text=routed_clean,
+            intent=intent,
+            signal=signal,
+            salesStage=stage.value,
+            historyTurns=len(history_snapshot),
+            provider=provider,
+            detail="客户本轮已进入 Omni 回复生成，等待首个音频块。",
+        )
         with self._omni_lock:
             self._omni_pending_customer_text = clean
             self._omni_pending_signal = signal
@@ -1330,14 +2367,17 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         )
 
     def _handle_audio(self, payload: bytes) -> None:
+        if self._is_omni_pipeline_fallback():
+            super()._handle_audio(payload)
+            return
         if self._audio_capture:
             self._audio_capture.write_inbound(payload)
         rms = _pcm_rms(payload)
         now = time.monotonic()
+        self._emit_remote_audio_sample(rms, now)
         self._handle_answer_audio(rms, now)
         if rms >= self.config.barge_rms_threshold:
-            self.customer_activity_event.set()
-            self._last_remote_audio_at = now
+            self._note_customer_activity("omni_remote_audio", now=now)
         if self.speaking_event.is_set() and self._omni_local_barge_ready():
             if rms >= self.config.barge_rms_threshold:
                 self._loud_frames += 1
@@ -1356,6 +2396,11 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     self.handle_omni_closed("append_error", exc)
                 else:
                     self.logger.emit("omni_audio_append_error", callId=self.call_id, error=str(exc))
+        if self._recognition and payload:
+            try:
+                self._recognition.send_audio_frame(payload)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("omni_sidecar_asr_audio_error", callId=self.call_id, error=str(exc))
         self._maybe_commit_omni_barge_turn(now, rms)
 
     def _omni_local_barge_ready(self) -> bool:
@@ -1381,6 +2426,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni_barge_forced_requested = False
             self._omni_barge_server_stopped = False
             self._omni_barge_server_committed = False
+            self._omni_barge_last_text = ""
+            self._omni_barge_recovery_generation += 1
+            recovery_generation = self._omni_barge_recovery_generation
         if self._omni:
             try:
                 self._omni.cancel_response()
@@ -1394,19 +2442,47 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             cancelledResponseId=cancelled_response_id,
             detail="已停止本地播放并恢复监听，等待客户本轮语音最终识别后再回复。",
         )
+        threading.Thread(
+            target=self._omni_barge_recovery_watchdog,
+            args=(recovery_generation,),
+            name="ai-acq-omni-barge-recovery-watchdog",
+            daemon=True,
+        ).start()
 
     def _maybe_commit_omni_barge_turn(self, now: float, rms: int) -> None:
         if rms >= self.config.barge_rms_threshold:
             with self._omni_lock:
                 if self._omni_barge_collecting:
                     self._omni_barge_last_voice_at = now
+        self._commit_omni_barge_recovery("omni_rms_recovery", now=now)
+
+    def _omni_barge_recovery_watchdog(self, generation: int) -> None:
+        time.sleep(OMNI_BARGE_RECOVERY_WATCHDOG_SECONDS)
+        if self.stop_event.is_set():
+            return
+        self._commit_omni_barge_recovery(
+            "barge_recovery_watchdog",
+            now=time.monotonic(),
+            recovery_generation=generation,
+        )
+
+    def _commit_omni_barge_recovery(
+        self,
+        source: str,
+        *,
+        now: float,
+        recovery_generation: int | None = None,
+    ) -> bool:
         with self._omni_lock:
             collecting = self._omni_barge_collecting
             started_at = self._omni_barge_started_at
             last_voice_at = self._omni_barge_last_voice_at
             forced_requested = self._omni_barge_forced_requested
+            current_generation = self._omni_barge_recovery_generation
+            if recovery_generation is not None and recovery_generation != current_generation:
+                return False
             if not collecting or forced_requested:
-                return
+                return False
             elapsed = now - started_at
             silence = now - last_voice_at
             should_commit = elapsed >= OMNI_BARGE_RECOVERY_MIN_SECONDS and (
@@ -1414,29 +2490,34 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 or elapsed >= OMNI_BARGE_RECOVERY_MAX_SECONDS
             )
             if not should_commit:
-                return
+                return False
             self._omni_barge_collecting = False
             self._omni_barge_forced_requested = True
             self._omni_barge_forced_response_until = now + OMNI_BARGE_FORCED_RESPONSE_SKIP_SECONDS
             self._omni_barge_forced_audio_started = False
+            last_reply = self._last_omni_reply
+            last_customer_text = self._omni_barge_last_text or self._omni_pending_customer_text
+        if not last_customer_text:
+            with self.asr_partial_lock:
+                last_customer_text = self._last_committed_customer_text
         if not self._omni or self.stop_event.is_set():
-            return
+            return False
         self.logger.emit(
             "barge_turn_committed",
             callId=self.call_id,
+            source=source,
             elapsedMs=int(elapsed * 1000),
             silenceMs=int(silence * 1000),
             detail="客户打断后短暂停顿，已在一秒内请求恢复回复；若随后转写到达会改用转写回复。",
         )
-        with self._omni_lock:
-            last_reply = self._last_omni_reply
         self._request_omni_response(
             build_barge_recovery_instruction(
                 list(self._conversation_history),
-                last_customer_text="",
+                last_customer_text=last_customer_text,
                 last_assistant_reply=last_reply,
             )
         )
+        return True
 
     def start_omni_response(self, response_id: str) -> None:
         with self._omni_lock:
@@ -1512,7 +2593,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
 
     def _local_omni_timeout_reply(self, pending_text: str, pending_signal: str) -> str:
         signal = (pending_signal or "").strip()
-        text = (pending_text or "").strip()
+        normalization = normalize_realtime_sales_text(pending_text or "")
+        text = normalization.normalized_text
         if signal == "call_screening":
             return "您好，我这边做视频号团购到店获客，来电想确认门店微信同城曝光合作，麻烦转接负责人，谢谢。"
         if signal in {"identity_handoff", "human_greeting"}:
@@ -1520,11 +2602,15 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if signal == "audio_issue":
             return "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
         if signal == "repetition_complaint":
-            return "明白，我不重复。您想听费用、效果，还是和美团区别？"
+            return "我不重复。您想听费用、效果，还是和美团区别？"
         if signal == "direct_answer_only":
-            return "明白，不推资料。您直接问费用、效果或流程，我按问题答。"
+            return "不推资料。您直接问费用、效果或流程，我按问题答。"
         if signal in {"terminal_close", "rejection"}:
             return "好的，不打扰了，再见。"
+        if normalization.has_fix("group_buying_package"):
+            return "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
+        if any(keyword in text for keyword in ["套餐", "介绍", "流程", "怎么合作", "说一下", "讲一下"]):
+            return "套餐主要三块：看品类，设计团购券，再小范围测曝光、咨询和到店。"
         if any(keyword in text for keyword in ["费用", "价格", "收费", "要钱", "付费"]):
             return "这是付费服务，费用看套餐和投放节奏，不合适不建议做。"
         if any(keyword in text for keyword in ["美团", "抖音", "大众点评"]):
@@ -1726,6 +2812,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             firstAudioMs=first_audio_ms,
             generation=generation,
         )
+        if not interrupted:
+            self._schedule_no_response_hangup("omni_response")
 
 
 def synthesize_tts_pcm(text: str, config: BridgeConfig) -> bytes:
@@ -1917,6 +3005,8 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         debug_audio_capture_dir=Path(settings.realtime_debug_audio_capture_dir).expanduser(),
         audio_quality_enabled=settings.realtime_audio_quality_enabled,
         answer_classification_seconds=max(0.5, min(10.0, settings.realtime_answer_classification_seconds)),
+        call_screening_hangup_seconds=max(0.0, min(45.0, settings.realtime_call_screening_hangup_seconds)),
+        no_response_hangup_seconds=max(0.0, min(90.0, settings.realtime_no_response_hangup_seconds)),
     )
 
 
@@ -2070,6 +3160,8 @@ def config_summary(config: BridgeConfig) -> dict[str, object]:
         "debugAudioCaptureDir": str(config.debug_audio_capture_dir),
         "audioQualityEnabled": config.audio_quality_enabled,
         "answerClassificationSeconds": config.answer_classification_seconds,
+        "callScreeningHangupSeconds": config.call_screening_hangup_seconds,
+        "noResponseHangupSeconds": config.no_response_hangup_seconds,
     }
 
 

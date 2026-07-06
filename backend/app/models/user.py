@@ -92,6 +92,7 @@ class RegistrationRequest(Base):
     contact_phone: Mapped[str] = mapped_column(String(40), index=True)
     contact_email: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     desired_username: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="待审核", index=True)
     reviewer_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)

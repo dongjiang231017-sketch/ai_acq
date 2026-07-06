@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import settings
+from app.services.realtime_call_learning import build_realtime_learning_instruction
 from app.services.realtime_sales_brain import render_sales_reply
+from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 from app.services.runtime_ai_config import RuntimeAiConfig, get_runtime_ai_config
 
 
@@ -48,6 +50,7 @@ _CONTEXT_LOCAL_FIRST_INTENTS = {
     "身份确认",
     "听不清/澄清",
     "合作咨询",
+    "需求探索",
     "效果询问",
     "找负责人",
     "已有渠道",
@@ -143,6 +146,14 @@ def generate_realtime_reply(
             latency_ms=int((time.perf_counter() - started) * 1000),
             fallback_used=True,
             error="DeepSeek 返回空回复",
+        )
+    if _repeats_recent_reply(cleaned, history):
+        return RealtimeReplyResult(
+            reply=contextual_reply,
+            strategy="local_context_deepseek_repeat_suppressed",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            fallback_used=True,
+            error="DeepSeek 回复与近期话术重复，已切回本地去重话术。",
         )
     return RealtimeReplyResult(
         reply=cleaned,
@@ -366,7 +377,8 @@ def _build_contextual_local_reply(
 
 
 def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[dict[str, str]]) -> DialogueSignal:
-    clean = text.strip()
+    normalization = normalize_realtime_sales_text(text)
+    clean = normalization.normalized_text
     compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
     last_assistant = _last_history_content(conversation_history, "assistant")
     last_user = _last_history_content(conversation_history, "user")
@@ -374,7 +386,25 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
     if compact in {"喂", "喂喂", "你好", "您好", "在", "在在", "你谁", "谁", "谁啊", "谁呀", "哪位", "您哪位", "你哪位"} or intent == "身份确认":
         return DialogueSignal("identity", direct_question=True)
 
-    if _has_any(clean, ["重复", "一直说", "总是说", "总说", "老说", "老是说", "别重复", "不要重复", "不要总", "你怎么总", "你老是"]):
+    if _has_any(
+        clean,
+        [
+            "重复",
+            "一直说",
+            "总是说",
+            "总说",
+            "老说",
+            "老是说",
+            "别重复",
+            "不要重复",
+            "不要总",
+            "你怎么总",
+            "你老是",
+            "老是说明白",
+            "总说明白",
+            "一直说明白",
+        ],
+    ):
         return DialogueSignal("repetition_complaint", direct_question=True, complaint=True)
 
     if _declines_materials_only(clean):
@@ -400,6 +430,17 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
 
     if _has_any(clean, ["保证", "承诺", "保底"]):
         return DialogueSignal("guarantee", direct_question=True)
+
+    if normalization.has_fix("group_buying_package") or (
+        "团购套餐" in clean and _has_any(clean, ["什么", "什么意思", "怎么做", "要帮我"])
+    ):
+        return DialogueSignal("process", direct_question=True, from_context_repair=normalization.changed)
+
+    if _has_any(clean, ["我都说了", "刚说了", "刚才说了", "不是说了", "都说了"]) and _has_any(
+        clean,
+        ["新客到店", "到店客", "到店", "客流", "获客", "新客"],
+    ):
+        return DialogueSignal("need_confirmed", direct_question=True)
 
     if _has_any(last_assistant, ["更关心到店客流", "还是怎么合作", "效果，还是费用"]) and _has_any(
         clean,
@@ -433,6 +474,10 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
             "具体讲",
             "详细讲",
             "详细讲解",
+            "详细说",
+            "说详细",
+            "细说",
+            "展开说",
             "讲解一下",
         ],
     ):
@@ -473,6 +518,7 @@ def _should_answer_locally_first(signal: DialogueSignal) -> bool:
         "context_repair",
         "repetition_complaint",
         "direct_answer_only",
+        "need_confirmed",
     }
 
 
@@ -518,6 +564,22 @@ def _has_any(text: str, keywords: list[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def _repeats_recent_reply(reply: str, history: list[dict[str, str]]) -> bool:
+    normalized = _normalize_reply(reply)
+    if not normalized:
+        return False
+    recent = [
+        _normalize_reply(turn.get("content", ""))
+        for turn in history[-10:]
+        if (turn.get("role") or "").strip().lower() == "assistant"
+    ]
+    return normalized in {item for item in recent if item}
+
+
+def _normalize_reply(text: str) -> str:
+    return re.sub(r"[\s。！？?!，,、.；;：:\"'“”‘’（）()]+", "", str(text).lower())
+
+
 def _avoid_repeat(reply: str, last_assistant: str, topic_alternatives: list[str] | None = None) -> str:
     if not last_assistant or reply.strip() != last_assistant.strip():
         return reply
@@ -544,6 +606,11 @@ def _request_deepseek_reply(
     stage_instruction: str = "",
 ) -> str:
     recent_history = _format_conversation_history(conversation_history or [])
+    learning_instruction = build_realtime_learning_instruction(limit=3)
+    normalization = normalize_realtime_sales_text(text)
+    normalized_hint = ""
+    if normalization.changed:
+        normalized_hint = f"ASR语境修正：{normalization.raw_text} -> {normalization.normalized_text}\n"
     payload = {
         "model": runtime_config.deepseek_chat_model,
         "messages": [
@@ -558,6 +625,7 @@ def _request_deepseek_reply(
                     "必须先回答客户当前问题，再轻轻推进下一步。"
                     "客户说不要资料、不加微信、直接回答、别重复时，本轮停止推进资料和微信，只回答问题。"
                     "客户重复追问时必须换角度回答，不要复读上一轮。客户插话后直接接着答，不解释上一句为什么停了。"
+                    "如果最近通话复盘指出某类问题重复回答，本轮必须换角度。"
                     "语气要像真人电销：先承接情绪，再给一个短解释，必要时问一个选择题。"
                     "客户问你是谁、做什么，就直接说明身份和服务；客户问效果、费用、怎么做、怎么发资料，"
                     "就针对问题回答；客户说没听懂，就换更短说法；客户只是嗯、好、可以，要承接上一轮继续说重点。"
@@ -571,8 +639,10 @@ def _request_deepseek_reply(
                     f"商家：{merchant_name or '客户门店'}\n"
                     f"本地意图：{intent}\n"
                     f"销售状态：{stage_instruction or '无'}\n"
+                    f"{learning_instruction}\n"
                     f"最近对话：\n{recent_history}\n"
-                    f"客户刚说：{text}\n"
+                    f"{normalized_hint}"
+                    f"客户刚说：{normalization.normalized_text or text}\n"
                     "请给出下一句电话回复，必须像真人顺着客户的话回答，不要像录播话术。"
                 ),
             },
@@ -666,6 +736,7 @@ def _clean_phone_reply(reply: str) -> str:
     cleaned = re.sub(r"\s+", " ", reply).strip()
     cleaned = cleaned.strip("`*_#- \t\r\n")
     cleaned = cleaned.replace("AI：", "").replace("客服：", "").strip()
+    cleaned = re.sub(r"^(明白|好的|好)[，。,.\s]+", "", cleaned, count=1)
     max_chars = max(24, get_runtime_ai_config().realtime_reply_max_chars)
     if len(cleaned) <= max_chars:
         return cleaned

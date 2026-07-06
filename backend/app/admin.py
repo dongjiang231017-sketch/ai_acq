@@ -1,15 +1,20 @@
+import os
+import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
-from secrets import compare_digest
+from secrets import choice, compare_digest, token_hex
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from sqlalchemy import func, select
 from sqladmin import Admin, Flash, ModelView, action
 from sqladmin.authentication import AuthenticationBackend
 from sqladmin.forms import ModelConverter
+from sqladmin.secret import Secret
 from sqladmin.widgets import BooleanInputWidget
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from wtforms import PasswordField
 from wtforms.validators import InputRequired, Optional
 
@@ -18,6 +23,7 @@ from app.core.security import hash_password, verify_password
 from app.db.session import SessionLocal, engine
 from app.models.audit import AuditLog
 from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
+from app.models.delivery import VoiceGatewayDeviceDiscovery, VoiceGatewayLine, VoiceGatewayLineEvent
 from app.models.growth import (
     FollowUpWorkOrder,
     IntentCustomer,
@@ -59,9 +65,32 @@ from app.services.registration import (
     approve_registration_request,
     reject_registration_request,
 )
+from app.services.voice_gateway_delivery import (
+    VoiceGatewayRedeliveryError,
+    find_redelivery_discovery_for_line,
+    redeliver_voice_gateway_line,
+)
+from app.services.voice_gateway_profiles import PROFILE_DEFAULTS
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+DEFAULT_SIP_SERVER_HOST = "101.132.63.159"
+DEFAULT_CODEC_PRIMARY = "PCMA/alaw"
+DEFAULT_CODEC_SECONDARY = "PCMU/ulaw"
+DEFAULT_DTMF_MODE = "RFC2833/RFC4733"
+DEFAULT_RTP_RANGE = "10000-20000/UDP"
+DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
+SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+ASTERISK_DYNAMIC_PJSIP_PATH = Path(
+    os.getenv("AI_ACQ_ASTERISK_DYNAMIC_PJSIP_PATH", "/etc/asterisk/pjsip_ai_acq_delivery_dynamic.conf")
+)
+PROFILE_CHANNEL_DEFAULTS = {
+    "dinstar_8t_server": 8,
+    "multi_sim_lte_gateway": 8,
+    "uc100_sip_volte": 1,
+    "sip_volte_gateway": 1,
+    "sip_trunk": 1,
+}
 
 if not hasattr(BooleanInputWidget, "validation_attrs"):
     BooleanInputWidget.validation_attrs = ["required", "disabled"]
@@ -360,6 +389,8 @@ class RegistrationRequestAdmin(ModelView, model=RegistrationRequest):
     ]
     column_sortable_list = [RegistrationRequest.created_at, RegistrationRequest.updated_at, RegistrationRequest.status]
     column_default_sort = [(RegistrationRequest.created_at, True)]
+    column_details_exclude_list = [RegistrationRequest.password_hash]
+    form_excluded_columns = [RegistrationRequest.password_hash]
     column_labels = {
         RegistrationRequest.project_name: "客户/项目",
         RegistrationRequest.company_name: "公司名称",
@@ -431,7 +462,10 @@ class RegistrationRequestAdmin(ModelView, model=RegistrationRequest):
             with SessionLocal() as db:
                 try:
                     account = approve_registration_request(db, request_id, actor_username)
-                    approved_accounts.append(f"{account.username}（初始密码：{account.initial_password}）")
+                    if account.used_requested_password:
+                        approved_accounts.append(f"{account.username}（使用客户申请时设置的密码）")
+                    else:
+                        approved_accounts.append(f"{account.username}（初始密码：{account.initial_password}）")
                 except RegistrationReviewError as exc:
                     errors.append(str(exc))
 
@@ -1539,6 +1573,906 @@ class SystemSettingAdmin(ModelView, model=SystemSetting):
     }
 
 
+def _admin_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _admin_fk_id(value: object) -> str:
+    if hasattr(value, "id"):
+        return _admin_text(getattr(value, "id"))
+    return _admin_text(value)
+
+
+def _admin_profile_defaults(key: str) -> dict[str, object]:
+    return PROFILE_DEFAULTS.get(key, PROFILE_DEFAULTS["sip_volte_gateway"])
+
+
+def _admin_slug(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", value).strip("_").lower()
+    return cleaned[:40] or token_hex(4)
+
+
+def _admin_generate_sip_password(length: int = 24) -> str:
+    return "".join(choice(SECRET_ALPHABET) for _ in range(length))
+
+
+def _admin_normalise_device_admin_url(admin_url: str | None, device_ip: str | None) -> str:
+    value = _admin_text(admin_url) or _admin_text(device_ip)
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        value = f"http://{value}"
+    value = _admin_strip_sip_port_from_admin_url(value)
+    return value.rstrip("/") + "/"
+
+
+def _admin_strip_sip_port_from_admin_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    try:
+        port = parsed.port
+    except ValueError:
+        return value
+    if port not in {5060, 5080, 15060} or not parsed.hostname:
+        return value
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{parsed.scheme or 'http'}://{host}{parsed.path or ''}"
+
+
+def _admin_append_note(current: str | None, note: str) -> str:
+    if not note:
+        return _admin_text(current)
+    line = f"{datetime.utcnow().isoformat(timespec='seconds')} {note}"
+    return f"{_admin_text(current)}\n{line}".strip() if _admin_text(current) else line
+
+
+def _admin_device_discovery_note(discovery: VoiceGatewayDeviceDiscovery) -> str:
+    parts = [f"source={discovery.source}", f"status={discovery.status}"]
+    if discovery.device_admin_url:
+        parts.append(f"admin={discovery.device_admin_url}")
+    if discovery.device_ip:
+        parts.append(f"ip={discovery.device_ip}")
+    if discovery.device_mac:
+        parts.append(f"mac={discovery.device_mac}")
+    if discovery.device_serial:
+        parts.append(f"serial={discovery.device_serial}")
+    if discovery.summary:
+        parts.append(discovery.summary)
+    return "；".join(part for part in parts if part)
+
+
+def _admin_latest_unmatched_device_discovery(owner_user_id: str) -> VoiceGatewayDeviceDiscovery | None:
+    if not owner_user_id:
+        return None
+    with SessionLocal() as db:
+        return db.scalar(
+            select(VoiceGatewayDeviceDiscovery)
+            .where(
+                VoiceGatewayDeviceDiscovery.owner_user_id == owner_user_id,
+                VoiceGatewayDeviceDiscovery.matched_line_id.is_(None),
+            )
+            .order_by(VoiceGatewayDeviceDiscovery.updated_at.desc(), VoiceGatewayDeviceDiscovery.created_at.desc())
+        )
+
+
+def _admin_owner(owner_user_id: str) -> User | None:
+    if not owner_user_id:
+        return None
+    with SessionLocal() as db:
+        return db.get(User, owner_user_id)
+
+
+def _admin_line_identity(owner: User | None, owner_user_id: str) -> tuple[str, str]:
+    owner_slug = _admin_slug((owner.username if owner else owner_user_id) or owner_user_id)
+    with SessionLocal() as db:
+        for _ in range(20):
+            suffix = token_hex(4)
+            sip_username = f"sip_{owner_slug}_{suffix}"
+            trunk_name = f"tg_{owner_slug}_{suffix}"
+            exists = db.scalar(
+                select(VoiceGatewayLine.id).where(
+                    (VoiceGatewayLine.sip_username == sip_username) | (VoiceGatewayLine.trunk_name == trunk_name)
+                )
+            )
+            if not exists:
+                return sip_username, trunk_name
+    suffix = token_hex(8)
+    return f"sip_{owner_slug}_{suffix}", f"tg_{owner_slug}_{suffix}"
+
+
+def _admin_prepare_voice_gateway_line_data(data: dict, model: VoiceGatewayLine, is_created: bool) -> None:
+    owner_user_id = _admin_fk_id(data.get("owner_user_id") or data.get("owner_user") or getattr(model, "owner_user_id", ""))
+    owner = _admin_owner(owner_user_id)
+    profile_key = _admin_text(data.get("gateway_profile_key") or getattr(model, "gateway_profile_key", "")) or "dinstar_8t_server"
+    profile = _admin_profile_defaults(profile_key)
+    discovery = _admin_latest_unmatched_device_discovery(owner_user_id)
+
+    if not _admin_text(data.get("line_name") or getattr(model, "line_name", "")):
+        customer = _admin_text(data.get("customer_name") or (owner.display_name if owner else "") or (owner.username if owner else ""))
+        data["line_name"] = f"{customer or '客户'} 语音网关 {datetime.utcnow().strftime('%m%d-%H%M')}"
+    if not _admin_text(data.get("customer_name") or getattr(model, "customer_name", "")):
+        data["customer_name"] = _admin_text((owner.display_name if owner else "") or (owner.username if owner else ""))
+
+    data["gateway_profile_key"] = profile_key
+    if not _admin_text(data.get("gateway_label") or getattr(model, "gateway_label", "")):
+        data["gateway_label"] = discovery.gateway_label or str(profile["label"]) if discovery else str(profile["label"])
+    if not _admin_text(data.get("gateway_vendor") or getattr(model, "gateway_vendor", "")):
+        data["gateway_vendor"] = str(profile["vendor"])
+    if not _admin_text(data.get("gateway_model") or getattr(model, "gateway_model", "")):
+        data["gateway_model"] = str(profile["model"])
+    if not _admin_text(data.get("gateway_category") or getattr(model, "gateway_category", "")):
+        data["gateway_category"] = str(profile["category"])
+    if not _admin_text(data.get("deployment_mode") or getattr(model, "deployment_mode", "")):
+        data["deployment_mode"] = "server"
+    if not _admin_text(data.get("sip_server_host") or getattr(model, "sip_server_host", "")):
+        data["sip_server_host"] = DEFAULT_SIP_SERVER_HOST
+    if not data.get("sip_server_port") and not getattr(model, "sip_server_port", None):
+        data["sip_server_port"] = 5060
+    if not _admin_text(data.get("sip_transport") or getattr(model, "sip_transport", "")):
+        data["sip_transport"] = "UDP"
+
+    needs_identity = (
+        is_created
+        or not _admin_text(data.get("sip_username") or getattr(model, "sip_username", ""))
+        or not _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", ""))
+        or not _admin_text(data.get("sip_password_hash") or getattr(model, "sip_password_hash", ""))
+    )
+    if needs_identity:
+        sip_username, trunk_name = _admin_line_identity(owner, owner_user_id)
+        if not _admin_text(data.get("sip_username") or getattr(model, "sip_username", "")):
+            data["sip_username"] = sip_username
+        if not _admin_text(data.get("sip_auth_username") or getattr(model, "sip_auth_username", "")):
+            data["sip_auth_username"] = data["sip_username"]
+        if not _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", "")):
+            data["trunk_name"] = trunk_name
+        if not _admin_text(data.get("sip_password_hash") or getattr(model, "sip_password_hash", "")):
+            data["sip_password_hash"] = hash_password(_admin_generate_sip_password())
+    else:
+        for field in ("sip_username", "sip_auth_username", "trunk_name", "sip_password_hash"):
+            if not _admin_text(data.get(field)):
+                data[field] = getattr(model, field, "")
+
+    trunk_name = _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", ""))
+    if not _admin_text(data.get("sip_auth_username") or getattr(model, "sip_auth_username", "")):
+        data["sip_auth_username"] = _admin_text(data.get("sip_username") or getattr(model, "sip_username", ""))
+    if not _admin_text(data.get("sip_password_secret_alias") or getattr(model, "sip_password_secret_alias", "")):
+        data["sip_password_secret_alias"] = f"voice-gateway/{owner_user_id}/{trunk_name}/sip-password"
+
+    if not data.get("channel_count") and not getattr(model, "channel_count", None):
+        data["channel_count"] = PROFILE_CHANNEL_DEFAULTS.get(profile_key, 1)
+    if not _admin_text(data.get("codec_primary") or getattr(model, "codec_primary", "")):
+        data["codec_primary"] = DEFAULT_CODEC_PRIMARY
+    if not _admin_text(data.get("codec_secondary") or getattr(model, "codec_secondary", "")):
+        data["codec_secondary"] = DEFAULT_CODEC_SECONDARY
+    if not _admin_text(data.get("dtmf_mode") or getattr(model, "dtmf_mode", "")):
+        data["dtmf_mode"] = DEFAULT_DTMF_MODE
+    if not _admin_text(data.get("rtp_port_range") or getattr(model, "rtp_port_range", "")):
+        data["rtp_port_range"] = DEFAULT_RTP_RANGE
+    if not _admin_text(data.get("route_direction") or getattr(model, "route_direction", "")):
+        data["route_direction"] = DEFAULT_ROUTE_DIRECTION
+
+    if discovery is not None:
+        if not _admin_text(data.get("device_admin_url") or getattr(model, "device_admin_url", "")):
+            data["device_admin_url"] = _admin_normalise_device_admin_url(discovery.device_admin_url, discovery.device_ip)
+        if not _admin_text(data.get("device_mac") or getattr(model, "device_mac", "")):
+            data["device_mac"] = discovery.device_mac
+        if not _admin_text(data.get("device_serial") or getattr(model, "device_serial", "")):
+            data["device_serial"] = discovery.device_serial
+        note = _admin_device_discovery_note(discovery)
+        data["network_note"] = _admin_append_note(data.get("network_note") or getattr(model, "network_note", ""), note)
+        if _admin_text(data.get("status") or getattr(model, "status", "")) in {"", "待配置", "待设备发现", "设备未发现"}:
+            data["status"] = "待设备注册"
+
+    if is_created and not _admin_text(data.get("notes") or getattr(model, "notes", "")):
+        data["notes"] = "SQLAdmin 自动生成线路；SIP 明文密码只通过配置卡/轮换接口一次性展示，不能从后台找回。"
+
+
+def _admin_mark_latest_discovery_matched(line: VoiceGatewayLine) -> None:
+    if not line.id or not line.owner_user_id:
+        return
+    with SessionLocal() as db:
+        discovery = db.scalar(
+            select(VoiceGatewayDeviceDiscovery)
+            .where(
+                VoiceGatewayDeviceDiscovery.owner_user_id == line.owner_user_id,
+                VoiceGatewayDeviceDiscovery.matched_line_id.is_(None),
+            )
+            .order_by(VoiceGatewayDeviceDiscovery.updated_at.desc(), VoiceGatewayDeviceDiscovery.created_at.desc())
+        )
+        if discovery is None:
+            return
+        discovery.matched_line_id = line.id
+        discovery.status = "matched"
+        discovery.updated_at = datetime.utcnow()
+        db.add(
+            VoiceGatewayLineEvent(
+                line_id=line.id,
+                owner_user_id=line.owner_user_id,
+                actor_user_id=None,
+                event_type="device_discovery",
+                status="matched",
+                summary="SQLAdmin 新增线路时自动匹配客户客户端发现的语音网关",
+                detail=_admin_device_discovery_note(discovery),
+                evidence_json=discovery.evidence_json,
+            )
+        )
+        db.commit()
+
+
+def _admin_selected_ids(request: Request) -> list[str]:
+    return [pk for pk in request.query_params.get("pks", "").split(",") if pk]
+
+
+def _admin_action_redirect(request: Request, identity: str) -> RedirectResponse:
+    return RedirectResponse(request.url_for("admin:list", identity=identity), status_code=302)
+
+
+def _admin_safe_pjsip_token(value: str, label: str) -> str:
+    token = _admin_text(value)
+    if not token or not re.fullmatch(r"[0-9A-Za-z_.@-]+", token):
+        raise ValueError(f"{label} 只能包含字母、数字、下划线、点、@ 或短横线")
+    return token
+
+
+def _admin_render_pjsip_line(line: VoiceGatewayLine, password: str) -> str:
+    trunk_name = _admin_safe_pjsip_token(line.trunk_name, "云端 Trunk")
+    sip_username = _admin_safe_pjsip_token(line.sip_username, "SIP 账号")
+    sip_auth_username = _admin_safe_pjsip_token(line.sip_auth_username or line.sip_username, "鉴权账号")
+    max_contacts = max(1, int(line.channel_count or 1))
+    context = "from-dinstar8t" if line.gateway_profile_key != "uc100_sip_volte" else "from-uc100"
+    auth_name = f"{sip_username}-auth"
+    aor_name = sip_username
+    endpoint_names = [sip_username]
+    if trunk_name != sip_username:
+        endpoint_names.append(trunk_name)
+
+    endpoint_blocks = "\n".join(
+        f"""[{endpoint_name}]
+type = endpoint
+transport = transport-udp
+context = {context}
+disallow = all
+allow = alaw
+allow = ulaw
+direct_media = no
+force_rport = yes
+rewrite_contact = yes
+rtp_symmetric = yes
+timers = no
+auth = {auth_name}
+aors = {aor_name}
+from_user = {sip_username}
+callerid = AI获客 <{sip_username}>
+"""
+        for endpoint_name in endpoint_names
+    )
+    return f"""; BEGIN AI_ACQ_LINE {line.id}
+{endpoint_blocks}
+[{auth_name}]
+type = auth
+auth_type = userpass
+username = {sip_auth_username}
+password = {password}
+
+[{aor_name}]
+type = aor
+max_contacts = {max_contacts}
+remove_existing = no
+qualify_frequency = 30
+; END AI_ACQ_LINE {line.id}
+"""
+
+
+def _admin_upsert_asterisk_dynamic_pjsip(line: VoiceGatewayLine, password: str) -> None:
+    path = ASTERISK_DYNAMIC_PJSIP_PATH
+    marker_start = f"; BEGIN AI_ACQ_LINE {line.id}"
+    marker_end = f"; END AI_ACQ_LINE {line.id}"
+    next_block = _admin_render_pjsip_line(line, password)
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    pattern = re.compile(
+        rf"^; BEGIN AI_ACQ_LINE {re.escape(line.id)}\n.*?^; END AI_ACQ_LINE {re.escape(line.id)}\n?",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if marker_start in current and marker_end in current:
+        updated = pattern.sub(next_block, current).strip() + "\n"
+    else:
+        updated = (current.rstrip() + "\n\n" + next_block).lstrip()
+    path.write_text(updated, encoding="utf-8")
+
+
+def _admin_reload_asterisk_pjsip() -> str:
+    commands = [
+        ["asterisk", "-rx", "pjsip reload"],
+        ["asterisk", "-rx", "dialplan reload"],
+    ]
+    outputs: list[str] = []
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=12)
+        output = (result.stdout or result.stderr or "").strip()
+        outputs.append(output)
+        if result.returncode != 0:
+            raise RuntimeError(output or f"{' '.join(command)} 执行失败")
+    return "；".join(item for item in outputs if item) or "Asterisk 已重新加载"
+
+
+class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
+    name = "语音网关线路"
+    name_plural = "语音网关线路"
+    icon = "fa-solid fa-network-wired"
+
+    column_list = [
+        VoiceGatewayLine.customer_name,
+        VoiceGatewayLine.line_name,
+        VoiceGatewayLine.gateway_label,
+        VoiceGatewayLine.device_admin_url,
+        VoiceGatewayLine.sip_server_host,
+        VoiceGatewayLine.sip_server_port,
+        VoiceGatewayLine.sip_transport,
+        VoiceGatewayLine.sip_username,
+        VoiceGatewayLine.trunk_name,
+        VoiceGatewayLine.channel_count,
+        VoiceGatewayLine.status,
+        VoiceGatewayLine.registration_status,
+        VoiceGatewayLine.acceptance_status,
+        VoiceGatewayLine.updated_at,
+    ]
+    column_searchable_list = [
+        VoiceGatewayLine.customer_name,
+        VoiceGatewayLine.line_name,
+        VoiceGatewayLine.sip_username,
+        VoiceGatewayLine.trunk_name,
+        VoiceGatewayLine.device_admin_url,
+        VoiceGatewayLine.device_mac,
+        VoiceGatewayLine.device_serial,
+    ]
+    column_sortable_list = [VoiceGatewayLine.created_at, VoiceGatewayLine.updated_at, VoiceGatewayLine.status]
+    column_default_sort = [(VoiceGatewayLine.updated_at, True)]
+    column_details_exclude_list = [VoiceGatewayLine.sip_password_hash]
+    form_excluded_columns = [VoiceGatewayLine.sip_password_hash, VoiceGatewayLine.events]
+    form_args = {
+        "line_name": {
+            "label": "线路名称",
+            "description": "可留空；后台会按客户账号自动生成。",
+            "validators": [Optional()],
+        },
+        "gateway_profile_key": {
+            "label": "网关档案",
+            "description": "默认鼎信 8T/通用语音网关；不要写死 UC100。",
+            "validators": [Optional()],
+        },
+        "gateway_label": {
+            "label": "网关名称",
+            "description": "可留空；后台按网关档案或客户客户端扫描结果自动生成。",
+            "validators": [Optional()],
+        },
+        "gateway_vendor": {"validators": [Optional()]},
+        "gateway_model": {"validators": [Optional()]},
+        "gateway_category": {"validators": [Optional()]},
+        "sip_server_host": {
+            "label": "SIP服务器",
+            "description": "可留空；默认生成云端公网 SIP 服务器 101.132.63.159。",
+            "validators": [Optional()],
+        },
+        "sip_server_port": {
+            "label": "SIP端口",
+            "description": "可留空；默认 5060。",
+            "validators": [Optional()],
+        },
+        "sip_transport": {
+            "label": "SIP协议",
+            "description": "可留空；默认 UDP。",
+            "validators": [Optional()],
+        },
+        "sip_username": {
+            "label": "SIP账号",
+            "description": "可留空；保存时按客户账号自动生成。",
+            "validators": [Optional()],
+        },
+        "sip_auth_username": {
+            "label": "鉴权账号",
+            "description": "可留空；默认与 SIP账号一致。",
+            "validators": [Optional()],
+        },
+        "sip_password_secret_alias": {
+            "label": "密码密钥别名",
+            "description": "这里不是明文密码。明文 SIP 密码只在生成或轮换时一次性显示；后台新增后如需交付给设备，请通过轮换/配置卡流程取得一次性密码。",
+            "validators": [Optional()],
+        },
+        "trunk_name": {
+            "label": "云端Trunk",
+            "description": "可留空；保存时按客户账号自动生成。",
+            "validators": [Optional()],
+        },
+        "channel_count": {
+            "label": "通道数",
+            "description": "可留空；鼎信 8T 默认 8 路，通用/UC100 默认 1 路。",
+            "validators": [Optional()],
+        },
+        "codec_primary": {"validators": [Optional()]},
+        "codec_secondary": {"validators": [Optional()]},
+        "dtmf_mode": {"validators": [Optional()]},
+        "rtp_port_range": {"validators": [Optional()]},
+        "route_direction": {"validators": [Optional()]},
+        "device_admin_url": {
+            "label": "设备后台地址",
+            "description": "可留空；如果客户客户端已经扫描到现场设备，保存线路时会自动带入。否则由交付电脑/客户端扫描、路由器 DHCP 列表、设备屏幕或说明书默认地址确认后填写。",
+            "validators": [Optional()],
+        },
+        "device_mac": {
+            "label": "设备MAC",
+            "description": "用于多客户/多设备时绑定具体硬件，避免换网络后只靠 IP 认错设备。",
+            "validators": [Optional()],
+        },
+        "device_serial": {
+            "label": "设备序列号",
+            "description": "建议提前录入设备标签或采购台账里的序列号，现场发现后与设备核对。",
+            "validators": [Optional()],
+        },
+        "network_note": {
+            "label": "网络说明",
+            "description": "记录客户现场网段、交换机/路由器 DHCP 线索、固定 IP 或保留地址等交付信息。",
+            "validators": [Optional()],
+        },
+    }
+    column_labels = {
+        VoiceGatewayLine.owner_user_id: "客户账号",
+        VoiceGatewayLine.created_by_user_id: "创建人",
+        VoiceGatewayLine.line_name: "线路名称",
+        VoiceGatewayLine.customer_name: "客户名称",
+        VoiceGatewayLine.status: "交付状态",
+        VoiceGatewayLine.gateway_profile_key: "网关档案",
+        VoiceGatewayLine.gateway_label: "网关名称",
+        VoiceGatewayLine.gateway_vendor: "厂商",
+        VoiceGatewayLine.gateway_model: "型号",
+        VoiceGatewayLine.gateway_category: "类型",
+        VoiceGatewayLine.deployment_mode: "部署模式",
+        VoiceGatewayLine.sip_server_host: "SIP服务器",
+        VoiceGatewayLine.sip_server_port: "SIP端口",
+        VoiceGatewayLine.sip_transport: "SIP协议",
+        VoiceGatewayLine.sip_username: "SIP账号",
+        VoiceGatewayLine.sip_auth_username: "鉴权账号",
+        VoiceGatewayLine.sip_password_secret_alias: "密码密钥别名",
+        VoiceGatewayLine.trunk_name: "云端Trunk",
+        VoiceGatewayLine.channel_count: "通道数",
+        VoiceGatewayLine.codec_primary: "主编码",
+        VoiceGatewayLine.codec_secondary: "备用编码",
+        VoiceGatewayLine.dtmf_mode: "DTMF",
+        VoiceGatewayLine.rtp_port_range: "RTP端口",
+        VoiceGatewayLine.route_direction: "路由方向",
+        VoiceGatewayLine.device_admin_url: "设备后台地址",
+        VoiceGatewayLine.device_serial: "设备序列号",
+        VoiceGatewayLine.device_mac: "设备MAC",
+        VoiceGatewayLine.network_note: "网络说明",
+        VoiceGatewayLine.registration_status: "注册状态",
+        VoiceGatewayLine.route_status: "路由状态",
+        VoiceGatewayLine.sim_status: "SIM/VoLTE状态",
+        VoiceGatewayLine.rtp_status: "RTP状态",
+        VoiceGatewayLine.acceptance_status: "验收状态",
+        VoiceGatewayLine.last_registered_at: "最近注册时间",
+        VoiceGatewayLine.last_preflight_at: "最近预检时间",
+        VoiceGatewayLine.notes: "备注",
+        VoiceGatewayLine.created_at: "创建时间",
+        VoiceGatewayLine.updated_at: "更新时间",
+    }
+
+    async def on_model_change(
+        self,
+        data: dict,
+        model: VoiceGatewayLine,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        _admin_prepare_voice_gateway_line_data(data, model, is_created)
+
+    async def after_model_change(
+        self,
+        data: dict,
+        model: VoiceGatewayLine,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        _admin_mark_latest_discovery_matched(model)
+
+    @action(
+        name="redeliver-gateway",
+        label="重新交付/转移设备",
+        confirmation_message=(
+            "确认把选中的语音网关线路重新交付给最新扫描到同一台设备的客户账号？"
+            "系统会生成新客户 SIP/trunk/一次性密码，旧 SIP 密码失效，并写入云端 Asterisk。"
+        ),
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def redeliver_gateway(self, request: Request) -> Response:
+        selected_ids = _admin_selected_ids(request)
+        if not selected_ids:
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "重新交付失败",
+                    "subtitle": "没有选择线路",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": ["请先勾选左侧复选框，或点击某一行里的重新交付/转移设备按钮。"],
+                },
+                status_code=400,
+            )
+
+        actor_username = request.session.get("admin_user")
+        results: list[dict[str, str]] = []
+        errors: list[str] = []
+        with SessionLocal() as db:
+            for line_id in selected_ids:
+                line = db.get(VoiceGatewayLine, line_id)
+                if line is None:
+                    errors.append(f"未找到线路：{line_id}")
+                    continue
+                try:
+                    discovery = find_redelivery_discovery_for_line(db, line)
+                    if discovery is None:
+                        raise VoiceGatewayRedeliveryError(
+                            "没有找到目标客户最新扫描到的同一台设备；请让客户登录客户端重新扫描，或确认旧线路已录入设备 MAC/序列号"
+                        )
+                    target_owner = db.get(User, discovery.owner_user_id)
+                    if target_owner is None:
+                        raise VoiceGatewayRedeliveryError("目标客户账号不存在")
+                    result = redeliver_voice_gateway_line(
+                        db,
+                        line,
+                        discovery,
+                        target_owner,
+                        actor_user_id=None,
+                        sync_asterisk=True,
+                        asterisk_path=ASTERISK_DYNAMIC_PJSIP_PATH,
+                        reload_callback=_admin_reload_asterisk_pjsip,
+                    )
+                    db.add(
+                        AuditLog(
+                            actor_user_id=None,
+                            actor_username=actor_username,
+                            action="voice_gateway_line.redeliver",
+                            resource_type="voice_gateway_line",
+                            resource_id=line.id,
+                            summary=(
+                                "SQLAdmin 重新交付语音网关："
+                                f"{result.previous_customer_name or result.previous_owner_user_id} -> {line.customer_name}"
+                            ),
+                        )
+                    )
+                    db.commit()
+                    results.append(
+                        {
+                            "line_name": line.line_name or line.id,
+                            "customer_name": line.customer_name or line.line_name or line.id,
+                            "previous_customer_name": result.previous_customer_name or result.previous_owner_user_id,
+                            "device_admin_url": line.device_admin_url or "现场设备后台地址",
+                            "sip_server": line.sip_server_host,
+                            "sip_port": str(line.sip_server_port),
+                            "sip_transport": line.sip_transport,
+                            "sip_username": line.sip_username,
+                            "sip_auth_username": line.sip_auth_username or line.sip_username,
+                            "trunk_name": line.trunk_name,
+                            "channel_count": str(line.channel_count or 1),
+                            "password": result.sip_password_one_time,
+                            "reload_message": result.asterisk_sync_message,
+                        }
+                    )
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(f"{line.line_name if line else line_id}：{exc}")
+                    continue
+
+        if results:
+            if len(results) == 1:
+                item = results[0]
+                secret_value = item["password"]
+                secret_label = (
+                    f"重新交付完成，只显示本次。原客户：{item['previous_customer_name']}；"
+                    f"新客户：{item['customer_name']}；设备后台：{item['device_admin_url']}；"
+                    f"SIP账号/鉴权账号：{item['sip_auth_username']}；服务器："
+                    f"{item['sip_server']}:{item['sip_port']}/{item['sip_transport']}。"
+                    "请立刻覆盖设备后台的 SIP 账号、鉴权账号、密码、端口组和路由设置。"
+                )
+            else:
+                secret_value = "\n\n".join(
+                    "\n".join(
+                        [
+                            f"原客户：{item['previous_customer_name']}",
+                            f"新客户：{item['customer_name']}",
+                            f"设备后台：{item['device_admin_url']}",
+                            f"SIP服务器：{item['sip_server']}",
+                            f"SIP端口/协议：{item['sip_port']}/{item['sip_transport']}",
+                            f"SIP账号：{item['sip_username']}",
+                            f"鉴权账号：{item['sip_auth_username']}",
+                            f"一次性密码：{item['password']}",
+                            f"云端Trunk：{item['trunk_name']}",
+                            f"通道数：{item['channel_count']}",
+                        ]
+                    )
+                    for item in results
+                )
+                secret_label = "已重新交付多条线路。请立刻复制，逐台覆盖对应设备后台。"
+            Secret.reveal_once(
+                request,
+                value=secret_value,
+                title="重新交付完成：一次性 SIP 密码",
+                label=secret_label,
+            )
+            Flash.success(request, "语音网关已重新交付给目标客户，并已写入云端 Asterisk。")
+        if errors:
+            Flash.error(request, "部分线路重新交付失败：" + "；".join(errors))
+        if not results:
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "重新交付失败",
+                    "subtitle": "未生成新 SIP 密码",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": errors or ["没有可处理的语音网关线路。"],
+                },
+                status_code=400,
+            )
+
+        response = await self.templates.TemplateResponse(
+            request,
+            "sqladmin/voice_gateway_secret_reveal.html",
+            {
+                "title": "重新交付完成",
+                "subtitle": "一次性 SIP 密码只显示本次",
+                "model_view": self,
+                "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                "generated_count": len(results),
+                "errors": errors,
+            },
+        )
+        Secret.apply_no_store_headers(response)
+        return response
+
+    @action(
+        name="rotate-sip-password",
+        label="生成一次性 SIP 密码",
+        confirmation_message="确认为选中的语音网关线路生成新 SIP 密码？旧密码会失效，并会写入云端 Asterisk。",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def rotate_sip_password(self, request: Request) -> Response:
+        selected_ids = _admin_selected_ids(request)
+        if not selected_ids:
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "生成密码失败",
+                    "subtitle": "没有选择线路",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": ["请先勾选左侧复选框，或点击某一行里的生成一次性 SIP 密码按钮。"],
+                },
+                status_code=400,
+            )
+
+        actor_username = request.session.get("admin_user")
+        results: list[dict[str, str]] = []
+        errors: list[str] = []
+        with SessionLocal() as db:
+            for line_id in selected_ids:
+                line = db.get(VoiceGatewayLine, line_id)
+                if line is None:
+                    errors.append(f"未找到线路：{line_id}")
+                    continue
+                try:
+                    password = _admin_generate_sip_password()
+                    _admin_upsert_asterisk_dynamic_pjsip(line, password)
+                    reload_message = _admin_reload_asterisk_pjsip()
+                    line.sip_password_hash = hash_password(password)
+                    line.status = "待重新下发"
+                    line.registration_status = "待重新注册"
+                    line.updated_at = datetime.utcnow()
+                    db.add(
+                        VoiceGatewayLineEvent(
+                            line_id=line.id,
+                            owner_user_id=line.owner_user_id,
+                            actor_user_id=None,
+                            event_type="credential_rotated",
+                            status="rotated",
+                            summary="SQLAdmin 生成一次性 SIP 密码",
+                            detail="已写入云端 Asterisk；交付人员需要立刻同步填写到现场语音网关后台。",
+                        )
+                    )
+                    db.add(
+                        AuditLog(
+                            actor_user_id=None,
+                            actor_username=actor_username,
+                            action="voice_gateway_line.rotate_credential",
+                            resource_type="voice_gateway_line",
+                            resource_id=line.id,
+                            summary=f"SQLAdmin 生成语音网关一次性 SIP 密码：{line.line_name}",
+                        )
+                    )
+                    db.commit()
+                    results.append(
+                        {
+                            "line_name": line.line_name or line.id,
+                            "customer_name": line.customer_name or line.line_name or line.id,
+                            "sip_server": line.sip_server_host,
+                            "sip_port": str(line.sip_server_port),
+                            "sip_transport": line.sip_transport,
+                            "sip_username": line.sip_username,
+                            "sip_auth_username": line.sip_auth_username or line.sip_username,
+                            "trunk_name": line.trunk_name,
+                            "channel_count": str(line.channel_count or 1),
+                            "password": password,
+                            "reload_message": reload_message,
+                        }
+                    )
+                except Exception as exc:
+                    db.rollback()
+                    errors.append(f"{line.line_name if line else line_id}：{exc}")
+                    continue
+
+        if results:
+            if len(results) == 1:
+                item = results[0]
+                secret_value = item["password"]
+                secret_label = (
+                    f"只显示本次，请立刻复制到设备后台的密码字段。客户：{item['customer_name']}；"
+                    f"SIP账号/鉴权账号：{item['sip_auth_username']}；服务器："
+                    f"{item['sip_server']}:{item['sip_port']}/{item['sip_transport']}。"
+                )
+            else:
+                secret_value = "\n\n".join(
+                    "\n".join(
+                        [
+                            f"客户：{item['customer_name']}",
+                            f"SIP服务器：{item['sip_server']}",
+                            f"SIP端口/协议：{item['sip_port']}/{item['sip_transport']}",
+                            f"SIP账号：{item['sip_username']}",
+                            f"鉴权账号：{item['sip_auth_username']}",
+                            f"一次性密码：{item['password']}",
+                            f"云端Trunk：{item['trunk_name']}",
+                            f"通道数：{item['channel_count']}",
+                        ]
+                    )
+                    for item in results
+                )
+                secret_label = "已为多条线路生成一次性密码。请立刻复制，逐台写入对应设备后台。"
+            Secret.reveal_once(
+                request,
+                value=secret_value,
+                title="一次性 SIP 密码已生成",
+                label=secret_label,
+            )
+            Flash.success(request, "一次性 SIP 密码已生成并写入云端 Asterisk。")
+        if errors:
+            Flash.error(request, "部分线路生成失败：" + "；".join(errors))
+        if not results:
+            return await self.templates.TemplateResponse(
+                request,
+                "sqladmin/voice_gateway_secret_reveal.html",
+                {
+                    "title": "生成密码失败",
+                    "subtitle": "未生成新 SIP 密码",
+                    "model_view": self,
+                    "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                    "generated_count": 0,
+                    "errors": errors or ["没有可处理的语音网关线路。"],
+                },
+                status_code=400,
+            )
+
+        response = await self.templates.TemplateResponse(
+            request,
+            "sqladmin/voice_gateway_secret_reveal.html",
+            {
+                "title": "一次性 SIP 密码",
+                "subtitle": "只显示本次",
+                "model_view": self,
+                "secret_next_url": str(request.url_for("admin:list", identity=self.identity)),
+                "generated_count": len(results),
+                "errors": errors,
+            },
+        )
+        Secret.apply_no_store_headers(response)
+        return response
+
+
+class VoiceGatewayDeviceDiscoveryAdmin(ModelView, model=VoiceGatewayDeviceDiscovery):
+    name = "待匹配设备发现"
+    name_plural = "待匹配设备发现"
+    icon = "fa-solid fa-satellite-dish"
+    can_create = False
+    can_delete = False
+
+    column_list = [
+        VoiceGatewayDeviceDiscovery.owner_user_id,
+        VoiceGatewayDeviceDiscovery.status,
+        VoiceGatewayDeviceDiscovery.gateway_label,
+        VoiceGatewayDeviceDiscovery.device_admin_url,
+        VoiceGatewayDeviceDiscovery.device_ip,
+        VoiceGatewayDeviceDiscovery.device_mac,
+        VoiceGatewayDeviceDiscovery.device_serial,
+        VoiceGatewayDeviceDiscovery.matched_line_id,
+        VoiceGatewayDeviceDiscovery.updated_at,
+    ]
+    column_searchable_list = [
+        VoiceGatewayDeviceDiscovery.owner_user_id,
+        VoiceGatewayDeviceDiscovery.gateway_label,
+        VoiceGatewayDeviceDiscovery.device_admin_url,
+        VoiceGatewayDeviceDiscovery.device_ip,
+        VoiceGatewayDeviceDiscovery.device_mac,
+        VoiceGatewayDeviceDiscovery.device_serial,
+    ]
+    column_sortable_list = [
+        VoiceGatewayDeviceDiscovery.updated_at,
+        VoiceGatewayDeviceDiscovery.created_at,
+        VoiceGatewayDeviceDiscovery.status,
+    ]
+    column_default_sort = [(VoiceGatewayDeviceDiscovery.updated_at, True)]
+    form_excluded_columns = [
+        VoiceGatewayDeviceDiscovery.owner_user,
+        VoiceGatewayDeviceDiscovery.reporter_user,
+        VoiceGatewayDeviceDiscovery.matched_line,
+    ]
+    column_labels = {
+        VoiceGatewayDeviceDiscovery.owner_user_id: "客户账号",
+        VoiceGatewayDeviceDiscovery.reporter_user_id: "上报账号",
+        VoiceGatewayDeviceDiscovery.matched_line_id: "已匹配线路",
+        VoiceGatewayDeviceDiscovery.status: "状态",
+        VoiceGatewayDeviceDiscovery.source: "来源",
+        VoiceGatewayDeviceDiscovery.gateway_profile_key: "网关档案",
+        VoiceGatewayDeviceDiscovery.gateway_label: "网关名称",
+        VoiceGatewayDeviceDiscovery.device_admin_url: "设备后台地址",
+        VoiceGatewayDeviceDiscovery.device_ip: "设备IP",
+        VoiceGatewayDeviceDiscovery.device_mac: "设备MAC",
+        VoiceGatewayDeviceDiscovery.device_serial: "设备序列号",
+        VoiceGatewayDeviceDiscovery.sip_port: "SIP端口",
+        VoiceGatewayDeviceDiscovery.summary: "摘要",
+        VoiceGatewayDeviceDiscovery.detail: "详情",
+        VoiceGatewayDeviceDiscovery.evidence_json: "检测证据",
+        VoiceGatewayDeviceDiscovery.created_at: "创建时间",
+        VoiceGatewayDeviceDiscovery.updated_at: "更新时间",
+    }
+
+
+class VoiceGatewayLineEventAdmin(ModelView, model=VoiceGatewayLineEvent):
+    name = "线路验收事件"
+    name_plural = "线路验收事件"
+    icon = "fa-solid fa-list-check"
+
+    can_edit = False
+    column_list = [
+        VoiceGatewayLineEvent.line_id,
+        VoiceGatewayLineEvent.event_type,
+        VoiceGatewayLineEvent.status,
+        VoiceGatewayLineEvent.summary,
+        VoiceGatewayLineEvent.created_at,
+    ]
+    column_searchable_list = [VoiceGatewayLineEvent.event_type, VoiceGatewayLineEvent.status, VoiceGatewayLineEvent.summary]
+    column_sortable_list = [VoiceGatewayLineEvent.created_at, VoiceGatewayLineEvent.status]
+    column_default_sort = [(VoiceGatewayLineEvent.created_at, True)]
+    column_labels = {
+        VoiceGatewayLineEvent.line_id: "线路",
+        VoiceGatewayLineEvent.owner_user_id: "客户账号",
+        VoiceGatewayLineEvent.actor_user_id: "操作人",
+        VoiceGatewayLineEvent.event_type: "事件类型",
+        VoiceGatewayLineEvent.status: "状态",
+        VoiceGatewayLineEvent.summary: "摘要",
+        VoiceGatewayLineEvent.detail: "详情",
+        VoiceGatewayLineEvent.evidence_json: "证据JSON",
+        VoiceGatewayLineEvent.created_at: "创建时间",
+    }
+
+
 class SystemAuditLogAdmin(ModelView, model=SystemAuditLog):
     name = "系统审计"
     name_plural = "系统审计"
@@ -1652,5 +2586,8 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(VoiceCloneRecordAdmin)
     admin.add_view(VoiceUsageRecordAdmin)
     admin.add_view(ReportExportAdmin)
+    admin.add_view(VoiceGatewayLineAdmin)
+    admin.add_view(VoiceGatewayDeviceDiscoveryAdmin)
+    admin.add_view(VoiceGatewayLineEventAdmin)
     admin.add_view(SystemSettingAdmin)
     admin.add_view(SystemAuditLogAdmin)

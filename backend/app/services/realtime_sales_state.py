@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
+from app.services.realtime_text_normalizer import normalize_realtime_sales_text
+
 
 class SalesStage(str, Enum):
     OPENING = "opening"
@@ -44,7 +46,7 @@ class SalesStateMachine:
         self.state = SalesState()
 
     def update(self, customer_text: str, intent: str, signal: str = "") -> SalesStage:
-        clean = customer_text.strip()
+        clean = normalize_realtime_sales_text(customer_text).normalized_text
         self.state.total_turns += 1
         self.state.turns_in_stage += 1
         self._extract_context(clean)
@@ -112,10 +114,10 @@ class SalesStateMachine:
         if self.should_end_call():
             return "好的，不打扰了，再见。"
         if self.state.push_forbidden and _has_any(clean, ["加微信", "发资料", "发案例", "留个微信"]):
-            return "明白，不继续推。您直接问费用、效果或流程，我按问题答。"
+            return "不继续推。您直接问费用、效果或流程，我按问题答。"
         if self.state.last_assistant_reply and _normalize(clean) == _normalize(self.state.last_assistant_reply):
             return "我换个角度说：视频号团购补的是微信同城和私域到店。"
-        return clean
+        return _suppress_habitual_ack(clean, self.state.last_assistant_reply)
 
     def record_assistant_reply(self, reply: str) -> None:
         self.state.last_assistant_reply = reply.strip()
@@ -177,3 +179,12 @@ def _has_any(text: str, keywords: list[str]) -> bool:
 
 def _normalize(text: str) -> str:
     return re.sub(r"[\s。！？?!，,、.；;]+", "", text)
+
+
+def _suppress_habitual_ack(reply: str, last_reply: str) -> str:
+    if not reply.startswith(("明白", "好的", "好，", "好。", "可以，")):
+        return reply
+    stripped = re.sub(r"^(明白|好的|好|可以)[，。,.\s]+", "", reply, count=1)
+    if len(stripped) >= 6 and (_normalize(last_reply).startswith(("明白", "好的", "好", "可以")) or reply.startswith("明白")):
+        return stripped
+    return reply

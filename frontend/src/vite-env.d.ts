@@ -76,6 +76,7 @@ type AiAcqDesktopAsteriskStatus = {
   voiceGatewayProfile: string;
   voiceGatewayLabel: string;
   voiceGatewayHost: string;
+  voiceGatewayAdminUrl?: string;
   voiceGatewaySipPort: number;
   voiceGatewayRegisterEnabled: boolean;
   uc100Host: string;
@@ -91,6 +92,7 @@ type AiAcqDesktopAsteriskStatus = {
     status: "current" | "updated" | "not_found" | "disabled" | string;
     host?: string;
     sipPort?: number;
+    adminUrl?: string;
     previousHost?: string;
     previousSipPort?: number;
     source?: string;
@@ -106,6 +108,7 @@ type AiAcqDesktopAsteriskStatus = {
     title: string;
     message: string;
     gatewayAddress: string;
+    gatewayAdminUrl?: string;
     previousGatewayAddress?: string;
     discoveryStatus?: string;
     discoverySource?: string;
@@ -134,11 +137,25 @@ type AiAcqDesktopUpdateCheck = {
   latestRevision: string;
   updateAvailable: boolean;
   updateUrl: string;
+  autoInstallSupported: boolean;
   manifestUrl: string;
   remoteFrontendUrl: string;
   onlineFrontendEnabled: boolean;
   appName: string;
   message: string;
+};
+
+type AiAcqDesktopUpdateInstall = {
+  status: string;
+  currentVersion: string;
+  latestVersion: string;
+  latestRevision?: string;
+  updateUrl?: string;
+  sha256?: string;
+  bytes?: number;
+  message: string;
+  installerPath?: string;
+  logPath?: string;
 };
 
 interface Window {
@@ -173,6 +190,7 @@ interface Window {
     stopAsteriskSidecar: () => Promise<AiAcqDesktopAsteriskStatus>;
     getAppInfo: () => Promise<AiAcqDesktopAppInfo>;
     checkForClientUpdate: (payload?: { prompt?: boolean }) => Promise<AiAcqDesktopUpdateCheck>;
+    installClientUpdate: (payload?: { prompt?: boolean }) => Promise<AiAcqDesktopUpdateInstall>;
     openClientUpdate: (url: string) => Promise<{ ok: boolean; message?: string }>;
   };
 }

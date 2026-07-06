@@ -4,6 +4,7 @@ from app.api import (
     auth,
     collections,
     comment_intercepts,
+    delivery,
     direct_messages,
     health,
     intent,
@@ -32,3 +33,4 @@ api_router.include_router(learning.router, prefix="/learning", tags=["learning"]
 api_router.include_router(voice.router, prefix="/voice", tags=["voice"])
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(system_settings.router, prefix="/settings", tags=["settings"])
+api_router.include_router(delivery.router, prefix="/delivery", tags=["delivery"])

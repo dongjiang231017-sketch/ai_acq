@@ -10,7 +10,11 @@ from uuid import uuid4
 
 from app.core.config import settings
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
+from app.services.realtime_call_state import summarize_realtime_call_state
+from app.services.realtime_call_learning import summarize_realtime_learning
+from app.services.realtime_route_benchmark import build_realtime_route_benchmark
 from app.services.realtime_sales_brain import score_realtime_events
+from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.voice_gateway_profiles import voice_gateway_label
 
@@ -133,6 +137,25 @@ def _normalize_conversation_route(route: str | None) -> str:
     return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
 
 
+def active_bridge_conversation_route() -> str | None:
+    path = Path(settings.realtime_call_event_log_path).expanduser()
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-400:]
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "bridge_start":
+            continue
+        return _normalize_conversation_route(str(payload.get("conversationMode") or ""))
+    return None
+
+
 def _route_mode_label(route: str) -> str:
     return "omni_realtime_interruptible" if route == "omni" else "half_duplex_interruptible"
 
@@ -155,6 +178,8 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
     runtime_config = get_runtime_ai_config()
     llm_ready = deepseek_configured()
     dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
+    omni_bridge_ready = bridge_ready and current_route == "omni"
+    pipeline_bridge_ready = bridge_ready and current_route in {"pipeline", "omni"}
     return [
         {
             "key": "omni",
@@ -163,17 +188,17 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
             "summary": "端到端实时语音模型，直接听语音并直接说话，适合追求自然衔接和低延迟的正式拨测。",
             "estimatedLatencyMs": _route_latency("omni"),
             "estimatedAiCostPerMinute": _route_cost("omni"),
-            "readyForAsteriskMedia": bridge_ready and dashscope_ready and current_route == "omni",
+            "readyForAsteriskMedia": omni_bridge_ready and dashscope_ready,
             "isActive": current_route == "omni",
         },
         {
             "key": "pipeline",
-            "label": "低成本分段 Pipeline",
+            "label": "稳定分段语音 Pipeline",
             "mode": "half_duplex_interruptible",
-            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行，成本更低，适合低频授权回访和成本敏感客户。",
+            "summary": "ASR、语义路由/LLM、流式 TTS 分段执行；当前 Omni bridge 可按单通话切到这条稳定路线做对照测试。",
             "estimatedLatencyMs": _route_latency("pipeline", llm_ready),
             "estimatedAiCostPerMinute": _route_cost("pipeline"),
-            "readyForAsteriskMedia": bridge_ready and current_route == "pipeline",
+            "readyForAsteriskMedia": pipeline_bridge_ready,
             "isActive": current_route == "pipeline",
         },
     ]
@@ -184,7 +209,14 @@ def build_realtime_pipeline() -> dict[str, object]:
     gateway_label = voice_gateway_label()
     audio_socket_ready = _is_tcp_open(settings.asterisk_audio_socket_host, settings.asterisk_audio_socket_port)
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
-    conversation_mode = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
+    configured_route = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
+    actual_bridge_route = active_bridge_conversation_route()
+    conversation_mode = actual_bridge_route or configured_route
+    route_matched = (
+        not actual_bridge_route
+        or actual_bridge_route == configured_route
+        or (actual_bridge_route == "omni" and configured_route == "pipeline")
+    )
     if conversation_mode == "omni":
         dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
         steps = [
@@ -219,6 +251,7 @@ def build_realtime_pipeline() -> dict[str, object]:
             ),
         ]
         estimated_latency = sum(int(step["latencyMs"]) for step in steps)
+        route_options = _conversation_route_options(conversation_mode, bridge_ready)
         return {
             "mode": "omni_realtime_interruptible",
             "bridgeMode": "mock_media" if not bridge_ready else "asterisk_audiosocket",
@@ -227,12 +260,23 @@ def build_realtime_pipeline() -> dict[str, object]:
             "estimatedAiCostPerMinute": 0.09,
             "readyForMockCall": True,
             "readyForAsteriskMedia": bridge_ready and dashscope_ready,
+            "configuredRoute": configured_route,
+            "actualBridgeRoute": actual_bridge_route or conversation_mode,
+            "routeMatched": route_matched,
             "nextStep": (
                 "Omni 真实电话媒体桥已就绪，可以从前端做单号试拨。"
-                if bridge_ready and dashscope_ready
+                if bridge_ready and dashscope_ready and route_matched
+                else f"后台配置是 {configured_route}，当前 AudioSocket bridge 实际是 {actual_bridge_route}；先重启 bridge 到同一路线。"
+                if bridge_ready and dashscope_ready and not route_matched
                 else "先启动 AudioSocket bridge 的 omni 模式，并确认 DashScope key 与 Asterisk 单号试拨开关。"
             ),
-            "routeOptions": _conversation_route_options(conversation_mode, bridge_ready),
+            "routeOptions": route_options,
+            "routeBenchmark": build_realtime_route_benchmark(
+                current_route=conversation_mode,
+                bridge_ready=bridge_ready,
+                route_options=route_options,
+            ),
+            "learning": summarize_realtime_learning(),
             "steps": steps,
         }
     llm_ready = deepseek_configured()
@@ -282,6 +326,7 @@ def build_realtime_pipeline() -> dict[str, object]:
         _pipeline_step("barge_in", "打断处理", "pass", "VAD + playback queue cancel", 80, "AI 说话时收到客户插话会停止当前 TTS 并重新进入 listening。"),
     ]
     estimated_latency = sum(int(step["latencyMs"]) for step in steps)
+    route_options = _conversation_route_options(conversation_mode, bridge_ready)
     return {
         "mode": "half_duplex_interruptible",
         "bridgeMode": "mock_media" if not bridge_ready else "asterisk_audiosocket",
@@ -290,12 +335,23 @@ def build_realtime_pipeline() -> dict[str, object]:
         "estimatedAiCostPerMinute": 0.04,
         "readyForMockCall": True,
         "readyForAsteriskMedia": bridge_ready,
+        "configuredRoute": configured_route,
+        "actualBridgeRoute": actual_bridge_route or conversation_mode,
+        "routeMatched": route_matched,
         "nextStep": (
             "真实电话媒体桥已就绪，可以从前端做单号试拨。"
-            if bridge_ready
+            if bridge_ready and route_matched
+            else f"后台配置是 {configured_route}，当前 AudioSocket bridge 实际是 {actual_bridge_route}；先重启 bridge 到同一路线。"
+            if bridge_ready and not route_matched
             else "先启动 AudioSocket bridge，再打开 ASTERISK_LIVE_CALL_ENABLED=true，并从前端做单号试拨。"
         ),
-        "routeOptions": _conversation_route_options(conversation_mode, bridge_ready),
+        "routeOptions": route_options,
+        "routeBenchmark": build_realtime_route_benchmark(
+            current_route=conversation_mode,
+            bridge_ready=bridge_ready,
+            route_options=route_options,
+        ),
+        "learning": summarize_realtime_learning(),
         "steps": steps,
     }
 
@@ -345,16 +401,27 @@ def handle_customer_utterance(session_id: str, text: str, barge_in: bool = True)
         interrupted = _interrupt_session(session, "客户插话，停止当前 TTS 播放队列。")
 
     clean_text = " ".join(text.strip().split())
+    normalization = normalize_realtime_sales_text(clean_text)
+    routed_text = normalization.normalized_text
     session.status = "thinking"
     session.add_event("customer_audio", "customer", "received", clean_text, "模拟媒体入口收到客户语音。")
     session.add_event("asr_final", "asr", "final", clean_text, "Paraformer 实时识别最终文本。", latency_ms=380)
+    if normalization.changed:
+        session.add_event(
+            "asr_sales_text_normalized",
+            "router",
+            "matched",
+            routed_text,
+            f"销售语境纠错：{normalization.raw_text} -> {routed_text}",
+            latency_ms=0,
+        )
 
-    intent, node = _classify_intent(clean_text)
+    intent, node = _classify_intent(routed_text)
     session.current_intent = intent
     session.current_node = node
     session.add_event("intent", "router", "matched", intent, f"路由到话术节点：{node}。", latency_ms=50)
 
-    fallback_reply = _build_reply(clean_text, intent, session.merchant_name)
+    fallback_reply = _build_reply(routed_text, intent, session.merchant_name)
     reply_result = generate_realtime_reply(
         clean_text,
         intent,
@@ -419,6 +486,7 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
             "hasEvents": False,
             "latestAt": None,
             "score": None,
+            "state": None,
             "events": [],
         }
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -433,13 +501,15 @@ def read_realtime_live_events(limit: int = 80, call_id: str | None = None) -> di
         event = _normalize_live_event(payload)
         if event:
             events.append(event)
-    events = events[-max_limit:]
+    scored_events = list(events)
+    visible_events = events[-max_limit:]
     return {
         "logPath": str(path),
-        "hasEvents": bool(events),
-        "latestAt": events[-1]["at"] if events else None,
-        "score": score_realtime_events(events),
-        "events": events,
+        "hasEvents": bool(visible_events),
+        "latestAt": visible_events[-1]["at"] if visible_events else None,
+        "score": score_realtime_events(scored_events),
+        "state": summarize_realtime_call_state(scored_events),
+        "events": visible_events,
     }
 
 
@@ -478,7 +548,8 @@ def _optional_text(value: object) -> str | None:
 
 
 def _classify_intent(text: str) -> tuple[str, str]:
-    clean = text.strip()
+    normalization = normalize_realtime_sales_text(text)
+    clean = normalization.normalized_text
     lower = clean.lower()
     compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
     system_prompt_keywords = [
@@ -581,6 +652,10 @@ def _classify_intent(text: str) -> tuple[str, str]:
         "一直重复",
         "总是重复",
         "老说",
+        "老是说",
+        "老是说明白",
+        "总说明白",
+        "一直说明白",
     ]
     if any(keyword in clean for keyword in style_or_repeat_complaint_keywords):
         return "听不清/澄清", "体验修复"
@@ -706,6 +781,10 @@ def _classify_intent(text: str) -> tuple[str, str]:
     ]
     if any(keyword in clean for keyword in owner_keywords):
         return "找负责人", "转接负责人"
+    if normalization.has_fix("group_buying_package") or (
+        "团购套餐" in clean and any(keyword in clean for keyword in ["什么意思", "什么", "怎么做", "要帮我"])
+    ):
+        return "合作咨询", "套餐解释"
     existing_channel_keywords = [
         "已经做",
         "在做",
@@ -804,6 +883,10 @@ def _classify_intent(text: str) -> tuple[str, str]:
 
 
 def _build_reply(text: str, intent: str, merchant_name: str) -> str:
+    normalization = normalize_realtime_sales_text(text)
+    text = normalization.normalized_text
+    if normalization.has_fix("group_buying_package"):
+        return "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
     replies = {
         "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
         "明确拒绝": "好的，不打扰了，再见。",

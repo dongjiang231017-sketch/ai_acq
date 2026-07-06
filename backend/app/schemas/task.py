@@ -198,6 +198,9 @@ class TelephonyPreflightRead(BaseModel):
 class TelephonyTestCallCreate(BaseModel):
     phone: Annotated[str, Field(min_length=3, max_length=40)]
     caller_id: Annotated[str | None, Field(alias="callerId")] = None
+    conversation_route: Annotated[str | None, Field(alias="conversationRoute", pattern="^(pipeline|omni)$")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class TelephonyCellularDiagnosticRead(BaseModel):
@@ -232,6 +235,11 @@ class TelephonyTestCallRead(BaseModel):
     accepted: bool
     action_id: Annotated[str, Field(alias="actionId")]
     channel: str
+    requested_route: Annotated[str, Field(alias="requestedRoute")]
+    actual_bridge_route: Annotated[str, Field(alias="actualBridgeRoute")]
+    effective_route: Annotated[str, Field(alias="effectiveRoute")] = ""
+    route_fallback_reason: Annotated[str, Field(alias="routeFallbackReason")] = ""
+    route_matched: Annotated[bool, Field(alias="routeMatched")]
     gateway_status: Annotated[str, Field(alias="gatewayStatus")]
     message: str
     raw_payload: Annotated[str, Field(alias="rawPayload")]
@@ -241,6 +249,7 @@ class TelephonyTestCallRead(BaseModel):
     human_speech_confirmed: Annotated[bool, Field(alias="humanSpeechConfirmed")] = False
     ai_speech_confirmed: Annotated[bool, Field(alias="aiSpeechConfirmed")] = False
     call_screening_detected: Annotated[bool, Field(alias="callScreeningDetected")] = False
+    bridge_error: Annotated[str, Field(alias="bridgeError")] = ""
     conversation_confirmed: Annotated[bool, Field(alias="conversationConfirmed")] = False
     acceptance_ready: Annotated[bool, Field(alias="acceptanceReady")]
     acceptance_note: Annotated[str, Field(alias="acceptanceNote")]
@@ -268,6 +277,41 @@ class RealtimeRouteOptionRead(BaseModel):
     is_active: Annotated[bool, Field(alias="isActive")]
 
 
+class RealtimeRouteBenchmarkRead(BaseModel):
+    key: str
+    label: str
+    status: str
+    quality_score: Annotated[int, Field(alias="qualityScore")]
+    readiness_score: Annotated[int, Field(alias="readinessScore")]
+    estimated_latency_ms: Annotated[int, Field(alias="estimatedLatencyMs")]
+    estimated_ai_cost_per_minute: Annotated[float, Field(alias="estimatedAiCostPerMinute")]
+    cost_rank: Annotated[int, Field(alias="costRank")]
+    risk_level: Annotated[str, Field(alias="riskLevel")]
+    strengths: list[str]
+    risks: list[str]
+    next_action: Annotated[str, Field(alias="nextAction")]
+
+
+class RealtimeRouteBenchmarkReportRead(BaseModel):
+    recommended_route: Annotated[str, Field(alias="recommendedRoute")]
+    status: str
+    summary: str
+    low_cost_first: Annotated[bool, Field(alias="lowCostFirst")]
+    latest_score: Annotated[int | None, Field(alias="latestScore")] = None
+    latest_turn_response_ms: Annotated[int | None, Field(alias="latestTurnResponseMs")] = None
+    benchmarks: list[RealtimeRouteBenchmarkRead]
+
+
+class RealtimeLearningSummaryRead(BaseModel):
+    recent_lesson_count: Annotated[int, Field(alias="recentLessonCount")]
+    active_guidance_count: Annotated[int, Field(alias="activeGuidanceCount")]
+    avoid_phrase_count: Annotated[int, Field(alias="avoidPhraseCount")]
+    quality_tags: Annotated[list[str], Field(alias="qualityTags")]
+    latest_guidance: Annotated[list[str], Field(alias="latestGuidance")]
+    avoid_phrases: Annotated[list[str], Field(alias="avoidPhrases")]
+    summary: str
+
+
 class RealtimePipelineRead(BaseModel):
     mode: str
     bridge_mode: Annotated[str, Field(alias="bridgeMode")]
@@ -276,8 +320,13 @@ class RealtimePipelineRead(BaseModel):
     estimated_ai_cost_per_minute: Annotated[float, Field(alias="estimatedAiCostPerMinute")]
     ready_for_mock_call: Annotated[bool, Field(alias="readyForMockCall")]
     ready_for_asterisk_media: Annotated[bool, Field(alias="readyForAsteriskMedia")]
+    configured_route: Annotated[str, Field(alias="configuredRoute")] = "pipeline"
+    actual_bridge_route: Annotated[str, Field(alias="actualBridgeRoute")] = "pipeline"
+    route_matched: Annotated[bool, Field(alias="routeMatched")] = True
     next_step: Annotated[str, Field(alias="nextStep")]
     route_options: Annotated[list[RealtimeRouteOptionRead], Field(alias="routeOptions")] = []
+    route_benchmark: Annotated[RealtimeRouteBenchmarkReportRead | None, Field(alias="routeBenchmark")] = None
+    learning: RealtimeLearningSummaryRead | None = None
     steps: list[RealtimePipelineStepRead]
 
 
@@ -381,9 +430,39 @@ class RealtimeLiveScoreRead(BaseModel):
     metrics: list[RealtimeLiveScoreMetricRead]
 
 
+class RealtimeLiveStateRead(BaseModel):
+    call_id: Annotated[str | None, Field(alias="callId")] = None
+    state: str
+    label: str
+    status: str
+    close_reason: Annotated[str | None, Field(alias="closeReason")] = None
+    can_auto_close: Annotated[bool, Field(alias="canAutoClose")]
+    auto_close_scheduled: Annotated[bool, Field(alias="autoCloseScheduled")]
+    human_speech_confirmed: Annotated[bool, Field(alias="humanSpeechConfirmed")]
+    call_screening_detected: Annotated[bool, Field(alias="callScreeningDetected")]
+    voicemail_detected: Annotated[bool, Field(alias="voicemailDetected")]
+    silence_detected: Annotated[bool, Field(alias="silenceDetected")]
+    no_response_detected: Annotated[bool, Field(alias="noResponseDetected")]
+    hangup_detected: Annotated[bool, Field(alias="hangupDetected")]
+    ai_speech_confirmed: Annotated[bool, Field(alias="aiSpeechConfirmed")]
+    customer_speech_confirmed: Annotated[bool, Field(alias="customerSpeechConfirmed")]
+    interruption_detected: Annotated[bool, Field(alias="interruptionDetected")]
+    turn_taking_status: Annotated[str, Field(alias="turnTakingStatus")]
+    latest_turn_response_ms: Annotated[int | None, Field(alias="latestTurnResponseMs")] = None
+    current_phase: Annotated[str, Field(alias="currentPhase")] = "unknown"
+    phase_label: Annotated[str, Field(alias="phaseLabel")] = "状态未知"
+    turn_action: Annotated[str, Field(alias="turnAction")] = ""
+    latency_breakdown: Annotated[dict[str, int | None], Field(default_factory=dict, alias="latencyBreakdown")]
+    last_customer_text: Annotated[str | None, Field(alias="lastCustomerText")] = None
+    last_ai_reply: Annotated[str | None, Field(alias="lastAiReply")] = None
+    last_event_at: Annotated[str | None, Field(alias="lastEventAt")] = None
+    issues: list[str]
+
+
 class RealtimeLiveEventsRead(BaseModel):
     log_path: Annotated[str, Field(alias="logPath")]
     has_events: Annotated[bool, Field(alias="hasEvents")]
     latest_at: Annotated[str | None, Field(alias="latestAt")]
     score: RealtimeLiveScoreRead | None = None
+    state: RealtimeLiveStateRead | None = None
     events: list[RealtimeLiveEventRead]

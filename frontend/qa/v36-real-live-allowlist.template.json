@@ -1,0 +1,42 @@
+{
+  "purpose": "AI acquisition real live QA allowlist. Replace every placeholder before strict live execution.",
+  "testWindow": {
+    "startsAt": "REPLACE_WITH_APPROVED_START_TIME",
+    "endsAt": "REPLACE_WITH_APPROVED_END_TIME",
+    "timezone": "Asia/Shanghai"
+  },
+  "budget": {
+    "maxCalls": 1,
+    "maxSends": 1,
+    "intervalMs": 8000
+  },
+  "confirmations": {
+    "realDataApproved": false,
+    "liveCallApproved": false,
+    "liveSendApproved": false,
+    "productionWriteApproved": false
+  },
+  "recipients": [
+    {
+      "merchantName": "REPLACE_WITH_AUTHORIZED_MERCHANT",
+      "city": "REPLACE_WITH_CITY",
+      "category": "REPLACE_WITH_CATEGORY",
+      "contactName": "REPLACE_WITH_CONTACT",
+      "phone": "REPLACE_WITH_AUTHORIZED_PHONE",
+      "call": {
+        "enabled": true,
+        "consent": false,
+        "consentEvidenceAlias": "REPLACE_WITH_CONSENT_ALIAS",
+        "expectedOutcome": "gateway_accept_cellular_media_human_ai_conversation"
+      },
+      "dm": {
+        "enabled": true,
+        "platform": "REPLACE_WITH_PLATFORM",
+        "platformUrl": "REPLACE_WITH_PLATFORM_URL",
+        "message": "REPLACE_WITH_APPROVED_MESSAGE",
+        "consent": false,
+        "consentEvidenceAlias": "REPLACE_WITH_CONSENT_ALIAS"
+      }
+    }
+  ]
+}

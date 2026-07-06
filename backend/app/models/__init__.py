@@ -1,5 +1,6 @@
 from app.models.audit import AuditLog
 from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, PlatformBrowserSession, RawLeadRecord
+from app.models.delivery import VoiceGatewayDeviceDiscovery, VoiceGatewayLine, VoiceGatewayLineEvent
 from app.models.lead import MerchantLead
 from app.models.growth import (
     FollowUpWorkOrder,
@@ -44,6 +45,9 @@ __all__ = [
     "SystemSetting",
     "User",
     "UserRole",
+    "VoiceGatewayLine",
+    "VoiceGatewayDeviceDiscovery",
+    "VoiceGatewayLineEvent",
     "VoiceCloneRecord",
     "VoiceProfile",
     "VoiceSample",

@@ -308,6 +308,9 @@ const fallbackRealtimePipeline: RealtimePipeline = {
   estimatedAiCostPerMinute: 0.04,
   readyForMockCall: true,
   readyForAsteriskMedia: false,
+  configuredRoute: "pipeline",
+  actualBridgeRoute: "pipeline",
+  routeMatched: true,
   nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接 Asterisk 媒体桥。",
   routeOptions: [
     {

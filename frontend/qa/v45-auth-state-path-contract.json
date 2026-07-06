@@ -1,0 +1,201 @@
+{
+  "version": "V45-auth-state-path-contract/v1",
+  "description": "Authenticated state-path and trace evidence gate for the AI acquisition client. Every critical business state must be backed by passed UI/API checks, created isolated test data, screenshots, and a replayable Playwright trace.",
+  "minimums": {
+    "checks": 40,
+    "screenshots": 13,
+    "browserApiResponses": 120,
+    "traceEntries": 120,
+    "traceResources": 80,
+    "traceBytes": 1000000
+  },
+  "requiredActionMapFlows": [
+    "primary_navigation",
+    "outbound_tabs",
+    "global_commands",
+    "outbound_metrics",
+    "line_readiness_panel",
+    "live_monitor_panel"
+  ],
+  "expectedCleanRuntime": {
+    "failures": 0,
+    "warnings": 0,
+    "consoleErrors": 0,
+    "pageErrors": 0,
+    "failedRequests": 0,
+    "blockedMutations": 0
+  },
+  "nodes": [
+    {
+      "key": "auth_login",
+      "title": "Authenticated login including negative password check",
+      "requiredChecks": [
+        "认证入口: 登录页可见",
+        "认证负例: 错误密码被拒绝",
+        "认证正例: 客户账号可登录",
+        "认证状态: token 已写入浏览器"
+      ],
+      "requiredScreenshots": [
+        "01-login-gate.png",
+        "02-after-login-dashboard.png"
+      ]
+    },
+    {
+      "key": "auth_replay",
+      "title": "Reusable authenticated business workspace",
+      "requiredChecks": [
+        "认证态复用: storageState 已保存",
+        "认证态复用: 新浏览器上下文直达业务台",
+        "认证态复用: 业务台 ARIA 快照已保存"
+      ],
+      "requiredScreenshots": [
+        "02b-auth-state-reuse-dashboard.png"
+      ]
+    },
+    {
+      "key": "lead_create",
+      "title": "Lead creation visible in UI and isolated API state",
+      "requiredChecks": [
+        "UI 状态流: 创建线索后列表出现",
+        "API 对账: 线索写入隔离数据库",
+        "数据隔离: 新线索归属当前用户"
+      ],
+      "requiredScreenshots": [
+        "03-lead-created.png"
+      ],
+      "requiredCreatedKeys": [
+        "leadId",
+        "leadName"
+      ]
+    },
+    {
+      "key": "outbound_task",
+      "title": "Outbound task creation without live dialing",
+      "requiredChecks": [
+        "UI 状态流: 创建外呼任务后队列出现",
+        "API 对账: 外呼任务写入隔离数据库",
+        "安全门控: 任务只创建不启动",
+        "安全门控: 危险请求被默认阻断或未触发"
+      ],
+      "requiredScreenshots": [
+        "04-outbound-task-created.png"
+      ],
+      "requiredCreatedKeys": [
+        "taskId",
+        "taskName"
+      ]
+    },
+    {
+      "key": "script_and_recall",
+      "title": "Script generation/save and recall rule save",
+      "requiredChecks": [
+        "UI 状态流: 客户可 AI 生成并保存外呼话术",
+        "UI 状态流: 客户可调整并保存重拨规则"
+      ],
+      "requiredScreenshots": [
+        "05-script-editor-saved.png",
+        "06-recall-rule-saved.png"
+      ]
+    },
+    {
+      "key": "realtime_monitor",
+      "title": "Realtime monitor fixture and chat panel without live trial dial",
+      "requiredChecks": [
+        "测试夹具: 隔离通话记录已供实时监听点击",
+        "UI 状态流: 实时监听以客户列表和聊天面板呈现",
+        "安全门控: 实时监听查看未触发真实单号试拨"
+      ],
+      "requiredScreenshots": [
+        "07-realtime-monitor-chat.png"
+      ],
+      "requiredCreatedKeys": [
+        "monitorRecordId"
+      ]
+    },
+    {
+      "key": "collection_task",
+      "title": "Collection task creation without crawler side effects",
+      "requiredChecks": [
+        "UI 状态流: 线索采集任务创建后队列出现",
+        "API 对账: 线索采集任务写入隔离数据库",
+        "数据隔离: 采集任务归属当前用户",
+        "安全门控: 采集任务只创建不运行",
+        "安全门控: 采集创建不产生线索副作用"
+      ],
+      "requiredScreenshots": [
+        "08-collection-task-created.png"
+      ],
+      "requiredCreatedKeys": [
+        "collectionTaskId",
+        "collectionTaskName"
+      ]
+    },
+    {
+      "key": "dm_setup",
+      "title": "Private-message account and template setup without sending",
+      "requiredChecks": [
+        "UI 状态流: 平台私信账号创建后列表出现",
+        "API 对账: 私信账号写入隔离数据库",
+        "安全门控: 私信账号保持待登录不伪造登录态",
+        "UI 状态流: 私信模板创建后模板库出现",
+        "API 对账: 私信模板写入隔离数据库",
+        "安全门控: 私信回放只建账号和模板不启动发送"
+      ],
+      "requiredScreenshots": [
+        "09-dm-account-created.png",
+        "10-dm-template-created.png"
+      ],
+      "requiredCreatedKeys": [
+        "dmAccountId",
+        "dmAccountName",
+        "dmTemplateId",
+        "dmTemplateName"
+      ]
+    },
+    {
+      "key": "voice_profile",
+      "title": "Voice profile and authorization sample without training",
+      "requiredChecks": [
+        "UI 状态流: 声音档案创建后授权审核出现",
+        "API 对账: 声音档案写入隔离数据库",
+        "API 对账: 声音授权样本写入隔离存储",
+        "安全门控: 声音档案待授权且不触发训练"
+      ],
+      "requiredScreenshots": [
+        "11-voice-profile-created.png"
+      ],
+      "requiredCreatedKeys": [
+        "voiceProfileId",
+        "voiceProfileName",
+        "voiceSampleId"
+      ]
+    },
+    {
+      "key": "settings_save",
+      "title": "Settings persistence and audit log without secret changes",
+      "requiredChecks": [
+        "UI 状态流: 系统设置保存后前端提示成功",
+        "API 对账: 系统设置写入隔离数据库",
+        "API 对账: 系统设置审计日志新增",
+        "安全门控: 设置回放未触碰敏感密钥"
+      ],
+      "requiredScreenshots": [
+        "12-settings-updated.png"
+      ],
+      "requiredCreatedKeys": [
+        "settingId",
+        "settingValue"
+      ]
+    },
+    {
+      "key": "mobile_replay",
+      "title": "Authenticated mobile viewport replay",
+      "requiredChecks": [
+        "移动端回放: 已登录业务态可截图"
+      ],
+      "requiredScreenshots": [
+        "13-mobile-after-stateful-flow.png"
+      ]
+    }
+  ]
+}

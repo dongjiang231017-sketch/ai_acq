@@ -64,7 +64,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
             (
                 "服务器模式下让语音网关主动注册到云端 Asterisk；客户换网络不需要重新发现本机网关地址。"
                 if deployment_mode == "server"
-                else "设备 IP 变化时用客户端重新发现/重新绑定语音网关；UC100 只是当前已测试档案。"
+                else "设备 IP 变化时用客户端重新发现/重新绑定语音网关；具体型号按交付档案决定。"
             ),
         )
     )

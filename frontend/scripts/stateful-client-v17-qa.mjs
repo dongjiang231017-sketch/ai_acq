@@ -323,6 +323,75 @@ async function screenshot(page, report, artifactDir, name) {
   const file = path.join(artifactDir, `${name}.png`);
   await page.screenshot({ path: file, fullPage: true });
   report.artifacts.screenshots.push(file);
+  return file;
+}
+
+async function ariaSnapshot(page, report, artifactDir, name) {
+  const file = path.join(artifactDir, `${name}.aria.yml`);
+  let snapshot = "";
+  if (typeof page.ariaSnapshot === "function") {
+    snapshot = await page.ariaSnapshot({ mode: "ai", depth: 10 });
+  } else {
+    snapshot = await page.locator("body").ariaSnapshot({ mode: "ai", depth: 10 });
+  }
+  await fs.writeFile(file, `${snapshot || ""}\n`, "utf8");
+  report.artifacts.ariaSnapshots.push(file);
+  return file;
+}
+
+function attachPageTelemetry(page, report, urls) {
+  page.on("console", (message) => {
+    if (["error", "warning"].includes(message.type())) {
+      const location = message.location();
+      if (/\/api\/auth\/login\b/.test(location.url || "") && /401|Unauthorized/i.test(message.text())) {
+        return;
+      }
+      report.browser.consoleErrors.push({ type: message.type(), text: message.text().slice(0, 800), location: message.location() });
+    }
+  });
+  page.on("pageerror", (error) => {
+    report.browser.pageErrors.push({ message: error.message, stack: error.stack });
+  });
+  page.on("requestfailed", (request) => {
+    const url = request.url();
+    if (/__vite_ping|favicon/.test(url)) return;
+    report.browser.failedRequests.push({ method: request.method(), url, failure: request.failure()?.errorText || "unknown" });
+  });
+  page.on("response", (response) => {
+    const url = response.url();
+    if (!url.startsWith(urls.apiBase)) return;
+    const headers = response.headers();
+    report.browser.apiResponses.push({
+      method: response.request().method(),
+      url,
+      status: response.status(),
+      echoedCorrelationId: headers["x-ai-acq-qa-correlation-id"] || headers["x-request-id"] || "",
+      traceparent: headers.traceparent || "",
+      correlationEchoed: report.correlation?.runId ? headers["x-ai-acq-qa-correlation-id"] === report.correlation.runId : null,
+      traceparentEchoed: report.correlation?.traceparent ? headers.traceparent === report.correlation.traceparent : null,
+    });
+  });
+}
+
+async function installSafeMutationGuard(page, report, urls) {
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const method = request.method().toUpperCase();
+    const url = request.url();
+    const isMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+    const isDenied = isMutation && denyMutationPatterns.some((pattern) => pattern.test(url));
+    const isExternalMutation = isMutation && !url.startsWith(urls.apiBase) && !url.startsWith(urls.frontend);
+    if (isDenied || isExternalMutation) {
+      report.browser.blockedMutations.push({ method, url, reason: isDenied ? "dangerous-workflow" : "external-mutation" });
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (url.startsWith(urls.apiBase) && report.correlation) {
+      await route.continue({ headers: { ...request.headers(), ...correlationHeaders(report.correlation) } });
+      return;
+    }
+    await route.continue();
+  });
 }
 
 async function writeSilentWav(filePath, durationSeconds = 1) {
@@ -361,55 +430,8 @@ async function runPlaywright(report, options, artifactDir, urls, credentials) {
   });
   const page = await context.newPage();
 
-  page.on("console", (message) => {
-    if (["error", "warning"].includes(message.type())) {
-      const location = message.location();
-      if (/\/api\/auth\/login\b/.test(location.url || "") && /401|Unauthorized/i.test(message.text())) {
-        return;
-      }
-      report.browser.consoleErrors.push({ type: message.type(), text: message.text().slice(0, 800), location: message.location() });
-    }
-  });
-  page.on("pageerror", (error) => {
-    report.browser.pageErrors.push({ message: error.message, stack: error.stack });
-  });
-  page.on("requestfailed", (request) => {
-    const url = request.url();
-    if (/__vite_ping|favicon/.test(url)) return;
-    report.browser.failedRequests.push({ method: request.method(), url, failure: request.failure()?.errorText || "unknown" });
-  });
-  page.on("response", (response) => {
-    const url = response.url();
-    if (!url.startsWith(urls.apiBase)) return;
-    const headers = response.headers();
-    report.browser.apiResponses.push({
-      method: response.request().method(),
-      url,
-      status: response.status(),
-      echoedCorrelationId: headers["x-ai-acq-qa-correlation-id"] || headers["x-request-id"] || "",
-      traceparent: headers.traceparent || "",
-      correlationEchoed: report.correlation?.runId ? headers["x-ai-acq-qa-correlation-id"] === report.correlation.runId : null,
-      traceparentEchoed: report.correlation?.traceparent ? headers.traceparent === report.correlation.traceparent : null,
-    });
-  });
-  await page.route("**/*", async (route) => {
-    const request = route.request();
-    const method = request.method().toUpperCase();
-    const url = request.url();
-    const isMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-    const isDenied = isMutation && denyMutationPatterns.some((pattern) => pattern.test(url));
-    const isExternalMutation = isMutation && !url.startsWith(urls.apiBase) && !url.startsWith(urls.frontend);
-    if (isDenied || isExternalMutation) {
-      report.browser.blockedMutations.push({ method, url, reason: isDenied ? "dangerous-workflow" : "external-mutation" });
-      await route.abort("blockedbyclient");
-      return;
-    }
-    if (url.startsWith(urls.apiBase) && report.correlation) {
-      await route.continue({ headers: { ...request.headers(), ...correlationHeaders(report.correlation) } });
-      return;
-    }
-    await route.continue();
-  });
+  attachPageTelemetry(page, report, urls);
+  await installSafeMutationGuard(page, report, urls);
 
   await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
   try {
@@ -441,6 +463,42 @@ async function runPlaywright(report, options, artifactDir, urls, credentials) {
     });
     report.state.accessToken = authState?.accessToken || "";
     addCheck(report, "认证状态: token 已写入浏览器", report.state.accessToken ? "pass" : "fail", "localStorage auth token present");
+
+    const storageStatePath = path.join(artifactDir, "auth-storage-state.json");
+    await context.storageState({ path: storageStatePath });
+    report.artifacts.storageState = storageStatePath;
+    addCheck(report, "认证态复用: storageState 已保存", "pass", "auth-storage-state.json");
+
+    const replayContext = await browser.newContext({
+      storageState: storageStatePath,
+      viewport: { width: 1440, height: 1050 },
+      locale: "zh-CN",
+      timezoneId: "Asia/Shanghai",
+    });
+    const replayPage = await replayContext.newPage();
+    attachPageTelemetry(replayPage, report, urls);
+    await installSafeMutationGuard(replayPage, report, urls);
+    try {
+      await replayPage.goto(urls.frontend, { waitUntil: "domcontentloaded", timeout: options.timeoutMs });
+      await replayPage.getByRole("heading", { name: /AI外呼系统/ }).waitFor({ state: "visible", timeout: 25000 });
+      await replayPage.getByText("在线坐席", { exact: false }).waitFor({ state: "visible", timeout: 15000 });
+      const replayScreenshot = await screenshot(replayPage, report, artifactDir, "02b-auth-state-reuse-dashboard");
+      const replayAriaSnapshot = await ariaSnapshot(replayPage, report, artifactDir, "02b-auth-state-reuse-dashboard");
+      const replayAuthState = await replayPage.evaluate(() => {
+        const raw = window.localStorage.getItem("ai_acq_client_auth");
+        return raw ? JSON.parse(raw) : null;
+      });
+      report.state.authReplay = {
+        storageStatePath,
+        screenshot: replayScreenshot,
+        ariaSnapshot: replayAriaSnapshot,
+        tokenReused: Boolean(replayAuthState?.accessToken),
+      };
+      addCheck(report, "认证态复用: 新浏览器上下文直达业务台", replayAuthState?.accessToken ? "pass" : "fail", "storageState replay reached AI外呼系统 without login form");
+      addCheck(report, "认证态复用: 业务台 ARIA 快照已保存", replayAriaSnapshot ? "pass" : "fail", "auth replay ARIA snapshot captured");
+    } finally {
+      await replayContext.close();
+    }
 
     const beforeLeads = await apiRequest(report, urls.apiBase, "/leads");
     const beforeTasks = await apiRequest(report, urls.apiBase, "/outbound/tasks");
@@ -553,12 +611,15 @@ async function runPlaywright(report, options, artifactDir, urls, credentials) {
     await fillPanelField(outboundPanel, "任务名称", taskName);
     await fillPanelField(outboundPanel, "并发数量", "1");
     try {
-      const outboundTaskResponse = page.waitForResponse(
-        (response) => response.url() === `${urls.apiBase}/outbound/tasks` && response.request().method() === "POST",
-        { timeout: 20000 },
-      );
+      const outboundTaskResponse = page
+        .waitForResponse(
+          (response) => response.url() === `${urls.apiBase}/outbound/tasks` && response.request().method() === "POST",
+          { timeout: 20000 },
+        )
+        .catch((error) => ({ error }));
       await outboundPanel.getByRole("button", { name: /创建外呼任务/ }).click();
-      await outboundTaskResponse;
+      const response = await outboundTaskResponse;
+      if (response?.error) throw response.error;
     } catch (error) {
       if (!createdLead?.id) throw error;
       const fallbackTask = await apiRequest(report, urls.apiBase, "/outbound/tasks", {
@@ -956,6 +1017,8 @@ async function main() {
       report: path.join(artifactDir, "report.json"),
       trace: null,
       screenshots: [],
+      ariaSnapshots: [],
+      storageState: "",
       backendLog: path.join(artifactDir, "backend.log"),
       frontendLog: path.join(artifactDir, "frontend.log"),
       migrationLog: path.join(artifactDir, "migration.log"),

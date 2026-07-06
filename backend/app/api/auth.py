@@ -6,7 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import create_access_token, read_access_token, verify_password
+from app.core.security import create_access_token, hash_password, read_access_token, verify_password
 from app.db.session import get_db
 from app.models.audit import AuditLog
 from app.models.user import RegistrationRequest, User
@@ -157,7 +157,8 @@ def create_registration_request(
         contact_phone=contact_phone,
         contact_email=contact_email,
         desired_username=desired_username,
-        note=payload.note,
+        password_hash=hash_password(payload.password) if payload.password else None,
+        note=payload.note.strip() if payload.note else None,
     )
     db.add(registration_request)
     db.flush()

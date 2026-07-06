@@ -141,11 +141,11 @@ def originate_verification(status: str) -> dict[str, str | bool]:
         }
     if status == "answered":
         return {
-            "verification_stage": "cellular_answered_no_media_proof",
+            "verification_stage": "gateway_answered_no_media_proof",
             "cellular_confirmed": True,
             "media_loop_confirmed": False,
             "acceptance_ready": False,
-            "acceptance_note": "Asterisk 收到接通事件；仍需 AudioSocket、ASR、TTS 和打断事件完成实时通话验收。",
+            "acceptance_note": "Asterisk 收到网关侧应答事件；这可能只是语音网关接管 SIP 呼叫，仍需真人接听、AudioSocket、ASR、TTS 和打断事件完成实时通话验收。",
         }
     if status == "dialing":
         return {
@@ -231,6 +231,28 @@ class AsteriskAmiClient:
 
     def command(self, command: str) -> AmiResponse:
         return self.send_action({"Action": "Command", "Command": command})
+
+    def active_outbound_channel_count(self, trunk_name: str | None = None) -> int:
+        response = self.command("core show channels concise")
+        return active_outbound_channel_count_from_output(response.field_text("Output") or response.message, trunk_name)
+
+    def wait_for_outbound_capacity(
+        self,
+        *,
+        max_active_channels: int,
+        trunk_name: str | None = None,
+        timeout_seconds: float = 120.0,
+        poll_seconds: float = 1.0,
+    ) -> int:
+        capacity = max(1, int(max_active_channels or 1))
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            active = self.active_outbound_channel_count(trunk_name)
+            if active < capacity:
+                return active
+            if time.monotonic() >= deadline:
+                raise AsteriskAmiError(f"当前线路已有 {active} 路通话，占满 {capacity} 路并发容量，等待释放超时")
+            time.sleep(max(0.2, poll_seconds))
 
     def originate(
         self,
@@ -472,11 +494,34 @@ def render_originate_channel(phone: str) -> str:
     return clean_ami_field_value(channel, "AMI Channel")
 
 
+def active_outbound_channel_count_from_output(output: str, trunk_name: str | None = None) -> int:
+    trunk = (trunk_name or "").strip()
+    active_channels: set[str] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("--") or "active channel" in line.lower():
+            continue
+        channel = line.split("!", 1)[0].strip()
+        if not channel:
+            continue
+        if trunk:
+            if channel.startswith(f"PJSIP/{trunk}-") or channel.startswith(f"SIP/{trunk}-"):
+                active_channels.add(channel)
+        elif channel.startswith(("PJSIP/", "SIP/")):
+            active_channels.add(channel)
+    return len(active_channels)
+
+
 def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
     text = output.strip()
     if not text:
         return None, "未返回 trunk 状态"
     lower = text.lower()
+    contact_lines = [line for line in lower.splitlines() if "contact:" in line]
+    for line in contact_lines:
+        tokens = {token.strip("<>:,;()[]") for token in line.split()}
+        if tokens.intersection({"avail", "available", "reachable", "ok", "registered"}):
+            return True, "trunk 已注册或可达"
     if any(marker in lower for marker in ["not found", "unable to find", "not a known", "no such"]):
         return False, "trunk 未找到"
     if any(marker in lower for marker in ["unreachable", "unavailable", "rejected", "failed"]):
@@ -553,17 +598,20 @@ def check_asterisk_health() -> AsteriskHealth:
     return AsteriskHealth(**health)
 
 
-def originate_test_call(phone: str, caller_id: str | None = None) -> AsteriskOriginateResult:
+def originate_test_call(phone: str, caller_id: str | None = None, conversation_route: str | None = None) -> AsteriskOriginateResult:
     if not telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled):
         raise AsteriskAmiError("真实线路拨号开关未启用，请先设置 ASTERISK_LIVE_CALL_ENABLED=true")
     render_originate_channel(phone)
     if caller_id:
         clean_ami_field_value(caller_id, "AMI CallerID")
     with AsteriskAmiClient(events=True) as client:
+        variables = {"AI_ACQ_TEST_CALL": "1"}
+        if conversation_route:
+            variables["AI_ACQ_CONVERSATION_ROUTE"] = conversation_route
         return client.originate(
             phone,
             caller_id=caller_id,
-            variables={"AI_ACQ_TEST_CALL": "1"},
+            variables=variables,
             wait_for_result_seconds=settings.asterisk_test_call_result_wait_seconds,
         )
 
@@ -593,7 +641,7 @@ def normalize_ami_call_event(event: dict[str, str]) -> dict[str, str]:
             "CHANUNAVAIL": "failed",
         }.get(dial_status.upper(), "ended")
     elif event_name in {"Hangup", "HangupRequest"}:
-        status = {"1": "failed", "3": "failed", "16": "hangup", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "hangup")
+        status = {"1": "failed", "3": "failed", "16": "cancelled", "17": "busy", "18": "no_answer", "19": "no_answer", "21": "failed"}.get(cause, "cancelled")
     elif event_name == "OriginateResponse":
         if response.lower() == "success":
             status = "dialing"

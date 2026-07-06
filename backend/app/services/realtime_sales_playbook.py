@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from app.services.realtime_sales_brain import build_omni_sales_instruction
+from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 
 
 def build_video_group_buying_sales_instructions() -> str:
@@ -19,7 +20,7 @@ def build_video_group_buying_sales_instructions() -> str:
             "合规要求：客户明确拒绝、说别联系或要挂电话时，礼貌结束并表示不再打扰；不要主动说自己不是机器人、不是 AI、是真人或智能助手。只有客户明确问是否 AI/机器人时，才坦诚说明是智能语音助手。",
             "电话助理处理：如果听到电话助理、秘书或系统提示要求说明姓名和来电原因，只用一句话回答身份和来电原因，请求转接负责人；不要展开销售，不要说“加微信”。",
             "真实电销风格：先听懂对方的问题和情绪，再回答；客户质疑时先承接一句，不要硬推，不要把同一句换个词反复念。",
-            "声音风格：自然、短句、有停顿感；像带笑意的人在解释，允许说“明白”“对，这点您问得对”，不要连续大段介绍，不要连续两轮说同一句推进话术。",
+            "声音风格：自然、短句、有停顿感；优先直接复述客户问题或回答，不要把“明白”“好的”当固定开头，不要连续两轮说同一句推进话术。",
             "插话处理：客户插话后直接接客户刚说的话回答，禁止解释上一句为什么停了，禁止说“系统没听清”“我重新识别一下”等技术解释。",
             "销售方法：每轮按真实电销处理，识别客户情绪、销售阶段和异议类型；先承接，再回答，再轻轻问一个选择题。客户不耐烦时只答问题或结束。",
         ],
@@ -93,6 +94,24 @@ def classify_realtime_call_input(text: str) -> str:
         "電話秘書",
         "来电助理",
         "來電助理",
+        "接听助理",
+        "接聽助理",
+        "智能接听",
+        "智能接聽",
+        "智能助理",
+        "ai接听",
+        "AI接听",
+        "AI 接听",
+        "机主已开启",
+        "機主已開啟",
+        "机主正在忙",
+        "機主正在忙",
+        "机主不方便",
+        "機主不方便",
+        "我是机主",
+        "我是機主",
+        "保护机主",
+        "保護機主",
         "我是您的来电助理",
         "我是你的来电助理",
         "您正在与来电助理通话",
@@ -107,6 +126,24 @@ def classify_realtime_call_input(text: str) -> str:
         "確認是否接聽",
         "稍后为您转达",
         "稍後為您轉達",
+        "稍后为你转达",
+        "稍後為你轉達",
+        "为您转达",
+        "為您轉達",
+        "为你转达",
+        "為你轉達",
+        "帮您转达",
+        "幫您轉達",
+        "帮你转达",
+        "幫你轉達",
+        "已通知机主",
+        "已通知機主",
+        "通知机主",
+        "通知機主",
+        "帮您记录",
+        "幫您記錄",
+        "帮你记录",
+        "幫你記錄",
         "机主接听前",
         "機主接聽前",
         "请不要挂断",
@@ -116,6 +153,9 @@ def classify_realtime_call_input(text: str) -> str:
     ]
     if any(keyword in clean for keyword in screening_keywords):
         return "call_screening"
+    normalized = normalize_realtime_sales_text(clean)
+    clean = normalized.normalized_text
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
     rejection_keywords = [
         "放个屁",
         "滚",
@@ -145,6 +185,9 @@ def classify_realtime_call_input(text: str) -> str:
         "不要总",
         "你怎么总",
         "你老是",
+        "老是说明白",
+        "总说明白",
+        "一直说明白",
     ]
     if any(keyword in compact for keyword in repetition_keywords):
         return "repetition_complaint"
@@ -260,6 +303,55 @@ def classify_realtime_call_input(text: str) -> str:
     return "human_speech"
 
 
+_SYSTEM_PROMPT_TAIL_MARKERS = [
+    "录音完成后挂断即可",
+    "錄音完成後掛斷即可",
+    "挂断即可",
+    "掛斷即可",
+    "提示音后录制留言",
+    "提示音後錄製留言",
+    "请在提示音后",
+    "請在提示音後",
+    "提示音后",
+    "提示音後",
+    "若要留言",
+    "请留言",
+    "請留言",
+    "用户无法接听",
+    "暫時無法接聽",
+    "暂时无法接听",
+    "無法接聽",
+    "无法接听",
+    "无法接通",
+]
+
+
+def extract_human_text_after_system_prompt(text: str) -> str:
+    """Keep the human tail when ASR merges a voicemail/system prompt with customer speech."""
+    clean = " ".join(text.strip().split())
+    if classify_realtime_call_input(clean) != "system_prompt":
+        return ""
+    best_tail = ""
+    best_idx = -1
+    for marker in _SYSTEM_PROMPT_TAIL_MARKERS:
+        idx = clean.rfind(marker)
+        if idx < 0 or idx < best_idx:
+            continue
+        tail = clean[idx + len(marker) :]
+        tail = re.sub(r"^[\s。！？?!，,、.；;：:]+", "", tail).strip()
+        if _looks_like_human_tail(tail):
+            best_tail = tail
+            best_idx = idx
+    return best_tail
+
+
+def _looks_like_human_tail(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.；;：:]+", "", text)
+    if len(compact) < 2:
+        return False
+    return classify_realtime_call_input(text) != "system_prompt"
+
+
 def _format_omni_recent_history(recent_history: list[dict[str, str]] | None) -> str:
     rows: list[str] = []
     for turn in (recent_history or [])[-6:]:
@@ -299,7 +391,8 @@ def build_omni_turn_instruction(
     last_reply: str = "",
     stage_instruction: str = "",
 ) -> str:
-    clean = " ".join(text.strip().split())
+    normalization = normalize_realtime_sales_text(text)
+    clean = normalization.normalized_text
     context = _omni_context_prefix(recent_history, first_human_after_screening, last_reply)
     sales_instruction = build_omni_sales_instruction(
         clean,
@@ -315,6 +408,13 @@ def build_omni_turn_instruction(
             "这句话来自电话助理或电话秘书，不是真人客户。只用普通话原句回答："
             "您好，我这边做视频号团购到店获客，来电想确认门店微信同城曝光合作，麻烦转接负责人，谢谢。"
             "只说这一句，不要展开销售，不要说加微信，不要用粤语。"
+        )
+    if normalization.has_fix("group_buying_package"):
+        return (
+            f"{context}\n{sales_instruction}\n客户把团购套餐听成或说成了通信套餐：{normalization.raw_text}。"
+            "本轮先纠正概念，不要继续讲美团区别，不要推进资料或加微信。"
+            "只说这句：不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
+            "只用普通话，不要粤语。"
         )
     if signal == "rejection":
         return (
@@ -369,13 +469,13 @@ def build_omni_turn_instruction(
         return (
             f"{context}\n{sales_instruction}\n客户在纠正你刚才误判了他的意思：{clean}。"
             "本轮必须先承认理解错，不要继续猜费用、效果、美团，也不要推进资料或加微信。"
-            "只说这句：明白，是我刚才理解错了。您是想问我是谁，还是让我直接说来电目的？"
+            "只说这句：是我刚才理解错了。您是想问我是谁，还是让我直接说来电目的？"
             "只用普通话，不要粤语。"
         )
     if signal == "repetition_complaint":
         return (
             f"{context}\n{sales_instruction}\n客户觉得你在重复或没有答到点：{clean}。"
-            "先承接情绪：明白，我不重复刚才那句。"
+            "先承接情绪：我不重复刚才那句。"
             "然后换角度直接回答客户真正问题；如果客户没给具体问题，只问：您是想听费用、效果，还是和美团区别？"
             "本轮禁止推进资料或加微信。"
         )
@@ -385,6 +485,13 @@ def build_omni_turn_instruction(
             "本轮停止发资料、加微信、约时间推进，只回答当前问题。"
             "如果客户提到美团/抖音/已有渠道，就说明视频号是微信同城和私域补充，不替代原渠道。"
             "如果客户没有明确问题，只用一句话问他最关心费用、效果还是流程。"
+        )
+    if any(keyword in clean for keyword in ["套餐", "介绍一下", "说一下", "讲一下", "怎么合作", "流程", "什么情况"]):
+        return (
+            f"{context}\n{sales_instruction}\n客户正在问套餐、流程或让你介绍服务：{clean}。"
+            "本轮禁止重新自我介绍，禁止再问客户需求，禁止说发资料或加微信。"
+            "只说这句：套餐主要是三块：先看门店品类，再设计能核销的团购券，最后小范围测曝光、咨询和到店数据。"
+            "只用普通话，不要粤语。"
         )
     return (
         f"{context}\n{sales_instruction}\n客户刚说：{clean}。先直接回答客户这句话，再按素材用一句话推进到发资料或约时间。"

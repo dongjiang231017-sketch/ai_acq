@@ -1,3 +1,4 @@
+import logging
 import time
 from datetime import datetime
 
@@ -41,8 +42,10 @@ from app.services.asterisk_ami import (
 from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
+from app.services.realtime_intent_capture import register_realtime_test_call_context
 from app.services.realtime_outbound import (
     RealtimeSessionNotFound,
+    active_bridge_conversation_route,
     build_realtime_pipeline,
     complete_realtime_playback,
     create_realtime_session,
@@ -51,12 +54,14 @@ from app.services.realtime_outbound import (
     interrupt_realtime_session,
     read_realtime_live_events,
 )
+from app.services.realtime_route_health import prepare_realtime_route_for_call
 from app.services.telephony_cellular import build_cellular_diagnostic, recover_telephony_line
 from app.services.telephony_preflight import build_telephony_preflight
 from app.services.telephony_runtime_config import telephony_bool, telephony_int, telephony_str
 from app.services.voice_gateway_profiles import current_voice_gateway_profile
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _seed_default_script(db: Session) -> CallScript:
@@ -78,6 +83,11 @@ def _seed_default_script(db: Session) -> CallScript:
     return script
 
 
+def _current_call_channel_limit() -> int:
+    profile = current_voice_gateway_profile()
+    return max(1, telephony_int("ASTERISK_MAX_CHANNELS", "VOICE_GATEWAY_MAX_CHANNELS", fallback=profile.max_channels))
+
+
 @router.get("/overview", response_model=OutboundOverview)
 def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -93,9 +103,10 @@ def outbound_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     intent_count = db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.intent_level.in_(["A", "B"]))) or 0
     needs_handoff = db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.need_handoff.is_(True))) or 0
     active_tasks = db.scalar(select(func.count()).select_from(OutreachTask).where(OutreachTask.status == "运行中")) or 0
-    active_calls = min(int(active_tasks) * 5, 12)
+    channel_limit = _current_call_channel_limit()
+    active_calls = min(int(active_tasks) * channel_limit, channel_limit)
     return {
-        "aiSeats": 10,
+        "aiSeats": channel_limit,
         "activeCalls": active_calls,
         "needsHandoff": int(needs_handoff),
         "silentAlerts": 1 if active_calls > 0 else 0,
@@ -143,8 +154,31 @@ def recover_telephony_line_api() -> dict[str, object]:
 @router.post("/telephony/test-call", response_model=TelephonyTestCallRead)
 def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, object]:
     started_at = datetime.utcnow()
+    pipeline = build_realtime_pipeline()
+    actual_bridge_route = str(pipeline.get("actualBridgeRoute") or active_bridge_conversation_route() or "pipeline")
+    requested_route = (payload.conversation_route or actual_bridge_route or "pipeline").strip().lower()
+    if requested_route not in {"pipeline", "omni"}:
+        requested_route = "pipeline"
+    route_probe = prepare_realtime_route_for_call(requested_route)
+    effective_route = route_probe.effective_route
+    route_fallback_reason = route_probe.route_fallback_reason
+    route_matched = requested_route == actual_bridge_route or (actual_bridge_route == "omni" and effective_route == "pipeline")
+    if not route_matched:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"本次选择的是 {requested_route} 路线，但当前真实 AudioSocket bridge 正在运行 {actual_bridge_route}。"
+                "请先把 bridge 重启到可承接该路线的模式，否则这通电话不会走你选择的路线。"
+            ),
+        )
+    register_realtime_test_call_context(
+        phone=payload.phone,
+        caller_id=payload.caller_id,
+        requested_route=requested_route,
+        effective_route=effective_route,
+    )
     try:
-        result = originate_test_call(payload.phone, caller_id=payload.caller_id)
+        result = originate_test_call(payload.phone, caller_id=payload.caller_id, conversation_route=effective_route)
     except AsteriskAmiValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
@@ -153,20 +187,27 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         started_at,
         timeout_seconds=6.0 if result.cellular_confirmed else 0.0,
     )
-    media_loop_confirmed = result.media_loop_confirmed or conversation_status["mediaLoopConfirmed"]
-    human_speech_confirmed = conversation_status["humanSpeechConfirmed"]
-    ai_speech_confirmed = conversation_status["aiSpeechConfirmed"]
-    call_screening_detected = conversation_status["callScreeningDetected"]
+    media_loop_confirmed = result.media_loop_confirmed or bool(conversation_status["mediaLoopConfirmed"])
+    human_speech_confirmed = bool(conversation_status["humanSpeechConfirmed"])
+    ai_speech_confirmed = bool(conversation_status["aiSpeechConfirmed"])
+    call_screening_detected = bool(conversation_status["callScreeningDetected"])
+    bridge_error = str(conversation_status.get("bridgeError") or "")
     conversation_confirmed = result.cellular_confirmed and human_speech_confirmed and ai_speech_confirmed
     acceptance_ready = result.acceptance_ready or conversation_confirmed
     acceptance_note = result.acceptance_note
     verification_stage = result.verification_stage
+    if route_fallback_reason:
+        acceptance_note = route_fallback_reason
+        verification_stage = "realtime_route_fallback"
     if conversation_confirmed:
         verification_stage = "realtime_conversation_confirmed"
         acceptance_note = "已确认真人客户语音，且 AI 首句已实际播入电话；实时对话验收通过。"
     elif result.cellular_confirmed and media_loop_confirmed:
         verification_stage = "realtime_media_confirmed"
         acceptance_note = "线路和实时媒体桥已接通，但还没同时确认真人语音和 AI 首句播出。"
+    if bridge_error and not conversation_confirmed:
+        verification_stage = "realtime_bridge_error"
+        acceptance_note = "电话已接通，但实时语音桥报错；系统会自动降级或允许重新试拨。"
     if call_screening_detected and not human_speech_confirmed:
         acceptance_note = "检测到电话助理/秘书提示，已说明来电原因；还未确认真人客户接听。"
     cellular_diagnostic = build_cellular_diagnostic(
@@ -175,6 +216,7 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         human_speech_confirmed=human_speech_confirmed,
         ai_speech_confirmed=ai_speech_confirmed,
         call_screening_detected=call_screening_detected,
+        bridge_error=bridge_error,
     )
     auto_recovery = None
     if (
@@ -184,10 +226,37 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         and cellular_diagnostic.get("status") == "fail"
     ):
         auto_recovery = recover_telephony_line()
+    logger.warning(
+        "telephony_test_call_result action_id=%s phone=%s accepted=%s status=%s channel=%s route=%s/%s "
+        "cellular_confirmed=%s media_loop_confirmed=%s human_speech=%s ai_speech=%s verification_stage=%s "
+        "diagnostic_status=%s diagnostic_stage=%s diagnostic_title=%s message=%s raw_payload=%s",
+        result.action_id,
+        payload.phone[-4:].rjust(len(payload.phone), "*"),
+        result.accepted,
+        result.status,
+        result.channel,
+        requested_route,
+        actual_bridge_route,
+        result.cellular_confirmed,
+        media_loop_confirmed,
+        human_speech_confirmed,
+        ai_speech_confirmed,
+        verification_stage,
+        cellular_diagnostic.get("status"),
+        cellular_diagnostic.get("stage"),
+        cellular_diagnostic.get("title"),
+        result.message,
+        result.raw_payload[:2000],
+    )
     return {
         "accepted": result.accepted,
         "actionId": result.action_id,
         "channel": result.channel,
+        "requestedRoute": requested_route,
+        "actualBridgeRoute": actual_bridge_route,
+        "effectiveRoute": effective_route,
+        "routeFallbackReason": route_fallback_reason,
+        "routeMatched": route_matched,
         "gatewayStatus": result.status,
         "message": result.message,
         "rawPayload": result.raw_payload,
@@ -197,6 +266,7 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         "humanSpeechConfirmed": human_speech_confirmed,
         "aiSpeechConfirmed": ai_speech_confirmed,
         "callScreeningDetected": call_screening_detected,
+        "bridgeError": bridge_error,
         "conversationConfirmed": conversation_confirmed,
         "acceptanceReady": acceptance_ready,
         "acceptanceNote": acceptance_note,
@@ -205,7 +275,7 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
     }
 
 
-def _wait_realtime_conversation_status_since(started_at: datetime, timeout_seconds: float = 0.0) -> dict[str, bool]:
+def _wait_realtime_conversation_status_since(started_at: datetime, timeout_seconds: float = 0.0) -> dict[str, object]:
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
         status = _realtime_conversation_status_since(started_at)
@@ -216,7 +286,7 @@ def _wait_realtime_conversation_status_since(started_at: datetime, timeout_secon
         time.sleep(0.25)
 
 
-def _realtime_conversation_status_since(started_at: datetime) -> dict[str, bool]:
+def _realtime_conversation_status_since(started_at: datetime) -> dict[str, object]:
     media_event_types = {
         "call_connected",
         "audio_capture_started",
@@ -233,12 +303,13 @@ def _realtime_conversation_status_since(started_at: datetime) -> dict[str, bool]
         "humanSpeechConfirmed": False,
         "aiSpeechConfirmed": False,
         "callScreeningDetected": False,
+        "bridgeError": "",
         "conversationConfirmed": False,
     }
     events_payload = read_realtime_live_events(limit=160)
     for event in events_payload.get("events", []):
         event_type = str(event.get("type") or "")
-        if event_type not in media_event_types:
+        if event_type not in media_event_types and event_type not in {"call_error", "omni_start_failed_fallback", "omni_unavailable"}:
             continue
         at_text = str(event.get("at") or "")
         try:
@@ -246,6 +317,13 @@ def _realtime_conversation_status_since(started_at: datetime) -> dict[str, bool]
         except ValueError:
             continue
         if event_at < started_at:
+            continue
+        if event_type in {"call_error", "omni_unavailable"}:
+            status["bridgeError"] = str(event.get("error") or event.get("detail") or event.get("message") or event_type)
+            continue
+        if event_type == "omni_start_failed_fallback":
+            status["bridgeError"] = ""
+            status["mediaLoopConfirmed"] = True
             continue
         status["mediaLoopConfirmed"] = True
         if event_type == "human_speech_confirmed":
@@ -322,6 +400,9 @@ def list_outbound_tasks(db: Session = Depends(get_db)) -> list[OutreachTask]:
 
 @router.post("/tasks", response_model=TaskRead)
 def create_outbound_task(payload: OutboundTaskCreate, db: Session = Depends(get_db)) -> OutreachTask:
+    channel_limit = _current_call_channel_limit()
+    if payload.concurrency > channel_limit:
+        raise HTTPException(status_code=400, detail=f"当前语音网关最多支持 {channel_limit} 路并发，请把并发数量调到 {channel_limit} 或以下。")
     unique_lead_ids = list(dict.fromkeys(payload.lead_ids))
     leads = list(db.scalars(select(MerchantLead).where(MerchantLead.id.in_(unique_lead_ids))).all())
     if len(leads) != len(unique_lead_ids):

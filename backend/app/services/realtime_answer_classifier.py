@@ -41,11 +41,13 @@ class AnswerClassifier:
         voice_rms_threshold: int = 500,
         long_speech_threshold: float = 2.5,
         short_speech_max: float = 1.5,
+        short_speech_fast_seconds: float = 0.9,
     ) -> None:
         self.max_wait_seconds = max_wait_seconds
         self.voice_rms_threshold = voice_rms_threshold
         self.long_speech_threshold = long_speech_threshold
         self.short_speech_max = short_speech_max
+        self.short_speech_fast_seconds = short_speech_fast_seconds
         self.state = AnswerDetectionState()
 
     def on_audio_frame(self, rms: int, now: float | None = None) -> CallAnswerType | None:
@@ -106,6 +108,12 @@ class AnswerClassifier:
             self.state.longest_speech = max(self.state.longest_speech, current_duration)
         if current_duration > self.long_speech_threshold and self.state.speech_count == 1:
             return self._classify(CallAnswerType.PHONE_ASSISTANT, "audio:long_single_speech")
+        if (
+            self.state.speech_count >= 2
+            and self.state.longest_speech < self.short_speech_max
+            and now - self.state.first_audio_at >= min(self.max_wait_seconds, self.short_speech_fast_seconds)
+        ):
+            return self._classify(CallAnswerType.HUMAN, "audio:multiple_short_speech_fast")
         if now - self.state.first_audio_at >= self.max_wait_seconds:
             return self.classify_after_wait(now)
         return None
@@ -123,6 +131,12 @@ def classify_answer_text(text: str) -> CallAnswerType:
     compact = re.sub(r"[\s。！？?!，,、.]+", "", clean.lower())
     if not compact:
         return CallAnswerType.UNKNOWN
+    human_tail = _extract_human_tail_after_prompt(clean)
+    if human_tail:
+        tail_type = classify_answer_text(human_tail)
+        if tail_type in {CallAnswerType.PHONE_ASSISTANT, CallAnswerType.VOICEMAIL, CallAnswerType.SYSTEM_PROMPT}:
+            return tail_type
+        return CallAnswerType.HUMAN
     if any(
         keyword in clean
         for keyword in [
@@ -162,6 +176,17 @@ def classify_answer_text(text: str) -> CallAnswerType:
             "电话秘书",
             "来电助理",
             "来电秘书",
+            "接听助理",
+            "智能接听",
+            "智能助理",
+            "ai接听",
+            "AI接听",
+            "AI 接听",
+            "机主已开启",
+            "机主正在忙",
+            "机主不方便",
+            "我是机主",
+            "保护机主",
             "我是您的来电助理",
             "正在与来电助理通话",
             "为了保护机主",
@@ -181,6 +206,15 @@ def classify_answer_text(text: str) -> CallAnswerType:
             "来意",
             "来电原因",
             "稍后为您转达",
+            "稍后为你转达",
+            "为您转达",
+            "为你转达",
+            "帮您转达",
+            "帮你转达",
+            "已通知机主",
+            "通知机主",
+            "帮您记录",
+            "帮你记录",
             "请留下您的姓名",
             "留下您的姓名",
         ]
@@ -189,3 +223,43 @@ def classify_answer_text(text: str) -> CallAnswerType:
     if len(compact) <= 8 and any(keyword in compact for keyword in ["喂", "你好", "您好", "在", "谁", "哪位", "什么事"]):
         return CallAnswerType.HUMAN
     return CallAnswerType.UNKNOWN
+
+
+_PROMPT_TAIL_MARKERS = [
+    "挂断即可",
+    "录音完成后",
+    "提示音后录制",
+    "请在提示音后",
+    "提示音后",
+    "请留言",
+    "语音信箱",
+    "语音留言",
+    "用户无法接听",
+    "暂时无法接听",
+    "无法接听",
+    "无法接通",
+]
+
+
+def _extract_human_tail_after_prompt(text: str) -> str:
+    best_tail = ""
+    best_idx = -1
+    for marker in _PROMPT_TAIL_MARKERS:
+        idx = text.rfind(marker)
+        if idx < 0 or idx < best_idx:
+            continue
+        tail = text[idx + len(marker) :]
+        tail = re.sub(r"^[\s。！？?!，,、.；;：:]+", "", tail).strip()
+        if _looks_like_human_tail(tail):
+            best_tail = tail
+            best_idx = idx
+    return best_tail
+
+
+def _looks_like_human_tail(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.；;：:]+", "", text)
+    if len(compact) < 2:
+        return False
+    if any(marker in text for marker in _PROMPT_TAIL_MARKERS):
+        return False
+    return True

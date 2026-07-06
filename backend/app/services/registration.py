@@ -16,7 +16,8 @@ class RegistrationReviewError(ValueError):
 @dataclass(frozen=True)
 class ApprovedAccount:
     username: str
-    initial_password: str
+    initial_password: str | None
+    used_requested_password: bool
 
 
 def _initial_password(contact_phone: str) -> str:
@@ -59,13 +60,13 @@ def approve_registration_request(db: Session, request_id: str, actor_username: s
     if existing_user is not None:
         raise RegistrationReviewError(f"客户账号已存在：{existing_user.username}")
 
-    initial_password = _initial_password(registration_request.contact_phone)
+    initial_password = None if registration_request.password_hash else _initial_password(registration_request.contact_phone)
     user = User(
         username=username,
         display_name=registration_request.contact_name or registration_request.company_name,
         email=email,
         phone=phone,
-        password_hash=hash_password(initial_password),
+        password_hash=registration_request.password_hash or hash_password(initial_password),
         status="启用",
         is_superuser=False,
     )
@@ -84,7 +85,11 @@ def approve_registration_request(db: Session, request_id: str, actor_username: s
         ),
     )
     db.commit()
-    return ApprovedAccount(username=username, initial_password=initial_password)
+    return ApprovedAccount(
+        username=username,
+        initial_password=initial_password,
+        used_requested_password=bool(registration_request.password_hash),
+    )
 
 
 def reject_registration_request(db: Session, request_id: str, actor_username: str | None = None) -> None:

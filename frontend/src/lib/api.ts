@@ -1,4 +1,5 @@
 const LOCAL_API_PORT = 8001;
+const DEFAULT_API_TIMEOUT_MS = 25000;
 
 function resolveApiBaseUrl() {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -47,10 +48,11 @@ export type RegistrationRequestCreate = {
   contactPhone: string;
   contactEmail?: string | null;
   desiredUsername?: string | null;
+  password?: string | null;
   note?: string | null;
 };
 
-export type RegistrationRequestRead = RegistrationRequestCreate & {
+export type RegistrationRequestRead = Omit<RegistrationRequestCreate, "password"> & {
   id: string;
   status: string;
   createdAt: string;
@@ -266,6 +268,127 @@ export type VoiceGatewayProfile = {
   notes: string[];
 };
 
+export type VoiceGatewayConfigField = {
+  label: string;
+  value: string;
+  target: string;
+  note: string;
+};
+
+export type VoiceGatewayDeliveryStep = {
+  key: string;
+  label: string;
+  detail: string;
+  expectedResult: string;
+};
+
+export type VoiceGatewayConfigCard = {
+  lineId: string;
+  customerName: string;
+  lineName: string;
+  gatewayProfileKey: string;
+  gatewayLabel: string;
+  sipServer: string;
+  sipPort: number;
+  sipTransport: string;
+  sipUsername: string;
+  sipAuthUsername: string;
+  sipPasswordSecretAlias: string;
+  sipPasswordDisplay: string;
+  trunkName: string;
+  channelCount: number;
+  codecPrimary: string;
+  codecSecondary: string;
+  dtmfMode: string;
+  rtpPortRange: string;
+  routeDirection: string;
+  fieldMapping: VoiceGatewayConfigField[];
+  deliverySteps: VoiceGatewayDeliveryStep[];
+};
+
+export type VoiceGatewayLine = {
+  id: string;
+  ownerUserId: string;
+  createdByUserId?: string | null;
+  lineName: string;
+  customerName: string;
+  status: string;
+  gatewayProfileKey: string;
+  gatewayLabel: string;
+  gatewayVendor: string;
+  gatewayModel: string;
+  gatewayCategory: string;
+  deploymentMode: string;
+  sipServerHost: string;
+  sipServerPort: number;
+  sipTransport: string;
+  sipUsername: string;
+  sipAuthUsername: string;
+  sipPasswordSecretAlias: string;
+  sipPasswordDisplay: string;
+  trunkName: string;
+  channelCount: number;
+  codecPrimary: string;
+  codecSecondary: string;
+  dtmfMode: string;
+  rtpPortRange: string;
+  routeDirection: string;
+  deviceAdminUrl: string;
+  deviceSerial: string;
+  deviceMac: string;
+  networkNote: string;
+  registrationStatus: string;
+  routeStatus: string;
+  simStatus: string;
+  rtpStatus: string;
+  acceptanceStatus: string;
+  lastRegisteredAt?: string | null;
+  lastPreflightAt?: string | null;
+  notes: string;
+  configCard: VoiceGatewayConfigCard;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VoiceGatewayDeviceDiscoveryUpdate = {
+  deviceAdminUrl?: string | null;
+  deviceIp?: string | null;
+  deviceMac?: string | null;
+  deviceSerial?: string | null;
+  source?: string;
+  status?: string;
+  summary?: string;
+  detail?: string;
+  evidenceJson?: string;
+};
+
+export type VoiceGatewayDeviceDiscoveryCreate = VoiceGatewayDeviceDiscoveryUpdate & {
+  gatewayProfileKey?: string | null;
+  gatewayLabel?: string | null;
+  sipPort?: number | null;
+};
+
+export type VoiceGatewayDeviceDiscovery = {
+  id: string;
+  ownerUserId: string;
+  reporterUserId?: string | null;
+  matchedLineId?: string | null;
+  status: string;
+  source: string;
+  gatewayProfileKey: string;
+  gatewayLabel: string;
+  deviceAdminUrl: string;
+  deviceIp: string;
+  deviceMac: string;
+  deviceSerial: string;
+  sipPort: number;
+  summary: string;
+  detail: string;
+  evidenceJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type TelephonyConfig = {
   gatewayMode: string;
   asteriskDeploymentMode: string;
@@ -352,6 +475,11 @@ export type TelephonyTestCallResult = {
   accepted: boolean;
   actionId: string;
   channel: string;
+  requestedRoute: "pipeline" | "omni" | string;
+  actualBridgeRoute: "pipeline" | "omni" | string;
+  effectiveRoute: "pipeline" | "omni" | string;
+  routeFallbackReason: string;
+  routeMatched: boolean;
   gatewayStatus: string;
   message: string;
   rawPayload: string;
@@ -361,6 +489,7 @@ export type TelephonyTestCallResult = {
   humanSpeechConfirmed: boolean;
   aiSpeechConfirmed: boolean;
   callScreeningDetected: boolean;
+  bridgeError: string;
   conversationConfirmed: boolean;
   acceptanceReady: boolean;
   acceptanceNote: string;
@@ -388,6 +517,41 @@ export type RealtimeRouteOption = {
   isActive: boolean;
 };
 
+export type RealtimeRouteBenchmark = {
+  key: "pipeline" | "omni" | string;
+  label: string;
+  status: "pass" | "warn" | "fail" | string;
+  qualityScore: number;
+  readinessScore: number;
+  estimatedLatencyMs: number;
+  estimatedAiCostPerMinute: number;
+  costRank: number;
+  riskLevel: "low" | "medium" | "high" | string;
+  strengths: string[];
+  risks: string[];
+  nextAction: string;
+};
+
+export type RealtimeRouteBenchmarkReport = {
+  recommendedRoute: "pipeline" | "omni" | string;
+  status: "pass" | "warn" | "fail" | string;
+  summary: string;
+  lowCostFirst: boolean;
+  latestScore?: number | null;
+  latestTurnResponseMs?: number | null;
+  benchmarks: RealtimeRouteBenchmark[];
+};
+
+export type RealtimeLearningSummary = {
+  recentLessonCount: number;
+  activeGuidanceCount: number;
+  avoidPhraseCount: number;
+  qualityTags: string[];
+  latestGuidance: string[];
+  avoidPhrases: string[];
+  summary: string;
+};
+
 export type RealtimePipeline = {
   mode: string;
   bridgeMode: string;
@@ -396,8 +560,13 @@ export type RealtimePipeline = {
   estimatedAiCostPerMinute: number;
   readyForMockCall: boolean;
   readyForAsteriskMedia: boolean;
+  configuredRoute: "pipeline" | "omni" | string;
+  actualBridgeRoute: "pipeline" | "omni" | string;
+  routeMatched: boolean;
   nextStep: string;
   routeOptions: RealtimeRouteOption[];
+  routeBenchmark?: RealtimeRouteBenchmarkReport | null;
+  learning?: RealtimeLearningSummary | null;
   steps: RealtimePipelineStep[];
 };
 
@@ -481,11 +650,41 @@ export type RealtimeLiveScore = {
   metrics: RealtimeLiveScoreMetric[];
 };
 
+export type RealtimeLiveState = {
+  callId?: string | null;
+  state: string;
+  label: string;
+  status: "active" | "closed" | "attention" | "unknown" | string;
+  closeReason?: string | null;
+  canAutoClose: boolean;
+  autoCloseScheduled: boolean;
+  humanSpeechConfirmed: boolean;
+  callScreeningDetected: boolean;
+  voicemailDetected: boolean;
+  silenceDetected: boolean;
+  noResponseDetected: boolean;
+  hangupDetected: boolean;
+  aiSpeechConfirmed: boolean;
+  customerSpeechConfirmed: boolean;
+  interruptionDetected: boolean;
+  turnTakingStatus: "pass" | "warn" | "fail" | "unknown" | string;
+  latestTurnResponseMs?: number | null;
+  currentPhase?: string;
+  phaseLabel?: string;
+  turnAction?: string;
+  latencyBreakdown?: Record<string, number | null | undefined>;
+  lastCustomerText?: string | null;
+  lastAiReply?: string | null;
+  lastEventAt?: string | null;
+  issues: string[];
+};
+
 export type RealtimeLiveEvents = {
   logPath: string;
   hasEvents: boolean;
   latestAt?: string | null;
   score?: RealtimeLiveScore | null;
+  state?: RealtimeLiveState | null;
   events: RealtimeLiveEvent[];
 };
 
@@ -1167,6 +1366,12 @@ async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit, retr
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const isFormData = options?.body instanceof FormData;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), DEFAULT_API_TIMEOUT_MS);
+  const upstreamSignal = options?.signal;
+  const abortFromUpstream = () => controller.abort();
+  upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
+
   let response: Response;
   try {
     response = await fetchWithRetry(`${API_BASE_URL}${path}`, {
@@ -1175,11 +1380,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         ...authHeaders(),
         ...options?.headers,
       },
+      signal: controller.signal,
       ...options,
     });
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`请求超时，请检查网络或服务器状态后重试：${path}`);
+    }
     if (error instanceof Error) throw error;
     throw new Error("无法连接服务器，请确认后端服务已启动或刷新页面后重试。");
+  } finally {
+    window.clearTimeout(timeout);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
   }
 
   if (!response.ok) {
@@ -1292,7 +1504,19 @@ export const api = {
     const query = phone?.trim() ? `?phone=${encodeURIComponent(phone.trim())}` : "";
     return request<TelephonyPreflight>(`/outbound/telephony/preflight${query}`);
   },
-  createTelephonyTestCall: (payload: { phone: string; callerId?: string | null }) =>
+  voiceGatewayLines: () => request<VoiceGatewayLine[]>("/delivery/voice-gateway-lines"),
+  voiceGatewayDeviceDiscoveries: () => request<VoiceGatewayDeviceDiscovery[]>("/delivery/voice-gateway-device-discoveries"),
+  createVoiceGatewayDeviceDiscovery: (payload: VoiceGatewayDeviceDiscoveryCreate) =>
+    request<VoiceGatewayDeviceDiscovery>("/delivery/voice-gateway-device-discoveries", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  reportVoiceGatewayDeviceDiscovery: (lineId: string, payload: VoiceGatewayDeviceDiscoveryUpdate) =>
+    request<VoiceGatewayLine>(`/delivery/voice-gateway-lines/${lineId}/device-discovery`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  createTelephonyTestCall: (payload: { phone: string; callerId?: string | null; conversationRoute?: "pipeline" | "omni" }) =>
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",
       body: JSON.stringify(payload),

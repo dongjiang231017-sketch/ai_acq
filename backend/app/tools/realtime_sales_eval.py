@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import dataclass
 
-from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType
+from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_sales_brain import render_sales_reply, score_realtime_events
@@ -12,8 +12,12 @@ from app.services.realtime_sales_playbook import (
     build_barge_recovery_instruction,
     build_omni_turn_instruction,
     classify_realtime_call_input,
+    extract_human_text_after_system_prompt,
 )
 from app.services.realtime_sales_state import SalesStateMachine
+from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
+from app.tools.realtime_audio_bridge import _adds_significant_business_question, should_commit_stable_asr_partial
+from app.tools.realtime_call_replay_eval import evaluate_replay_cases
 
 
 @dataclass(frozen=True)
@@ -36,13 +40,47 @@ SCENARIOS = [
     Scenario("效果怎么保证？", "guarantee", ("不能", "测试", "数据", "保底")),
     Scenario("你怎么保证能带来客流？", "guarantee", ("不能", "测试", "到店", "数据")),
     Scenario("我已经做美团了，有什么区别？", "channel_difference", ("美团", "视频号", "微信")),
+    Scenario("你比美团有什么优势，我为什么要用你？", "advantage", ("优势", "微信", "同城"), ("资料", "加微信")),
     Scenario("跟抖音团购有什么区别？", "channel_difference", ("视频号", "微信", "同城", "私域")),
     Scenario("具体怎么做？", "process", ("套餐", "投放", "流程", "品类")),
     Scenario("怎么合作，流程说一下。", "process", ("套餐", "品类", "投放", "测试")),
+    Scenario("你详细说一下。", "process", ("流程", "套餐", "测试"), ("更缺新客", "团购套餐转化")),
+    Scenario("同城曝光，你能详细说一下吗？", "exposure_detail", ("同城", "团购券", "门店页", "核销"), ("效果不能", "保底", "更缺新客")),
+    Scenario(
+        "我要花这个成本，如果达不到那么多客户？",
+        "roi_risk",
+        ("小", "测试", "达不到", "投入", "成本"),
+        ("更缺新客", "团购套餐转化", "微信曝光入口"),
+    ),
+    Scenario(
+        "好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？",
+        "process",
+        ("不是4G", "团购套餐", "到店核销"),
+        ("美团偏搜索", "私域沉淀", "已有美团也能做补充"),
+    ),
+    Scenario(
+        "用户怎么能看到我的团购券？一定要客户搜索吗？如果客户不搜索，那是不是还要做视频呢？",
+        "visibility",
+        ("同城推荐", "团购券", "视频", "推荐流", "门店主页"),
+        ("更缺新客", "团购套餐转化", "更想提升到店", "费用、效果"),
+    ),
+    Scenario(
+        "新客到店我都说了。",
+        "need_confirmed",
+        ("新客到店", "套餐", "曝光", "到店数据"),
+        ("更缺新客", "团购套餐转化", "效果不能", "保底"),
+    ),
+    Scenario(
+        "你需求什么？你什么新客到店我都说了。",
+        "need_confirmed",
+        ("新客到店", "套餐", "曝光", "到店数据"),
+        ("更缺新客", "团购套餐转化", "效果不能", "保底"),
+    ),
     Scenario("不需要资料，直接回答。", "open_need", ("费用", "效果", "流程", "美团"), ("微信", "资料")),
     Scenario("不用加微信，你直接说效果。", "guarantee", ("效果", "测试", "数据", "保底"), ("加微信",)),
     Scenario("别老说发资料，和美团区别是什么？", "channel_difference", ("美团", "视频号", "微信"), ("资料", "加微信")),
     Scenario("你总是重复，能不能说重点？", "quality", ("费用", "效果", "美团", "重点"), ("资料", "加微信")),
+    Scenario("你老是说明白，能不能直接说？", "quality", ("不重复", "费用", "效果", "美团"), ("明白", "资料", "加微信")),
     Scenario("我没听清，你说什么？", "quality", ("视频号", "团购", "到店")),
     Scenario("信号断断续续，讲短点。", "quality", ("视频号", "团购", "到店")),
     Scenario("我现在很忙。", "busy", ("晚点", "稍后", "不耽误")),
@@ -56,18 +94,20 @@ SCENARIOS = [
     Scenario("这个靠谱吗？", "guarantee", ("测试", "数据", "不能", "保底")),
     Scenario("是不是官方的？", "identity", ("顾问", "服务", "视频号")),
     Scenario("是不是还要另外付费？", "price", ("付费", "费用", "收费")),
-    Scenario("和美团比优势在哪里？", "channel_difference", ("美团", "微信", "同城")),
+    Scenario("基础费用多少钱？", "price", ("付费", "费用", "报价"), ("不合适不建议做", "资料", "加微信")),
+    Scenario("和美团比优势在哪里？", "advantage", ("优势", "微信", "同城")),
     Scenario("那你能给我带来多少单？", "guarantee", ("不能", "测试", "数据", "保底")),
     Scenario("你说的我听不懂。", "quality", ("视频号", "团购", "到店")),
     Scenario("什么意思啊？", "quality", ("视频号", "团购", "到店")),
     Scenario("不是问这个，我问费用。", "price", ("付费", "费用", "价格", "收费")),
     Scenario("我的问题你还没解决。", "quality", ("费用", "效果", "美团", "流程")),
+    Scenario("说话。", "quality", ("视频号", "团购", "到店"), ("更缺新客", "团购套餐转化")),
     Scenario("我没有提什么问题。", "correction", ("理解错", "猜错", "问我是谁", "来电目的"), ("费用", "效果", "美团", "餐饮", "美业")),
     Scenario("不是费用，你别猜。", "correction", ("理解错", "身份", "来电", "干嘛"), ("费用问题", "餐饮", "美业", "资料", "加微信")),
     Scenario("你先讲重点。", "open_need", ("到店", "曝光", "客流", "费用", "效果")),
     Scenario("我们做餐饮的适合吗？", "open_need", ("餐饮", "套餐", "到店", "品类")),
     Scenario("美业能不能做？", "open_need", ("美业", "套餐", "到店", "品类")),
-    Scenario("你不要像机器人一样念稿。", "quality", ("明白", "短", "视频号", "到店"), ("系统", "模型")),
+    Scenario("你不要像机器人一样念稿。", "quality", ("短", "视频号", "到店"), ("明白", "系统", "模型")),
     Scenario("放个屁，别说了。", "rejection", ("再见", "不打扰"), ("标记", "不再跟进", "资料", "加微信")),
 ]
 
@@ -138,6 +178,15 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "phone_assistant_not_human",
             "score": 100 if apple_assistant_signal == "call_screening" else 35,
             "issues": [] if apple_assistant_signal == "call_screening" else [f"signal:{apple_assistant_signal}"],
+        }
+    )
+    smart_answering_text = "机主已开启智能接听，我会帮您转达，请说出来电原因。"
+    smart_answering_signal = classify_realtime_call_input(smart_answering_text)
+    gates.append(
+        {
+            "text": "smart_answering_not_human",
+            "score": 100 if smart_answering_signal == "call_screening" else 35,
+            "issues": [] if smart_answering_signal == "call_screening" else [f"signal:{smart_answering_signal}"],
         }
     )
     screening_reply_instruction = build_omni_turn_instruction(screening_text, "call_screening")
@@ -340,6 +389,14 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": [] if assistant_type == CallAnswerType.PHONE_ASSISTANT else [f"type:{assistant_type}"],
         }
     )
+    smart_assistant_type = classify_answer_text("机主正在忙，我是智能接听助理，请问您有什么事。")
+    gates.append(
+        {
+            "text": "answer_classifier_smart_answering",
+            "score": 100 if smart_assistant_type == CallAnswerType.PHONE_ASSISTANT else 35,
+            "issues": [] if smart_assistant_type == CallAnswerType.PHONE_ASSISTANT else [f"type:{smart_assistant_type}"],
+        }
+    )
     voicemail_classifier = AnswerClassifier()
     voicemail_type = voicemail_classifier.on_asr_text("您好，请在提示音后留言，挂断即可。")
     gates.append(
@@ -347,6 +404,211 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "answer_classifier_voicemail",
             "score": 100 if voicemail_type == CallAnswerType.VOICEMAIL else 35,
             "issues": [] if voicemail_type == CallAnswerType.VOICEMAIL else [f"type:{voicemail_type}"],
+        }
+    )
+    merged_system_prompt = "您好，用户无法接听，请在提示音后录制留言，录音完成后挂断即可。喂，你好。"
+    merged_tail = extract_human_text_after_system_prompt(merged_system_prompt)
+    gates.append(
+        {
+            "text": "system_prompt_with_human_tail_stripped",
+            "score": 100 if merged_tail == "喂，你好。" else 35,
+            "issues": [] if merged_tail == "喂，你好。" else [f"tail:{merged_tail}"],
+        }
+    )
+    real_mixed_prompt = "尝试联系的用户无法接听，请在提示音后录制留言。录音完成后挂断即可。喂喂，不会说话啊。"
+    real_mixed_tail = extract_human_text_after_system_prompt(real_mixed_prompt)
+    real_mixed_signal = classify_realtime_call_input(real_mixed_tail)
+    real_mixed_answer_type = classify_answer_text(real_mixed_prompt)
+    gates.append(
+        {
+            "text": "real_mixed_system_prompt_keeps_audio_issue",
+            "score": 100
+            if "不会说话" in real_mixed_tail
+            and real_mixed_signal == "audio_issue"
+            and real_mixed_answer_type == CallAnswerType.HUMAN
+            else 35,
+            "reply": real_mixed_tail,
+            "issues": []
+            if "不会说话" in real_mixed_tail
+            and real_mixed_signal == "audio_issue"
+            and real_mixed_answer_type == CallAnswerType.HUMAN
+            else [f"tail:{real_mixed_tail}", f"signal:{real_mixed_signal}", f"type:{real_mixed_answer_type}"],
+        }
+    )
+    repaired = normalize_realtime_sales_text("好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？")
+    gates.append(
+        {
+            "text": "sales_asr_repairs_4g_package_to_group_buying",
+            "reply": repaired.normalized_text,
+            "score": 100 if repaired.has_fix("group_buying_package") and "团购套餐" in repaired.normalized_text else 35,
+            "issues": []
+            if repaired.has_fix("group_buying_package") and "团购套餐" in repaired.normalized_text
+            else [f"normalized:{repaired.normalized_text}", f"fixes:{','.join(repaired.fixes)}"],
+        }
+    )
+    four_g_reply = render_sales_reply(
+        "好，如果我有需求你怎么做？美团你要帮我4G套餐吗？什么意思？",
+        "合作咨询",
+        "测试门店",
+        "先看品类，定团购套餐，小范围测试。",
+        [],
+    ).reply
+    gates.append(
+        {
+            "text": "sales_reply_corrects_4g_package_mishearing",
+            "reply": four_g_reply,
+            "score": 100
+            if "不是4G" in four_g_reply and "团购套餐" in four_g_reply and "美团偏搜索" not in four_g_reply
+            else 35,
+            "issues": []
+            if "不是4G" in four_g_reply and "团购套餐" in four_g_reply and "美团偏搜索" not in four_g_reply
+            else ["four_g_not_corrected"],
+        }
+    )
+    gates.append(
+        {
+            "text": "incomplete_asr_partial_waits_for_more_words",
+            "score": 100 if has_incomplete_realtime_partial("好，如果我有需") else 35,
+            "issues": [] if has_incomplete_realtime_partial("好，如果我有需") else ["partial_not_marked_incomplete"],
+        }
+    )
+    video_partial = "如果客户不搜索，那是不是我还要做视频呢？我是说我是不是还"
+    video_final = "如果客户不搜索，那是不是我还要做视频呢？我是说我是不是还得做视频呢？"
+    gates.append(
+        {
+            "text": "long_video_question_partial_waits_for_final",
+            "score": 100 if has_incomplete_realtime_partial(video_partial) and not should_commit_stable_asr_partial(video_partial) else 35,
+            "issues": []
+            if has_incomplete_realtime_partial(video_partial) and not should_commit_stable_asr_partial(video_partial)
+            else ["video_partial_committed_too_early"],
+        }
+    )
+    gates.append(
+        {
+            "text": "video_question_final_not_deduped_as_old_partial",
+            "score": 100 if _adds_significant_business_question(video_final, video_partial) else 35,
+            "issues": []
+            if _adds_significant_business_question(video_final, video_partial)
+            else ["video_final_marked_duplicate"],
+        }
+    )
+    cumulative_need_partial = "你需求什么？你什么新客？"
+    gates.append(
+        {
+            "text": "cumulative_need_partial_waits_for_final",
+            "score": 100 if not should_commit_stable_asr_partial(cumulative_need_partial) else 35,
+            "issues": [] if not should_commit_stable_asr_partial(cumulative_need_partial) else ["cumulative_partial_committed"],
+        }
+    )
+    complete_detail_partial = "同城曝光，你能详细说一下吗？"
+    incomplete_detail_partial = "同城曝光，你能详细说一下吗？我说你能详细"
+    gates.append(
+        {
+            "text": "complete_business_question_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(complete_detail_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(complete_detail_partial) else ["complete_question_waited_for_final"],
+        }
+    )
+    gates.append(
+        {
+            "text": "continued_business_question_partial_waits_for_final",
+            "score": 100 if has_incomplete_realtime_partial(incomplete_detail_partial) and not should_commit_stable_asr_partial(incomplete_detail_partial) else 35,
+            "issues": []
+            if has_incomplete_realtime_partial(incomplete_detail_partial) and not should_commit_stable_asr_partial(incomplete_detail_partial)
+            else ["continued_question_committed_too_early"],
+        }
+    )
+    roi_partial = "我要花这个成本，如果达不到那么多客户？"
+    gates.append(
+        {
+            "text": "roi_risk_question_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(roi_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(roi_partial) else ["roi_risk_question_waited_for_final"],
+        }
+    )
+    phone_question_partial = "你打的不就是我手机号吗？"
+    gates.append(
+        {
+            "text": "phone_question_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(phone_question_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(phone_question_partial) else ["phone_question_waited_for_final"],
+        }
+    )
+    wechat_material_partial = "好，你加我微信，发案例给我看一下。"
+    gates.append(
+        {
+            "text": "wechat_material_partial_commits_fast",
+            "score": 100 if should_commit_stable_asr_partial(wechat_material_partial) else 35,
+            "issues": [] if should_commit_stable_asr_partial(wechat_material_partial) else ["wechat_material_waited_for_final"],
+        }
+    )
+    urgent_partials = {
+        "fee_question_partial_commits_fast": "你是怎么收费的啊？",
+        "no_speech_complaint_partial_commits_fast": "你好，你说为什么不说话？",
+        "direct_price_partial_commits_fast": "别绕，直接说费用",
+        "rejection_partial_commits_fast": "不行，我不需要。",
+    }
+    for gate_name, partial_text in urgent_partials.items():
+        gates.append(
+            {
+                "text": gate_name,
+                "score": 100 if should_commit_stable_asr_partial(partial_text) else 35,
+                "issues": [] if should_commit_stable_asr_partial(partial_text) else [f"waited:{partial_text}"],
+            }
+        )
+    unanswered_score = score_realtime_events(
+        [
+            {"type": "call_connected", "callId": "unanswered", "at": "2026-07-06T02:04:05.000Z"},
+            {"type": "human_speech_confirmed", "callId": "unanswered", "text": "喂。", "at": "2026-07-06T02:04:08.000Z"},
+            {
+                "type": "tts_start",
+                "callId": "unanswered",
+                "raw": {"sentBytes": 640, "firstAudioMs": 420},
+                "at": "2026-07-06T02:04:09.000Z",
+            },
+            {"type": "asr_final", "callId": "unanswered", "text": "你是怎么收费的啊？", "at": "2026-07-06T02:04:52.000Z"},
+            {"type": "call_error", "callId": "unanswered", "error": "AudioSocket connection closed.", "at": "2026-07-06T02:04:52.700Z"},
+            {"type": "call_disconnected", "callId": "unanswered", "at": "2026-07-06T02:04:53.000Z"},
+        ]
+    )
+    gates.append(
+        {
+            "text": "score_fails_unanswered_customer_turn",
+            "score": 100 if unanswered_score and unanswered_score.get("status") == "fail" else 35,
+            "issues": []
+            if unanswered_score and unanswered_score.get("status") == "fail"
+            else [f"score:{unanswered_score}"],
+        }
+    )
+    repaired_need = normalize_realtime_sales_text("你需求什么？你什么新客到店我都说了。")
+    gates.append(
+        {
+            "text": "sales_asr_removes_repeated_need_question_prefix",
+            "reply": repaired_need.normalized_text,
+            "score": 100
+            if repaired_need.has_fix("repeated_need_question_asr_artifact")
+            and repaired_need.normalized_text == "新客到店我都说了。"
+            else 35,
+            "issues": []
+            if repaired_need.has_fix("repeated_need_question_asr_artifact")
+            and repaired_need.normalized_text == "新客到店我都说了。"
+            else [f"normalized:{repaired_need.normalized_text}", f"fixes:{','.join(repaired_need.fixes)}"],
+        }
+    )
+    ack_history = [{"role": "assistant", "content": "明白。美团偏搜索下单，视频号偏微信同城推荐。"}]
+    ack_reply = render_sales_reply(
+        "你老是说明白，能不能直接说？",
+        "听不清/澄清",
+        "测试门店",
+        "我换短点说：视频号团购就是帮门店到店获客。",
+        ack_history,
+    ).reply
+    gates.append(
+        {
+            "text": "sales_reply_suppresses_habitual_mingbai",
+            "reply": ack_reply,
+            "score": 100 if not ack_reply.startswith("明白") and "明白" not in ack_reply else 35,
+            "issues": [] if not ack_reply.startswith("明白") and "明白" not in ack_reply else ["habitual_ack"],
         }
     )
     human_classifier = AnswerClassifier()
@@ -382,6 +644,15 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             else ["audio_quality_not_limiting"],
         }
     )
+    replay_report = evaluate_replay_cases()
+    for result in replay_report["results"]:
+        gates.append(
+            {
+                "text": f"replay_{result['name']}",
+                "score": 100 if result["passed"] else 35,
+                "issues": list(result["issues"]),
+            }
+        )
     return gates
 
 
