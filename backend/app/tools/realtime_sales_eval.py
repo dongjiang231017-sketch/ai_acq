@@ -542,6 +542,44 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "issues": [] if should_commit_stable_asr_partial(wechat_material_partial) else ["wechat_material_waited_for_final"],
         }
     )
+    urgent_partials = {
+        "fee_question_partial_commits_fast": "你是怎么收费的啊？",
+        "no_speech_complaint_partial_commits_fast": "你好，你说为什么不说话？",
+        "direct_price_partial_commits_fast": "别绕，直接说费用",
+        "rejection_partial_commits_fast": "不行，我不需要。",
+    }
+    for gate_name, partial_text in urgent_partials.items():
+        gates.append(
+            {
+                "text": gate_name,
+                "score": 100 if should_commit_stable_asr_partial(partial_text) else 35,
+                "issues": [] if should_commit_stable_asr_partial(partial_text) else [f"waited:{partial_text}"],
+            }
+        )
+    unanswered_score = score_realtime_events(
+        [
+            {"type": "call_connected", "callId": "unanswered", "at": "2026-07-06T02:04:05.000Z"},
+            {"type": "human_speech_confirmed", "callId": "unanswered", "text": "喂。", "at": "2026-07-06T02:04:08.000Z"},
+            {
+                "type": "tts_start",
+                "callId": "unanswered",
+                "raw": {"sentBytes": 640, "firstAudioMs": 420},
+                "at": "2026-07-06T02:04:09.000Z",
+            },
+            {"type": "asr_final", "callId": "unanswered", "text": "你是怎么收费的啊？", "at": "2026-07-06T02:04:52.000Z"},
+            {"type": "call_error", "callId": "unanswered", "error": "AudioSocket connection closed.", "at": "2026-07-06T02:04:52.700Z"},
+            {"type": "call_disconnected", "callId": "unanswered", "at": "2026-07-06T02:04:53.000Z"},
+        ]
+    )
+    gates.append(
+        {
+            "text": "score_fails_unanswered_customer_turn",
+            "score": 100 if unanswered_score and unanswered_score.get("status") == "fail" else 35,
+            "issues": []
+            if unanswered_score and unanswered_score.get("status") == "fail"
+            else [f"score:{unanswered_score}"],
+        }
+    )
     repaired_need = normalize_realtime_sales_text("你需求什么？你什么新客到店我都说了。")
     gates.append(
         {

@@ -256,7 +256,52 @@ def _derive_issues(
         issues.append("客户在AI回复后没有继续说话，系统已自动关闭以避免空等。")
     if latest_turn_response_ms is not None and latest_turn_response_ms > 1000:
         issues.append(f"客户说完到AI首个声音约 {latest_turn_response_ms}ms，超过1秒目标。")
+    if human and _has_unanswered_customer_turn(events):
+        issues.append("客户最后一句没有得到可听见的AI回复。")
     return issues
+
+
+def _has_unanswered_customer_turn(events: list[dict[str, object]]) -> bool:
+    last_customer_at: datetime | None = None
+    for event in events:
+        if event.get("type") not in {"asr_final", "asr_partial_stable", "turn_endpoint_final", "turn_endpoint_candidate"}:
+            continue
+        text = str(event.get("text") or "")
+        if not _is_actionable_customer_text(text):
+            continue
+        event_at = _parse_event_time(event)
+        if event_at:
+            last_customer_at = event_at
+    if not last_customer_at:
+        return False
+    for event in events:
+        event_at = _parse_event_time(event)
+        if not event_at or event_at <= last_customer_at:
+            continue
+        if event.get("type") in {"tts_start", "tts_done"} and _speech_event_has_audio(event):
+            return False
+    return any(
+        event.get("type") in {"call_error", "call_disconnected", "call_closed", "hangup_frame"}
+        and (event_at := _parse_event_time(event)) is not None
+        and event_at >= last_customer_at
+        for event in events
+    )
+
+
+def _is_actionable_customer_text(text: str) -> bool:
+    compact = "".join(
+        char.lower()
+        for char in str(text or "")
+        if char not in " \t\r\n。！？?!，,、.；;：:\"'“”‘’（）()[]【】"
+    )
+    if not compact or compact in {"喂", "喂喂", "你好", "您好", "你好你好", "在吗"}:
+        return False
+    return len(compact) >= 2
+
+
+def _speech_event_has_audio(event: dict[str, object]) -> bool:
+    raw = _raw(event)
+    return int(event.get("sentBytes") or event.get("bytes") or raw.get("sentBytes") or raw.get("bytes") or raw.get("totalBytes") or 0) > 0
 
 
 def _latest_turn_response_ms(events: list[dict[str, object]]) -> int | None:

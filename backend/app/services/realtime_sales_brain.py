@@ -272,13 +272,22 @@ def score_realtime_events(events: list[dict[str, object]]) -> dict[str, object] 
     total = int(round(sum(metric["score"] * metric["weight"] for metric in metrics) / sum(metric["weight"] for metric in metrics)))
     has_human = _has_event(call_events, "human_speech_confirmed")
     has_screening = _has_event(call_events, "call_screening_detected")
+    unanswered_customer_turn = _has_unanswered_customer_turn(call_events)
     if not has_human:
         total = min(total, 58 if has_screening else 52)
+    if unanswered_customer_turn:
+        total = min(total, 62)
     return {
         "callId": call_events[-1].get("callId"),
         "score": total,
         "status": _score_status(total),
-        "summary": _score_summary(total, metrics, human_confirmed=has_human, call_screening=has_screening),
+        "summary": _score_summary(
+            total,
+            metrics,
+            human_confirmed=has_human,
+            call_screening=has_screening,
+            unanswered_customer_turn=unanswered_customer_turn,
+        ),
         "metrics": metrics,
     }
 
@@ -733,6 +742,8 @@ def _metric_understanding(events: list[dict[str, object]]) -> dict[str, object]:
         score -= 25
     if _has_profanity(user_turns) and not _has_polite_close(replies):
         score -= 35
+    if _has_unanswered_customer_turn(events):
+        score -= 35
     return _metric("理解客户", max(25, score), 1.2, f"{len(user_turns)}轮客户语音，{len(replies)}轮AI回复")
 
 
@@ -759,8 +770,9 @@ def _metric_stability(events: list[dict[str, object]], state_issues: list[str] |
     )
     no_audio = sum(1 for event in events if event.get("type") == "omni_no_audio_response")
     issue_count = len(state_issues or [])
-    score = max(25, 100 - bad_count * 30 - no_audio * 15 - issue_count * 8)
-    detail = f"异常 {bad_count} 次，无音频兜底 {no_audio} 次"
+    unanswered = 1 if _has_unanswered_customer_turn(events) else 0
+    score = max(25, 100 - bad_count * 30 - no_audio * 15 - issue_count * 8 - unanswered * 28)
+    detail = f"异常 {bad_count} 次，无音频兜底 {no_audio} 次，未回复客户轮次 {unanswered} 次"
     if state_issues:
         detail += "；" + "；".join(state_issues[:2])
     return _metric("链路稳定", score, 0.9, detail)
@@ -785,11 +797,14 @@ def _score_summary(
     *,
     human_confirmed: bool = True,
     call_screening: bool = False,
+    unanswered_customer_turn: bool = False,
 ) -> str:
     if not human_confirmed and call_screening:
         return "只检测到电话助理，还没有确认真人客户语音。"
     if not human_confirmed:
         return "还没有确认真人客户语音，不能作为实时通话验收。"
+    if unanswered_customer_turn:
+        return "客户最后一句没有得到可听见的AI回复，不能作为实时通话验收。"
     weak = [str(metric["name"]) for metric in metrics if int(metric["score"]) < 70]
     if total >= 85:
         return "本轮接近可交付标准，继续观察真实客户长通话。"
@@ -804,6 +819,8 @@ def _has_event(events: list[dict[str, object]], event_type: str) -> bool:
 
 def _normal_audiosocket_close_after_conversation(events: list[dict[str, object]]) -> bool:
     if not _has_event(events, "human_speech_confirmed") or not _has_speech_audio(events):
+        return False
+    if _has_unanswered_customer_turn(events):
         return False
     for event in events:
         if event.get("type") != "call_error":
@@ -821,6 +838,49 @@ def _normal_audiosocket_close_after_conversation(events: list[dict[str, object]]
         if "AudioSocket connection closed" in message:
             return True
     return False
+
+
+def _has_unanswered_customer_turn(events: list[dict[str, object]]) -> bool:
+    last_customer_at: datetime | None = None
+    for event in events:
+        if event.get("type") not in {"asr_final", "asr_partial_stable", "turn_endpoint_final", "turn_endpoint_candidate"}:
+            continue
+        text = str(event.get("text") or "")
+        if not _is_actionable_customer_text(text):
+            continue
+        event_at = _parse_event_time(event)
+        if event_at:
+            last_customer_at = event_at
+    if not last_customer_at:
+        return False
+    heard_response_after = any(
+        event.get("type") in {"tts_start", "tts_done"}
+        and _parse_event_time(event)
+        and (_parse_event_time(event) or last_customer_at) > last_customer_at
+        and _speech_event_has_audio(event)
+        for event in events
+    )
+    if heard_response_after:
+        return False
+    terminal_after = any(
+        event.get("type") in {"call_error", "call_disconnected", "call_closed", "hangup_frame"}
+        and _parse_event_time(event)
+        and (_parse_event_time(event) or last_customer_at) >= last_customer_at
+        for event in events
+    )
+    return terminal_after
+
+
+def _is_actionable_customer_text(text: str) -> bool:
+    compact = _normalize_reply(text)
+    if not compact or compact in {"喂", "喂喂", "你好", "您好", "你好你好", "在吗"}:
+        return False
+    return len(compact) >= 2
+
+
+def _speech_event_has_audio(event: dict[str, object]) -> bool:
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    return int(event.get("sentBytes") or event.get("bytes") or raw.get("sentBytes") or raw.get("bytes") or raw.get("totalBytes") or 0) > 0
 
 
 def _has_speech_audio(events: list[dict[str, object]]) -> bool:
