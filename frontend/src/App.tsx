@@ -1,6 +1,7 @@
 import TeammateWorkspace from "./TeammateWorkspace";
 
 const OUTBOUND_PATH = "/outbound";
+const OUTBOUND_EMBED_PATH = "/outbound-embed";
 
 function LegacyWorkspaceShell() {
   return (
@@ -20,8 +21,11 @@ function LegacyWorkspaceShell() {
 
 function App() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (pathname === OUTBOUND_EMBED_PATH) {
+    return <TeammateWorkspace mode="outbound-embedded" />;
+  }
   if (pathname === OUTBOUND_PATH) {
-    return <TeammateWorkspace />;
+    return <TeammateWorkspace mode="outbound-only" />;
   }
   return <LegacyWorkspaceShell />;
 }

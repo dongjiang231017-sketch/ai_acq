@@ -124,6 +124,7 @@ export type LeadCollectionTask = {
   id: string;
   name: string;
   provider: string;
+  collectionMode: string;
   cities: string[];
   categories: string[];
   keywords: string[];
@@ -141,10 +142,12 @@ export type LeadCollectionRun = {
   id: string;
   taskId: string;
   provider: string;
+  collectionMode: string;
   status: string;
   requestedCount: number;
   fetchedCount: number;
   insertedCount: number;
+  updatedCount: number;
   duplicateCount: number;
   failedCount: number;
   errorMessage?: string | null;
@@ -1139,11 +1142,34 @@ async function readResponseError(response: Response): Promise<string> {
   }
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit, retries = 1): Promise<Response> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fetch(input, init);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) break;
+      await wait(600);
+    }
+  }
+
+  const detail =
+    lastError instanceof Error && lastError.message
+      ? `（${lastError.message}）`
+      : "";
+  throw new Error(`无法连接服务器，请确认后端服务已启动或刷新页面后重试。${detail}`);
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const isFormData = options?.body instanceof FormData;
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetchWithRetry(`${API_BASE_URL}${path}`, {
       headers: {
         ...(isFormData ? {} : { "Content-Type": "application/json" }),
         ...authHeaders(),
@@ -1151,8 +1177,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       },
       ...options,
     });
-  } catch {
-    throw new Error("无法连接服务器，请确认后端服务已启动。");
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error("无法连接服务器，请确认后端服务已启动或刷新页面后重试。");
   }
 
   if (!response.ok) {
@@ -1202,6 +1229,7 @@ export const api = {
   collectionTasks: () => request<LeadCollectionTask[]>("/collections/tasks"),
   createCollectionTask: (
     task: Pick<LeadCollectionTask, "name" | "provider" | "cities" | "categories" | "keywords" | "targetPerKeyword"> & {
+      collectionMode?: string | null;
       remark?: string | null;
     },
   ) =>

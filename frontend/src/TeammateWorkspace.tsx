@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   Activity,
   BarChart3,
   Bot,
@@ -1565,7 +1566,20 @@ function formatDuration(seconds: number) {
   return `${minute}:${second}`;
 }
 
-function TeammateWorkspace() {
+type TeammateWorkspaceProps = {
+  mode?: "full" | "outbound-only" | "outbound-embedded";
+};
+
+function readInitialOutboundTab(): OutboundTab {
+  if (typeof window === "undefined") return "外呼总览";
+  const tab = new URLSearchParams(window.location.search).get("tab");
+  return outboundTabs.find((item) => item === tab) ?? "外呼总览";
+}
+
+function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
+  const outboundOnly = mode === "outbound-only";
+  const embeddedOutbound = mode === "outbound-embedded";
+  const outboundLocked = outboundOnly || embeddedOutbound;
   const [auth, setAuth] = useState(() => readStoredAuth());
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(auth?.user ?? null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -1655,7 +1669,9 @@ function TeammateWorkspace() {
   const [activeModule, setActiveModule] = useState("outbound");
   const [apiStatus, setApiStatus] = useState("连接中");
   const [isLoading, setIsLoading] = useState(false);
-  const [activeOutboundTab, setActiveOutboundTab] = useState<OutboundTab>("外呼总览");
+  const [activeOutboundTab, setActiveOutboundTab] = useState<OutboundTab>(() =>
+    embeddedOutbound ? readInitialOutboundTab() : "外呼总览",
+  );
   const [activeDmTab, setActiveDmTab] = useState<DmTab>("回复监听");
   const [activeIntentTab, setActiveIntentTab] = useState<IntentTab>("客户池");
   const [activeVoiceTab, setActiveVoiceTab] = useState<VoiceTab>("声音档案");
@@ -1688,13 +1704,14 @@ function TeammateWorkspace() {
   const [collectionForm, setCollectionForm] = useState({
     name: "本地商家地图采集",
     provider: "amap",
+    collectionMode: "discovery",
     cities: "南昌",
     categories: "餐饮",
     keywords: "团购",
     targetPerKeyword: 10,
     remark: "",
   });
-  const [collectionMessage, setCollectionMessage] = useState("地图采集密钥由服务端配置，客户端只发起任务和查看结果。");
+  const [collectionMessage, setCollectionMessage] = useState("地图来源默认做拓源采集，平台来源更适合补充现有线索。");
   const [isCreatingCollectionTask, setIsCreatingCollectionTask] = useState(false);
   const [runningCollectionTaskId, setRunningCollectionTaskId] = useState<string | null>(null);
   const [taskForm, setTaskForm] = useState({
@@ -1813,10 +1830,14 @@ function TeammateWorkspace() {
   const loginWorkbenchRef = useRef<HTMLElement | null>(null);
   const nativeLoginViewportRef = useRef<HTMLDivElement | null>(null);
   const nativeLoginWebviewRef = useRef<DmLoginWebviewElement | null>(null);
+  const visibleModules = useMemo(
+    () => (outboundLocked ? modules.filter((module) => module.key === "outbound") : modules),
+    [modules, outboundLocked],
+  );
 
   const active = useMemo(
-    () => modules.find((module) => module.key === activeModule) ?? modules[0],
-    [activeModule, modules],
+    () => visibleModules.find((module) => module.key === activeModule) ?? visibleModules[0] ?? modules[0],
+    [activeModule, modules, visibleModules],
   );
   const outboundTasks = useMemo(() => tasks.filter((task) => task.channel === "call"), [tasks]);
   const dmTasks = useMemo(() => tasks.filter((task) => task.channel === "dm"), [tasks]);
@@ -2143,6 +2164,24 @@ function TeammateWorkspace() {
   }, [activeDmTab, activeModule]);
 
   useEffect(() => {
+    if (!embeddedOutbound) return;
+    const handleMessage = (event: MessageEvent) => {
+      const payload = event.data;
+      if (!payload || typeof payload !== "object") return;
+      if (payload.type !== "ai-acq:set-outbound-tab") return;
+      const nextTab = outboundTabs.find((item) => item === payload.tab);
+      if (nextTab) setActiveOutboundTab(nextTab);
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [embeddedOutbound]);
+
+  useEffect(() => {
+    if (!outboundLocked || activeModule === "outbound") return;
+    setActiveModule("outbound");
+  }, [activeModule, outboundLocked]);
+
+  useEffect(() => {
     setCommentSelectorDraft(selectorDraftFromConfig(activeCommentCaptureConfig));
   }, [activeCommentCaptureConfig?.id, activeCommentCaptureAccount?.platform]);
 
@@ -2462,6 +2501,10 @@ function TeammateWorkspace() {
     setAuthMessage("已退出登录。");
   }
 
+  function backToClientWorkspace() {
+    window.location.href = `${window.location.origin}/`;
+  }
+
   async function submitLead(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!leadForm.name.trim() || !leadForm.city.trim() || !leadForm.category.trim()) return;
@@ -2494,6 +2537,60 @@ function TeammateWorkspace() {
       .filter(Boolean);
   }
 
+  function suggestedCollectionMode(provider: string) {
+    return ["meituan", "shangou", "douyin"].includes(provider) ? "enrich" : "discovery";
+  }
+
+  function collectionModeLabel(mode: string) {
+    return mode === "enrich" ? "平台补充" : "拓源采集";
+  }
+
+  function isCollectionRunActive(status: string) {
+    return status === "排队中" || status === "运行中";
+  }
+
+  function buildCollectionRunMessage(run: LeadCollectionRun) {
+    const updated = Number(run.updatedCount || 0);
+    const base =
+      run.collectionMode === "enrich"
+        ? `补充结果：匹配 ${run.fetchedCount} 条，更新 ${updated} 条，新增 ${run.insertedCount} 条，重复 ${run.duplicateCount} 条，失败 ${run.failedCount} 条。`
+        : `采集结果：抓取 ${run.fetchedCount} 条，入库 ${run.insertedCount} 条，重复 ${run.duplicateCount} 条，失败 ${run.failedCount} 条。`;
+    return run.errorMessage ? `${base} ${run.errorMessage}` : base;
+  }
+
+  async function refreshCollectionData(preferredRunId?: string) {
+    const [taskData, runData, rawData, leadData] = await Promise.all([
+      api.collectionTasks(),
+      api.collectionRuns(),
+      api.rawLeadRecords(),
+      api.leads(),
+    ]);
+    setCollectionTasks(taskData);
+    setCollectionRuns(
+      preferredRunId ? [...runData.filter((item) => item.id === preferredRunId), ...runData.filter((item) => item.id !== preferredRunId)] : runData,
+    );
+    setRawLeadRecords(rawData);
+    setLeads(leadData);
+    return {
+      tasks: taskData,
+      runs: runData,
+      rawRecords: rawData,
+      leads: leadData,
+    };
+  }
+
+  async function waitForCollectionRun(runId: string, maxAttempts = 45, intervalMs = 1500) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const snapshot = await refreshCollectionData(runId);
+      const current = snapshot.runs.find((item) => item.id === runId);
+      if (current && !isCollectionRunActive(current.status)) {
+        return current;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+    }
+    return null;
+  }
+
   async function submitCollectionTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const cities = splitCollectionItems(collectionForm.cities);
@@ -2507,6 +2604,7 @@ function TeammateWorkspace() {
       const created = await api.createCollectionTask({
         name: collectionForm.name.trim(),
         provider: collectionForm.provider,
+        collectionMode: collectionForm.collectionMode,
         cities,
         categories,
         keywords,
@@ -2514,7 +2612,7 @@ function TeammateWorkspace() {
         remark: collectionForm.remark.trim() || null,
       });
       setCollectionTasks((current) => [created, ...current]);
-      setCollectionMessage("采集任务已创建，可以从前端点击运行。");
+      setCollectionMessage(`采集任务已创建，当前模式：${collectionModeLabel(created.collectionMode)}。`);
     } catch (error) {
       setCollectionMessage(error instanceof Error ? error.message : "采集任务创建失败。");
     } finally {
@@ -2524,22 +2622,19 @@ function TeammateWorkspace() {
 
   async function runCollectionTask(taskId: string) {
     setRunningCollectionTaskId(taskId);
-    setCollectionMessage("正在通过服务端采集商家点位...");
+    setCollectionMessage("正在把采集任务加入后台队列...");
     try {
       const run = await api.runCollectionTask(taskId);
-      const [taskData, runData, rawData, leadData] = await Promise.all([
-        api.collectionTasks(),
-        api.collectionRuns(),
-        api.rawLeadRecords(),
-        api.leads(),
-      ]);
-      setCollectionRuns([run, ...runData.filter((item) => item.id !== run.id)]);
-      setCollectionTasks(taskData);
-      setRawLeadRecords(rawData);
-      setLeads(leadData);
-      setCollectionMessage(
-        `采集完成：抓取 ${run.fetchedCount} 条，入库 ${run.insertedCount} 条，重复 ${run.duplicateCount} 条，失败 ${run.failedCount} 条。`,
-      );
+      await refreshCollectionData(run.id);
+      if (isCollectionRunActive(run.status)) {
+        setCollectionMessage(`任务已进入后台${run.status}，可以继续操作页面，结果会自动刷新。`);
+      }
+      const finishedRun = await waitForCollectionRun(run.id);
+      if (!finishedRun) {
+        setCollectionMessage("任务仍在后台执行，稍后刷新即可查看最新结果。");
+        return;
+      }
+      setCollectionMessage(buildCollectionRunMessage(finishedRun));
     } catch (error) {
       setCollectionMessage(error instanceof Error ? error.message : "采集运行失败，请检查服务端数据源配置。");
     } finally {
@@ -5921,6 +6016,8 @@ function TeammateWorkspace() {
           ? "百度地图"
           : provider === "tencent"
             ? "腾讯位置服务"
+            : provider === "shangou"
+              ? "淘宝闪购"
             : provider === "public_web"
               ? "公开网页"
               : provider;
@@ -5929,7 +6026,7 @@ function TeammateWorkspace() {
       <>
         <section className="metrics">
           <MetricCard label="采集任务" value={collectionTasks.length} detail="服务端执行" />
-          <MetricCard label="原始线索" value={rawLeadRecords.length} detail="含地图点位" tone="green" />
+          <MetricCard label="原始线索" value={rawLeadRecords.length} detail="含平台与地图来源" tone="green" />
           <MetricCard label="最近入库" value={latestRun?.insertedCount ?? 0} detail={latestRun?.status ?? "待运行"} tone="amber" />
           <MetricCard label="可外呼线索" value={callableLeads.length} detail="有电话记录" tone="rose" />
         </section>
@@ -5938,7 +6035,7 @@ function TeammateWorkspace() {
           <article className="panel">
             <div className="panel-title">
               <div>
-                <p>地图点位采集</p>
+                <p>线索采集</p>
                 <h2>新建采集任务</h2>
               </div>
               <Search size={22} />
@@ -5955,12 +6052,36 @@ function TeammateWorkspace() {
                 数据源
                 <select
                   value={collectionForm.provider}
-                  onChange={(event) => setCollectionForm({ ...collectionForm, provider: event.target.value })}
+                  onChange={(event) =>
+                    setCollectionForm((current) => {
+                      const provider = event.target.value;
+                      const nextMode = suggestedCollectionMode(provider);
+                      return {
+                        ...current,
+                        provider,
+                        collectionMode: nextMode,
+                        name: nextMode === "enrich" ? "平台线索补充" : "本地商家地图采集",
+                      };
+                    })
+                  }
                 >
                   <option value="amap">高德地图</option>
                   <option value="baidu">百度地图</option>
                   <option value="tencent">腾讯位置服务</option>
+                  <option value="shangou">淘宝闪购（需专用窗口登录）</option>
                   <option value="public_web">公开网页（无需 Key/登录）</option>
+                </select>
+              </label>
+              <label>
+                采集模式
+                <select
+                  value={collectionForm.collectionMode}
+                  onChange={(event) => setCollectionForm({ ...collectionForm, collectionMode: event.target.value })}
+                >
+                  <option value="discovery">拓源采集</option>
+                  <option value="enrich" disabled={!["meituan", "shangou", "douyin"].includes(collectionForm.provider)}>
+                    平台补充
+                  </option>
                 </select>
               </label>
               <label>
@@ -6021,7 +6142,7 @@ function TeammateWorkspace() {
                   <div>
                     <strong>{task.name}</strong>
                     <small>
-                      {task.cities.join("、")} · {task.categories.join("、")} · 每组 {task.targetPerKeyword}
+                      {collectionModeLabel(task.collectionMode)} · {task.cities.join("、")} · {task.categories.join("、")} · 每组 {task.targetPerKeyword}
                     </small>
                   </div>
                   <em>{task.status}</em>
@@ -6055,6 +6176,7 @@ function TeammateWorkspace() {
                     <th>来源</th>
                     <th>状态</th>
                     <th>抓取</th>
+                    <th>补充</th>
                     <th>入库</th>
                     <th>重复</th>
                     <th>失败</th>
@@ -6063,16 +6185,21 @@ function TeammateWorkspace() {
                 <tbody>
                   {collectionRuns.length === 0 && (
                     <tr>
-                      <td colSpan={6}>
+                      <td colSpan={7}>
                         <span className="empty-state">暂无运行记录。</span>
                       </td>
                     </tr>
                   )}
                   {collectionRuns.map((run) => (
                     <tr key={run.id}>
-                      <td>{providerLabel(run.provider)}</td>
+                      <td>
+                        {providerLabel(run.provider)}
+                        <br />
+                        <small>{collectionModeLabel(run.collectionMode)}</small>
+                      </td>
                       <td>{run.status}</td>
                       <td>{run.fetchedCount}</td>
+                      <td>{run.updatedCount}</td>
                       <td>{run.insertedCount}</td>
                       <td>{run.duplicateCount}</td>
                       <td>{run.failedCount}</td>
@@ -6135,11 +6262,11 @@ function TeammateWorkspace() {
 
   function renderOutboundWorkspace() {
     const showOverview = activeOutboundTab === "外呼总览";
-    const showTasks = showOverview || activeOutboundTab === "任务列表";
-    const showScript = showOverview || activeOutboundTab === "话术流程";
-    const showRecords = showOverview || activeOutboundTab === "通话记录";
-    const showRules = showOverview || activeOutboundTab === "重拨规则";
-    const showRealtime = showOverview || activeOutboundTab === "实时监听";
+    const showTasks = activeOutboundTab === "任务列表";
+    const showScript = activeOutboundTab === "话术流程";
+    const showRecords = activeOutboundTab === "通话记录";
+    const showRules = activeOutboundTab === "重拨规则";
+    const showRealtime = activeOutboundTab === "实时监听";
     const routeStatus = routeHealthSummary(telephonyHealth, telephonyPreflight);
     const serverRegistrationTarget = serverSipRegistrationTarget(telephonyConfig);
     const deviceDiscoveryLabel = voiceGatewayDiscoveryLabel(asteriskSidecarStatus);
@@ -6156,28 +6283,210 @@ function TeammateWorkspace() {
           : "线路暂未接通，请等待服务人员在后台完成接入。";
     const routeCheckedAt = new Date(telephonyPreflight.checkedAt).toLocaleString("zh-CN", { hour12: false });
     const monitorCalls = liveCalls.length > 0 ? liveCalls : callRecords.slice(0, 6);
+    const runningTaskCount = outboundTasks.filter((task) => task.status.includes("运行")).length;
+    const queuedTaskCount = outboundTasks.filter((task) => task.status.includes("排队") || task.status.includes("待启动")).length;
+    const completedTaskCount = outboundTasks.filter((task) => task.status.includes("完成")).length;
+    const totalIntentCount = outboundTasks.reduce((sum, task) => sum + task.intentCount, 0);
+    const latestTask = outboundTasks[0];
+    const latestCall = callRecords[0];
 
     return (
       <>
-        <section className="outbound-tabs" aria-label="外呼模块页面">
-          {outboundTabs.map((tab) => (
-            <button
-              className={tab === activeOutboundTab ? "is-active" : ""}
-              key={tab}
-              onClick={() => setActiveOutboundTab(tab)}
-              type="button"
-            >
-              {tab}
-            </button>
-          ))}
-        </section>
+        {!embeddedOutbound ? (
+          <section className="outbound-tabs" aria-label="外呼模块页面">
+            {outboundTabs.map((tab) => (
+              <button
+                className={tab === activeOutboundTab ? "is-active" : ""}
+                key={tab}
+                onClick={() => setActiveOutboundTab(tab)}
+                type="button"
+              >
+                {tab}
+              </button>
+            ))}
+          </section>
+        ) : null}
 
-        <section className="metrics outbound-metrics">
-          <MetricCard icon={<Radio size={20} />} label="在线坐席" value={`${overview.aiSeats} AI`} detail="并发中" tone="green" />
-          <MetricCard icon={<Activity size={20} />} label="进行中通话" value={overview.activeCalls} detail="实时转写" tone="blue" />
-          <MetricCard icon={<Headphones size={20} />} label="需接管" value={overview.needsHandoff} detail="客户追问" tone="amber" />
-          <MetricCard icon={<ShieldAlert size={20} />} label="异常静默" value={overview.silentAlerts} detail="待排查" tone="rose" />
-        </section>
+        {showOverview && (
+          <>
+            <section className="metrics outbound-metrics">
+              <MetricCard icon={<Radio size={20} />} label="在线坐席" value={`${overview.aiSeats} AI`} detail="并发中" tone="green" />
+              <MetricCard icon={<Activity size={20} />} label="进行中通话" value={overview.activeCalls} detail="实时转写" tone="blue" />
+              <MetricCard icon={<Headphones size={20} />} label="需接管" value={overview.needsHandoff} detail="客户追问" tone="amber" />
+              <MetricCard icon={<ShieldAlert size={20} />} label="异常静默" value={overview.silentAlerts} detail="待排查" tone="rose" />
+            </section>
+
+            <section className="content-grid lower">
+              <article className="panel">
+                <div className="panel-title">
+                  <div>
+                    <p>线路概览</p>
+                    <h2>当前线路状态</h2>
+                  </div>
+                  <button className="secondary-button" onClick={() => setActiveOutboundTab("实时监听")} type="button">
+                    查看监听
+                  </button>
+                </div>
+                <div className={`route-status-card is-${routeStatus.status}`}>
+                  <div className="route-status-main">
+                    <span className={`line-preflight-badge is-${routeStatus.status}`}>{routeStatus.status.toUpperCase()}</span>
+                    <div>
+                      <strong>{routeStatus.title}</strong>
+                      <small>{routeStatus.detail}</small>
+                    </div>
+                  </div>
+                  <div className="route-status-grid">
+                    <div>
+                      <span>线路状态</span>
+                      <strong>{telephonyReadinessLabel(telephonyHealth, telephonyPreflight)}</strong>
+                    </div>
+                    <div>
+                      <span>最近检测</span>
+                      <strong>{routeCheckedAt}</strong>
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article className="panel">
+                <div className="panel-title">
+                  <div>
+                    <p>任务概览</p>
+                    <h2>当前任务情况</h2>
+                  </div>
+                  <button className="secondary-button" onClick={() => setActiveOutboundTab("任务列表")} type="button">
+                    查看任务
+                  </button>
+                </div>
+                <div className="line-health-grid">
+                  <div>
+                    <span>任务总数</span>
+                    <strong>{outboundTasks.length}</strong>
+                  </div>
+                  <div>
+                    <span>运行中</span>
+                    <strong>{runningTaskCount}</strong>
+                  </div>
+                  <div>
+                    <span>排队中</span>
+                    <strong>{queuedTaskCount}</strong>
+                  </div>
+                  <div>
+                    <span>已完成</span>
+                    <strong>{completedTaskCount}</strong>
+                  </div>
+                </div>
+                <div className="record-grid single">
+                  <article className="record-card">
+                    <div>
+                      <strong>{latestTask?.name ?? "暂无外呼任务"}</strong>
+                      <span>{latestTask?.status ?? "未创建"}</span>
+                    </div>
+                    <p>{latestTask ? `目标 ${latestTask.targetCount} 条，已完成 ${latestTask.completedCount} 条，意向 ${latestTask.intentCount} 条。` : "先创建一个外呼任务，这里会展示最新任务摘要。"}</p>
+                    <small>累计意向客户 {totalIntentCount} 条</small>
+                  </article>
+                </div>
+              </article>
+
+              <article className="panel">
+                <div className="panel-title">
+                  <div>
+                    <p>话术概览</p>
+                    <h2>当前启用话术</h2>
+                  </div>
+                  <button className="secondary-button" onClick={() => setActiveOutboundTab("话术流程")} type="button">
+                    查看话术
+                  </button>
+                </div>
+                <div className="record-grid single">
+                  <article className="record-card">
+                    <div>
+                      <strong>{activeScript?.name ?? "未启用话术"}</strong>
+                      <span>{activeScript?.isActive ? "启用中" : "未启用"}</span>
+                    </div>
+                    <p>{activeScript?.opening || "保存并启用话术后，这里会显示开场白摘要。"}</p>
+                    <small>{activeScript?.qualification || "可在话术流程页编辑需求确认、异议处理和收口动作。"}</small>
+                  </article>
+                </div>
+              </article>
+
+              <article className="panel">
+                <div className="panel-title">
+                  <div>
+                    <p>规则概览</p>
+                    <h2>当前重拨策略</h2>
+                  </div>
+                  <button className="secondary-button" onClick={() => setActiveOutboundTab("重拨规则")} type="button">
+                    查看规则
+                  </button>
+                </div>
+                <div className="line-health-grid">
+                  <div>
+                    <span>规则名称</span>
+                    <strong>{activeRule?.name ?? "默认规则"}</strong>
+                  </div>
+                  <div>
+                    <span>未接回拨</span>
+                    <strong>{ruleDraft.noAnswerIntervalMinutes} 分钟</strong>
+                  </div>
+                  <div>
+                    <span>忙线回拨</span>
+                    <strong>{ruleDraft.busyIntervalMinutes} 分钟</strong>
+                  </div>
+                  <div>
+                    <span>最大次数</span>
+                    <strong>{ruleDraft.maxAttempts} 次</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article className="panel span-2">
+                <div className="panel-title">
+                  <div>
+                    <p>通话概览</p>
+                    <h2>最近通话与下一步</h2>
+                  </div>
+                  <div className="button-row">
+                    <button className="secondary-button" onClick={() => setActiveOutboundTab("通话记录")} type="button">
+                      查看记录
+                    </button>
+                    <button className="secondary-button" onClick={() => setActiveOutboundTab("实时监听")} type="button">
+                      实时监听
+                    </button>
+                  </div>
+                </div>
+                <div className="record-grid">
+                  <article className="record-card">
+                    <div>
+                      <strong>{latestCall?.merchantName ?? "暂无通话记录"}</strong>
+                      <span>{latestCall?.outcome ?? "等待开始"}</span>
+                    </div>
+                    <p>{latestCall?.transcript || "完成一次通话后，这里会显示最新转写摘要。"}</p>
+                    <small>
+                      {latestCall ? `${latestCall.aiSeat} · ${formatDuration(latestCall.durationSeconds)} · ${latestCall.currentNode}` : "可从任务列表启动任务后查看。"}
+                    </small>
+                  </article>
+                  <article className="record-card">
+                    <div>
+                      <strong>下一步建议</strong>
+                      <span>{routeStatus.action}</span>
+                    </div>
+                    <p>{customerRouteNextStep}</p>
+                    <small>云端注册目标：{serverRegistrationTarget}</small>
+                  </article>
+                  <article className="record-card">
+                    <div>
+                      <strong>设备自动检测</strong>
+                      <span>{deviceDiscoveryLabel}</span>
+                    </div>
+                    <p>{deviceDiscoveryDetail}</p>
+                    <small>本地发现地址：{discoveredGatewayAddress}</small>
+                  </article>
+                </div>
+              </article>
+            </section>
+          </>
+        )}
 
         {showRealtime && (
           <section className="content-grid outbound-main">
@@ -8245,8 +8554,27 @@ function TeammateWorkspace() {
     setActiveOutboundTab("任务列表");
   }
 
+  if (embeddedOutbound && !auth?.accessToken) {
+    return (
+      <main className="embedded-outbound-shell">
+        <div className="embedded-outbound-empty">
+          <strong>请先登录客户工作台</strong>
+          <span>登录成功后再打开 AI 外呼系统。</span>
+        </div>
+      </main>
+    );
+  }
+
   if (!auth?.accessToken) {
     return renderAuthGate();
+  }
+
+  if (embeddedOutbound) {
+    return (
+      <main className="embedded-outbound-shell">
+        <div className="content-area embedded-outbound-content">{renderOutboundWorkspace()}</div>
+      </main>
+    );
   }
 
   return (
@@ -8263,7 +8591,7 @@ function TeammateWorkspace() {
         </div>
 
         <nav className="nav-list" aria-label="功能模块">
-          {modules.map((module, index) => {
+          {visibleModules.map((module, index) => {
             const Icon = icons[index] ?? ClipboardList;
             return (
               <button
@@ -8297,6 +8625,12 @@ function TeammateWorkspace() {
             <button className="secondary-button icon-only" onClick={loadData} type="button" title="刷新数据">
               <RefreshCw size={18} className={isLoading ? "spin" : ""} />
             </button>
+            {outboundOnly ? (
+              <button className="secondary-button" onClick={backToClientWorkspace} type="button">
+                <ArrowLeft size={16} />
+                返回工作台
+              </button>
+            ) : null}
             <button className="secondary-button" onClick={logout} type="button">
               退出
             </button>

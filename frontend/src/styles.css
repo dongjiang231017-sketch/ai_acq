@@ -163,6 +163,39 @@ button {
   gap: 0;
 }
 
+.embedded-outbound-shell {
+  min-height: 100vh;
+  background: transparent;
+}
+
+.embedded-outbound-content {
+  padding: 0 0 24px;
+}
+
+.embedded-outbound-empty {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: #52617a;
+  text-align: center;
+}
+
+.embedded-outbound-empty strong,
+.embedded-outbound-empty span {
+  display: block;
+}
+
+.embedded-outbound-empty strong {
+  color: #1f2d45;
+  font-size: 22px;
+}
+
+.embedded-outbound-empty span {
+  color: #74839a;
+  font-size: 14px;
+}
+
 .sidebar,
 .workspace {
   border: 1px solid #dbe8f7;

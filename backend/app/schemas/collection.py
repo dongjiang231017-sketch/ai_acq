@@ -9,6 +9,7 @@ from app.schemas.common import ApiModel as BaseModel
 class LeadCollectionTaskCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     provider: str = "amap"
+    collection_mode: Annotated[str | None, Field(alias="collectionMode")] = None
     cities: list[str] = Field(min_length=1)
     categories: list[str] = Field(min_length=1)
     keywords: list[str] = Field(default_factory=list)
@@ -22,6 +23,7 @@ class LeadCollectionTaskRead(BaseModel):
     id: str
     name: str
     provider: str
+    collection_mode: Annotated[str, Field(alias="collectionMode")]
     cities: list[str]
     categories: list[str]
     keywords: list[str]
@@ -41,10 +43,12 @@ class LeadCollectionRunRead(BaseModel):
     id: str
     task_id: Annotated[str, Field(alias="taskId")]
     provider: str
+    collection_mode: Annotated[str, Field(alias="collectionMode")]
     status: str
     requested_count: Annotated[int, Field(alias="requestedCount")]
     fetched_count: Annotated[int, Field(alias="fetchedCount")]
     inserted_count: Annotated[int, Field(alias="insertedCount")]
+    updated_count: Annotated[int, Field(alias="updatedCount")]
     duplicate_count: Annotated[int, Field(alias="duplicateCount")]
     failed_count: Annotated[int, Field(alias="failedCount")]
     error_message: Annotated[str | None, Field(alias="errorMessage")]

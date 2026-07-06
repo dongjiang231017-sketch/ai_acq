@@ -8,6 +8,7 @@ from sqladmin import Admin, Flash, ModelView, action
 from sqladmin.authentication import AuthenticationBackend
 from sqladmin.forms import ModelConverter
 from sqladmin.widgets import BooleanInputWidget
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import RedirectResponse
 from wtforms import PasswordField
 from wtforms.validators import InputRequired, Optional
@@ -64,6 +65,12 @@ TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
 if not hasattr(BooleanInputWidget, "validation_attrs"):
     BooleanInputWidget.validation_attrs = ["required", "disabled"]
+
+
+def _validate_platform_session_snapshot(provider: str) -> tuple[str, str, str | None]:
+    with SessionLocal() as db:
+        validated = validate_platform_browser_session(db, provider)
+        return validated.name, validated.status, validated.last_error
 
 
 class PasswordOptionalModelConverter(ModelConverter):
@@ -509,6 +516,7 @@ class LeadCollectionTaskAdmin(ModelView, model=LeadCollectionTask):
     column_list = [
         LeadCollectionTask.name,
         LeadCollectionTask.provider,
+        LeadCollectionTask.collection_mode,
         LeadCollectionTask.cities,
         LeadCollectionTask.categories,
         LeadCollectionTask.keywords,
@@ -520,6 +528,20 @@ class LeadCollectionTaskAdmin(ModelView, model=LeadCollectionTask):
     column_searchable_list = [LeadCollectionTask.name, LeadCollectionTask.provider, LeadCollectionTask.status]
     column_sortable_list = [LeadCollectionTask.created_at, LeadCollectionTask.updated_at]
     column_default_sort = [(LeadCollectionTask.created_at, True)]
+    column_labels = {
+        LeadCollectionTask.name: "任务名称",
+        LeadCollectionTask.provider: "数据源",
+        LeadCollectionTask.collection_mode: "采集模式",
+        LeadCollectionTask.cities: "城市",
+        LeadCollectionTask.categories: "品类",
+        LeadCollectionTask.keywords: "关键词",
+        LeadCollectionTask.target_per_keyword: "每组目标数",
+        LeadCollectionTask.status: "任务状态",
+        LeadCollectionTask.last_run_status: "最近运行状态",
+        LeadCollectionTask.remark: "备注",
+        LeadCollectionTask.created_at: "创建时间",
+        LeadCollectionTask.updated_at: "更新时间",
+    }
 
 
 class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
@@ -532,10 +554,12 @@ class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
     column_list = [
         LeadCollectionRun.task_id,
         LeadCollectionRun.provider,
+        LeadCollectionRun.collection_mode,
         LeadCollectionRun.status,
         LeadCollectionRun.requested_count,
         LeadCollectionRun.fetched_count,
         LeadCollectionRun.inserted_count,
+        LeadCollectionRun.updated_count,
         LeadCollectionRun.duplicate_count,
         LeadCollectionRun.failed_count,
         LeadCollectionRun.started_at,
@@ -544,6 +568,21 @@ class LeadCollectionRunAdmin(ModelView, model=LeadCollectionRun):
     column_searchable_list = [LeadCollectionRun.provider, LeadCollectionRun.status, LeadCollectionRun.error_message]
     column_sortable_list = [LeadCollectionRun.started_at, LeadCollectionRun.finished_at]
     column_default_sort = [(LeadCollectionRun.started_at, True)]
+    column_labels = {
+        LeadCollectionRun.task_id: "采集任务",
+        LeadCollectionRun.provider: "数据源",
+        LeadCollectionRun.collection_mode: "采集模式",
+        LeadCollectionRun.status: "运行状态",
+        LeadCollectionRun.requested_count: "预计处理数",
+        LeadCollectionRun.fetched_count: "抓取数",
+        LeadCollectionRun.inserted_count: "新增线索",
+        LeadCollectionRun.updated_count: "补充更新",
+        LeadCollectionRun.duplicate_count: "重复跳过",
+        LeadCollectionRun.failed_count: "失败数",
+        LeadCollectionRun.error_message: "错误信息",
+        LeadCollectionRun.started_at: "开始时间",
+        LeadCollectionRun.finished_at: "结束时间",
+    }
 
 
 class RawLeadRecordAdmin(ModelView, model=RawLeadRecord):
@@ -674,10 +713,10 @@ class PlatformBrowserSessionAdmin(ModelView, model=PlatformBrowserSession):
                 session = db.get(PlatformBrowserSession, session_id)
                 if session is None:
                     continue
-                validated = validate_platform_browser_session(db, session.provider)
-                message = validated.name + "：" + validated.status
-                if validated.last_error:
-                    message += f"（{validated.last_error}）"
+                name, status, last_error = await run_in_threadpool(_validate_platform_session_snapshot, session.provider)
+                message = name + "：" + status
+                if last_error:
+                    message += f"（{last_error}）"
                 results.append(message)
 
         if results:

@@ -8,6 +8,7 @@ sqladmin==0.27.2
 alembic==1.18.5
 itsdangerous==2.2.0
 playwright==1.61.0
+websocket-client==1.9.0
 redis==6.4.0
 python-multipart==0.0.32
 dashscope==1.26.0

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from html import unescape
 from hashlib import md5
-from datetime import datetime
 from math import ceil
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -16,6 +17,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.session import SessionLocal
 from app.models.collection import LeadCollectionRun, LeadCollectionTask, LeadProviderConfig, RawLeadRecord
 from app.models.lead import MerchantLead
 from app.services.platform_browser import (
@@ -29,11 +31,23 @@ class CollectionError(ValueError):
     pass
 
 
+class CollectionValidationError(CollectionError):
+    pass
+
+
 @dataclass(frozen=True)
 class LeadImportResult:
     lead: MerchantLead | None
     import_status: str
     phone: str | None = None
+
+
+@dataclass(frozen=True)
+class EnrichmentSeed:
+    lead_id: str
+    city: str
+    category: str
+    keyword: str
 
 
 BLACKLIST_STATUSES = {"已勿扰", "黑名单", "黑名单拦截", "无效号码"}
@@ -71,9 +85,9 @@ PLATFORM_PROVIDER_METADATA = {
         "allowed_hosts": ("dianping.com", "meituan.com"),
     },
     "shangou": {
-        "label": "美团闪购",
-        "search_terms": ("美团", "闪购"),
-        "allowed_hosts": ("meituan.com",),
+        "label": "淘宝闪购",
+        "search_terms": ("淘宝", "闪购"),
+        "allowed_hosts": ("taobao.com", "tb.cn", "ele.me"),
     },
     "douyin": {
         "label": "抖音生活服务",
@@ -82,6 +96,10 @@ PLATFORM_PROVIDER_METADATA = {
     },
 }
 BROWSER_PLATFORM_PROVIDERS = browser_managed_providers()
+COLLECTION_MODE_DISCOVERY = "discovery"
+COLLECTION_MODE_ENRICH = "enrich"
+COLLECTION_ACTIVE_STATUSES = {"排队中", "运行中"}
+COLLECTION_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai-acq-collection")
 PUBLIC_SEARCH_EXCLUDED_HOSTS = (
     "sogou.com",
     "bing.com",
@@ -171,6 +189,42 @@ def _extract_homepage_url(poi: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalize_homepage_url(
+    value: str | None,
+    *,
+    fallback_poi_id: str | None = None,
+    max_length: int = 500,
+) -> str | None:
+    url = str(value or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+
+    parts = urlsplit(url)
+    normalized = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+    if len(normalized) <= max_length:
+        return normalized
+
+    if parts.query:
+        normalized = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        if fallback_poi_id:
+            poi_hint = f"poi_id={quote(fallback_poi_id)}"
+            connector = "&" if "?" in normalized else "?"
+            candidate = f"{normalized}{connector}{poi_hint}"
+            if len(candidate) <= max_length:
+                return candidate
+
+    if len(normalized) > max_length:
+        normalized = normalized[:max_length].rstrip("?&")
+    return normalized or None
+
+
+def _safe_error_text(exc: Exception, max_length: int = 240) -> str:
+    message = str(getattr(exc, "orig", exc) or exc).strip() or "未知错误"
+    if len(message) <= max_length:
+        return message
+    return f"{message[:max_length].rstrip()}..."
+
+
 def _is_blacklisted_lead(lead: MerchantLead) -> bool:
     status_text = " ".join(
         str(value or "")
@@ -225,6 +279,33 @@ def _provider_label(provider: str) -> str:
         "public_web": "公开网页",
     }
     return labels.get(provider, provider)
+
+
+def default_collection_mode(provider: str) -> str:
+    return COLLECTION_MODE_ENRICH if provider in PLATFORM_PROVIDERS else COLLECTION_MODE_DISCOVERY
+
+
+def normalize_collection_mode(provider: str, mode: str | None) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized not in {COLLECTION_MODE_DISCOVERY, COLLECTION_MODE_ENRICH}:
+        normalized = default_collection_mode(provider)
+    if normalized == COLLECTION_MODE_ENRICH and provider not in PLATFORM_PROVIDERS:
+        return COLLECTION_MODE_DISCOVERY
+    return normalized
+
+
+def _collection_mode_label(mode: str) -> str:
+    return "平台补充" if mode == COLLECTION_MODE_ENRICH else "拓源采集"
+
+
+def _collection_source_label(provider: str, collection_mode: str) -> str:
+    if collection_mode == COLLECTION_MODE_ENRICH and provider in PLATFORM_PROVIDERS:
+        return f"{_provider_label(provider)}补充采集"
+    return PROVIDER_SOURCE_LABELS.get(provider, "公开来源采集")
+
+
+def _is_active_collection_status(status: str | None) -> bool:
+    return str(status or "").strip() in COLLECTION_ACTIVE_STATUSES
 
 
 def _request_text(url: str) -> str:
@@ -916,12 +997,12 @@ def _request_platform_pois(
                 "title": _extract_title(html),
             },
         }
-        records.append(_supplement_platform_poi_with_map(db, record, city, category))
+        records.append(record)
 
     if records:
         return records[:target_count]
     if browser_error:
-        raise CollectionError(browser_error)
+        raise CollectionValidationError(browser_error)
     return []
 
 
@@ -1026,6 +1107,191 @@ def _find_existing_lead(
     return None
 
 
+def _lead_matches_keyword(lead: MerchantLead, keyword: str) -> bool:
+    normalized_keyword = _normalize_text(keyword)
+    if not normalized_keyword:
+        return True
+    haystack = _normalize_text(
+        " ".join(
+            str(value or "")
+            for value in (
+                lead.name,
+                lead.city,
+                lead.category,
+                lead.address,
+                lead.district,
+                lead.remark,
+            )
+        ),
+    )
+    return normalized_keyword in haystack
+
+
+def _select_enrichment_seeds(db: Session, task: LeadCollectionTask) -> list[EnrichmentSeed]:
+    cities = _clean_items(task.cities or [])
+    categories = _clean_items(task.categories or [])
+    keywords = _clean_items(task.keywords or []) or [""]
+    owner_user_id = task.owner_user_id
+    if not owner_user_id:
+        return []
+
+    leads = list(
+        db.scalars(
+            select(MerchantLead)
+            .where(MerchantLead.owner_user_id == owner_user_id)
+            .order_by(MerchantLead.updated_at.desc(), MerchantLead.created_at.desc()),
+        ).all(),
+    )
+    specs: list[EnrichmentSeed] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for city in cities:
+        normalized_city = _normalize_text(city)
+        for category in categories:
+            normalized_category = _normalize_text(category)
+            for keyword in keywords:
+                added = 0
+                for lead in leads:
+                    if _is_blacklisted_lead(lead):
+                        continue
+                    if normalized_city and normalized_city not in _normalize_text(lead.city):
+                        continue
+                    if normalized_category and normalized_category not in _normalize_text(lead.category):
+                        continue
+                    if keyword and not _lead_matches_keyword(lead, keyword):
+                        continue
+                    spec_key = (lead.id, city, category, keyword)
+                    if spec_key in seen:
+                        continue
+                    specs.append(EnrichmentSeed(lead_id=lead.id, city=city, category=category, keyword=keyword))
+                    seen.add(spec_key)
+                    added += 1
+                    if added >= task.target_per_keyword:
+                        break
+    return specs
+
+
+def _pick_best_platform_poi(seed: MerchantLead, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    best = _pick_best_map_poi(seed.name, seed.address, candidates)
+    if best:
+        return best
+    normalized_name = _normalize_text(seed.name)
+    for candidate in candidates:
+        if _normalize_text(candidate.get("name")) == normalized_name:
+            return candidate
+    return candidates[0]
+
+
+def _append_remark(existing_remark: str | None, addition: str) -> str:
+    cleaned_addition = addition.strip()
+    if not cleaned_addition:
+        return existing_remark or ""
+    current = str(existing_remark or "").strip()
+    if cleaned_addition in current:
+        return current
+    return cleaned_addition if not current else f"{current}\n{cleaned_addition}"
+
+
+def _merge_platform_poi_into_lead(
+    lead: MerchantLead,
+    provider: str,
+    poi: dict[str, Any],
+    city: str,
+    category: str,
+    keyword: str,
+) -> tuple[bool, str | None]:
+    changed = False
+    poi_id = str(poi.get("id") or "").strip() or None
+    phone = _first_valid_phone(str(poi.get("tel") or ""))
+    homepage_url = _normalize_homepage_url(_extract_homepage_url(poi), fallback_poi_id=poi_id)
+    city_name = str(poi.get("cityname") or city or "").strip() or None
+    district = str(poi.get("adname") or "").strip() or None
+    address = str(poi.get("address") or "").strip() or None
+    category_text = str(poi.get("type") or category or "").strip() or category
+    longitude, latitude = _split_location(str(poi.get("location") or ""))
+
+    if provider in PLATFORM_PROVIDERS and lead.platform != provider:
+        lead.platform = provider
+        changed = True
+    if phone and _first_valid_phone(lead.phone) != phone and not _first_valid_phone(lead.phone):
+        lead.phone = phone
+        changed = True
+    if homepage_url and lead.platform_homepage_url != homepage_url:
+        lead.platform_homepage_url = homepage_url
+        changed = True
+    if homepage_url and lead.platform_url != homepage_url:
+        lead.platform_url = homepage_url
+        changed = True
+    if not lead.source_poi_id and poi_id:
+        lead.source_poi_id = poi_id
+        changed = True
+    if city_name and lead.city != city_name:
+        lead.city = city_name
+        changed = True
+    if not lead.district and district:
+        lead.district = district
+        changed = True
+    if not lead.address and address:
+        lead.address = address
+        changed = True
+    if not lead.longitude and longitude:
+        lead.longitude = longitude
+        changed = True
+    if not lead.latitude and latitude:
+        lead.latitude = latitude
+        changed = True
+    if category_text and category_text != lead.category and _normalize_text(category_text) not in _normalize_text(lead.category):
+        lead.category = category_text
+        changed = True
+
+    enrichment_note = f"平台补充：{_provider_label(provider)}，检索词：{keyword or lead.name}"
+    next_remark = _append_remark(lead.remark, enrichment_note)
+    if next_remark != (lead.remark or ""):
+        lead.remark = next_remark
+        changed = True
+    return changed, phone or _first_valid_phone(lead.phone)
+
+
+def _create_raw_record(
+    *,
+    task: LeadCollectionTask,
+    run: LeadCollectionRun,
+    provider: str,
+    owner_user_id: str | None,
+    poi: dict[str, Any],
+    city: str,
+    category: str,
+    lead: MerchantLead | None,
+    import_status: str,
+    phone: str | None,
+) -> RawLeadRecord:
+    poi_id = str(poi.get("id") or "").strip()
+    longitude, latitude = _split_location(str(poi.get("location") or ""))
+    return RawLeadRecord(
+        task_id=task.id,
+        run_id=run.id,
+        lead_id=lead.id if lead else None,
+        owner_user_id=owner_user_id,
+        provider=provider,
+        source_poi_id=poi_id,
+        name=str(poi.get("name") or ""),
+        city=str(poi.get("cityname") or city or "") or None,
+        district=str(poi.get("adname") or "") or None,
+        category=str(poi.get("type") or category or "") or None,
+        phone=phone or _first_valid_phone(str(poi.get("tel") or "")),
+        address=str(poi.get("address") or "") or None,
+        source_url=_normalize_homepage_url(
+            _extract_homepage_url(poi),
+            fallback_poi_id=poi_id,
+        ),
+        longitude=longitude,
+        latitude=latitude,
+        import_status=import_status,
+        raw_payload=poi,
+    )
+
+
 def _create_lead_from_poi(
     db: Session,
     owner_user_id: str | None,
@@ -1035,6 +1301,7 @@ def _create_lead_from_poi(
     category: str,
     keyword: str,
     source_label: str,
+    seed_lead: MerchantLead | None = None,
 ) -> LeadImportResult:
     poi_id = str(poi.get("id") or "").strip()
     name = str(poi.get("name") or "").strip()
@@ -1046,6 +1313,20 @@ def _create_lead_from_poi(
     address = str(poi.get("address") or "").strip() or None
     raw_phone = str(poi.get("tel") or "")
     phone = _first_valid_phone(raw_phone)
+    homepage_url = _normalize_homepage_url(_extract_homepage_url(poi), fallback_poi_id=poi_id)
+
+    if seed_lead is not None:
+        if _is_blacklisted_lead(seed_lead):
+            return LeadImportResult(lead=None, import_status="黑名单拦截", phone=phone or _first_valid_phone(seed_lead.phone))
+        changed, merged_phone = _merge_platform_poi_into_lead(seed_lead, provider, poi, city, category, keyword)
+        db.add(seed_lead)
+        db.flush()
+        return LeadImportResult(
+            lead=seed_lead,
+            import_status="已补充" if changed else "重复线索",
+            phone=merged_phone,
+        )
+
     if not phone:
         if provider in PLATFORM_PROVIDERS:
             return LeadImportResult(lead=None, import_status="待补电话")
@@ -1053,7 +1334,6 @@ def _create_lead_from_poi(
 
     longitude, latitude = _split_location(str(poi.get("location") or ""))
     category_text = str(poi.get("type") or category or "").strip() or category
-    homepage_url = _extract_homepage_url(poi)
 
     existing = _find_existing_lead(db, owner_user_id, provider, poi_id, name, address, phone, homepage_url)
     if existing:
@@ -1087,104 +1367,269 @@ def _create_lead_from_poi(
     return LeadImportResult(lead=lead, import_status="已入库", phone=phone)
 
 
-def run_collection_task(db: Session, task: LeadCollectionTask) -> LeadCollectionRun:
+def _estimate_requested_count(task: LeadCollectionTask) -> int:
     cities = _clean_items(task.cities or [])
     categories = _clean_items(task.categories or [])
     keywords = _clean_items(task.keywords or []) or [""]
+    return len(cities) * len(categories) * len(keywords) * max(int(task.target_per_keyword or 0), 1)
+
+
+def _mark_task_and_run(task: LeadCollectionTask, run: LeadCollectionRun, status: str) -> None:
+    run.status = status
+    task.status = status
+    task.last_run_status = status
+
+
+def _record_import_result(
+    db: Session,
+    *,
+    task: LeadCollectionTask,
+    run: LeadCollectionRun,
+    city: str,
+    category: str,
+    keyword: str,
+    poi: dict[str, Any],
+    seed_lead: MerchantLead | None = None,
+) -> None:
     owner_user_id = task.owner_user_id
+    poi_id = str(poi.get("id") or "").strip()
+    if not poi_id:
+        run.failed_count += 1
+        return
+
+    existing_raw = db.scalar(
+        select(RawLeadRecord).where(
+            RawLeadRecord.owner_user_id == owner_user_id,
+            RawLeadRecord.provider == task.provider,
+            RawLeadRecord.source_poi_id == poi_id,
+        ),
+    )
+    if existing_raw:
+        run.duplicate_count += 1
+        return
+
+    try:
+        with db.begin_nested():
+            import_result = _create_lead_from_poi(
+                db,
+                owner_user_id,
+                task.provider,
+                poi,
+                city,
+                category,
+                keyword,
+                _collection_source_label(task.provider, task.collection_mode),
+                seed_lead=seed_lead,
+            )
+            raw_record = _create_raw_record(
+                task=task,
+                run=run,
+                provider=task.provider,
+                owner_user_id=owner_user_id,
+                poi=poi,
+                city=city,
+                category=category,
+                lead=import_result.lead,
+                import_status=import_result.import_status,
+                phone=import_result.phone,
+            )
+            db.add(raw_record)
+            db.flush()
+    except Exception as exc:
+        run.failed_count += 1
+        if not run.error_message:
+            run.error_message = f"部分线索保存失败：{_safe_error_text(exc)}"
+        return
+
+    if import_result.import_status == "已入库":
+        run.inserted_count += 1
+    elif import_result.import_status == "已补充":
+        run.updated_count += 1
+    elif import_result.import_status == "重复线索":
+        run.duplicate_count += 1
+    else:
+        run.failed_count += 1
+
+
+def _run_discovery_collection(db: Session, task: LeadCollectionTask, run: LeadCollectionRun) -> None:
+    cities = _clean_items(task.cities or [])
+    categories = _clean_items(task.categories or [])
+    keywords = _clean_items(task.keywords or []) or [""]
+    run.requested_count = len(cities) * len(categories) * len(keywords) * task.target_per_keyword
+
+    for city in cities:
+        for category in categories:
+            for keyword in keywords:
+                pois = _request_provider_pois(db, task.provider, city, category, keyword, task.target_per_keyword)
+                run.fetched_count += len(pois)
+                for poi in pois:
+                    _record_import_result(
+                        db,
+                        task=task,
+                        run=run,
+                        city=city,
+                        category=category,
+                        keyword=keyword,
+                        poi=poi,
+                    )
+
+
+def _run_platform_enrichment(db: Session, task: LeadCollectionTask, run: LeadCollectionRun) -> None:
+    if task.provider not in PLATFORM_PROVIDERS:
+        raise CollectionError("当前来源仅支持拓源采集，平台来源才支持补充模式。")
+
+    seeds = _select_enrichment_seeds(db, task)
+    run.requested_count = len(seeds)
+    if not seeds:
+        raise CollectionError("平台补充模式没有找到可补充的现有线索，请先执行一轮地图拓源采集。")
+
+    for seed in seeds:
+        lead = db.scalar(
+            select(MerchantLead).where(
+                MerchantLead.id == seed.lead_id,
+                MerchantLead.owner_user_id == task.owner_user_id,
+            ),
+        )
+        if lead is None or _is_blacklisted_lead(lead):
+            run.failed_count += 1
+            continue
+
+        query_text = lead.name
+        candidates = _request_platform_pois(db, task.provider, seed.city, seed.category, query_text, min(task.target_per_keyword, 5))
+        match = _pick_best_platform_poi(lead, candidates)
+        if not match:
+            run.failed_count += 1
+            continue
+
+        run.fetched_count += 1
+        _record_import_result(
+            db,
+            task=task,
+            run=run,
+            city=seed.city,
+            category=seed.category,
+            keyword=seed.keyword or query_text,
+            poi=match,
+            seed_lead=lead,
+        )
+
+
+def _finalize_collection_status(task: LeadCollectionTask, run: LeadCollectionRun, *, error: Exception | None = None) -> None:
+    has_success = any((run.inserted_count, run.updated_count, run.duplicate_count))
+    if isinstance(error, CollectionValidationError):
+        run.error_message = str(error)
+        _mark_task_and_run(task, run, "需验证")
+        return
+    if error is not None:
+        run.error_message = str(error)
+        _mark_task_and_run(task, run, "部分完成" if has_success else "失败")
+        return
+    if run.failed_count > 0:
+        _mark_task_and_run(task, run, "部分完成" if has_success else "失败")
+        return
+    _mark_task_and_run(task, run, "已完成")
+
+
+def _execute_collection_run(db: Session, task: LeadCollectionTask, run: LeadCollectionRun) -> None:
+    cities = _clean_items(task.cities or [])
+    categories = _clean_items(task.categories or [])
     if task.provider not in MAP_PROVIDERS | PLATFORM_PROVIDERS | PUBLIC_PROVIDERS:
         raise CollectionError("当前只支持地图点位、平台公开页面和公开网页采集数据源")
     if not cities or not categories:
         raise CollectionError("采集任务必须至少包含一个城市和一个品类")
-    source_label = PROVIDER_SOURCE_LABELS.get(task.provider, "公开来源采集")
 
-    run = LeadCollectionRun(
-        task_id=task.id,
-        provider=task.provider,
-        status="运行中",
-        requested_count=len(cities) * len(categories) * len(keywords) * task.target_per_keyword,
-    )
-    task.status = "采集中"
-    task.last_run_status = "运行中"
-    db.add(run)
-    db.flush()
-
+    task.collection_mode = normalize_collection_mode(task.provider, task.collection_mode)
+    run.collection_mode = task.collection_mode
+    error: Exception | None = None
     try:
-        for city in cities:
-            for category in categories:
-                for keyword in keywords:
-                    pois = _request_provider_pois(db, task.provider, city, category, keyword, task.target_per_keyword)
-                    run.fetched_count += len(pois)
-                    for poi in pois:
-                        poi_id = str(poi.get("id") or "").strip()
-                        if not poi_id:
-                            run.failed_count += 1
-                            continue
-
-                        existing_raw = db.scalar(
-                            select(RawLeadRecord).where(
-                                RawLeadRecord.owner_user_id == owner_user_id,
-                                RawLeadRecord.provider == task.provider,
-                                RawLeadRecord.source_poi_id == poi_id,
-                            ),
-                        )
-                        if existing_raw:
-                            run.duplicate_count += 1
-                            continue
-
-                        import_result = _create_lead_from_poi(
-                            db,
-                            owner_user_id,
-                            task.provider,
-                            poi,
-                            city,
-                            category,
-                            keyword,
-                            source_label,
-                        )
-                        lead = import_result.lead
-                        import_status = import_result.import_status
-                        if import_status == "已入库":
-                            run.inserted_count += 1
-                        elif import_status == "重复线索":
-                            run.duplicate_count += 1
-                        else:
-                            run.failed_count += 1
-
-                        longitude, latitude = _split_location(str(poi.get("location") or ""))
-                        raw_record = RawLeadRecord(
-                            task_id=task.id,
-                            run_id=run.id,
-                            lead_id=lead.id if lead else None,
-                            owner_user_id=owner_user_id,
-                            provider=task.provider,
-                            source_poi_id=poi_id,
-                            name=str(poi.get("name") or ""),
-                            city=str(poi.get("cityname") or city or "") or None,
-                            district=str(poi.get("adname") or "") or None,
-                            category=str(poi.get("type") or category or "") or None,
-                            phone=import_result.phone or _first_valid_phone(str(poi.get("tel") or "")),
-                            address=str(poi.get("address") or "") or None,
-                            source_url=_extract_homepage_url(poi),
-                            longitude=longitude,
-                            latitude=latitude,
-                            import_status=import_status,
-                            raw_payload=poi,
-                        )
-                        db.add(raw_record)
-                        db.flush()
-        run.status = "已完成"
-        task.status = "已完成"
-        task.last_run_status = "已完成"
+        if task.collection_mode == COLLECTION_MODE_ENRICH:
+            _run_platform_enrichment(db, task, run)
+        else:
+            _run_discovery_collection(db, task, run)
+    except (CollectionValidationError, CollectionError) as exc:
+        error = exc
     except Exception as exc:
-        run.status = "失败"
-        run.error_message = str(exc)
-        task.status = "失败"
-        task.last_run_status = "失败"
+        error = CollectionError(_safe_error_text(exc))
     finally:
+        _finalize_collection_status(task, run, error=error)
         run.finished_at = datetime.utcnow()
         db.add(task)
         db.add(run)
         db.commit()
         db.refresh(run)
+
+
+def _run_collection_task_in_background(run_id: str) -> None:
+    with SessionLocal() as db:
+        run = db.scalar(select(LeadCollectionRun).where(LeadCollectionRun.id == run_id))
+        if run is None:
+            return
+        task = db.scalar(select(LeadCollectionTask).where(LeadCollectionTask.id == run.task_id))
+        if task is None:
+            run.status = "失败"
+            run.error_message = "采集任务不存在，后台无法继续执行。"
+            run.finished_at = datetime.utcnow()
+            db.add(run)
+            db.commit()
+            return
+
+        _mark_task_and_run(task, run, "运行中")
+        db.add(task)
+        db.add(run)
+        db.commit()
+        try:
+            _execute_collection_run(db, task, run)
+        except Exception as exc:
+            run.status = "失败"
+            run.error_message = _safe_error_text(exc)
+            run.finished_at = datetime.utcnow()
+            task.status = "失败"
+            task.last_run_status = "失败"
+            db.add(task)
+            db.add(run)
+            db.commit()
+
+
+def enqueue_collection_task(db: Session, task: LeadCollectionTask) -> LeadCollectionRun:
+    if _is_active_collection_status(task.status):
+        raise CollectionError("该采集任务正在后台执行，请等待当前任务完成后再重试。")
+
+    active_run = db.scalar(
+        select(LeadCollectionRun)
+        .where(
+            LeadCollectionRun.task_id == task.id,
+            LeadCollectionRun.status.in_(tuple(COLLECTION_ACTIVE_STATUSES)),
+        )
+        .order_by(LeadCollectionRun.started_at.desc()),
+    )
+    if active_run is not None:
+        raise CollectionError("该采集任务已在队列中，请稍后刷新任务状态。")
+
+    task.collection_mode = normalize_collection_mode(task.provider, task.collection_mode)
+    run = LeadCollectionRun(
+        task_id=task.id,
+        provider=task.provider,
+        collection_mode=task.collection_mode,
+        status="排队中",
+        requested_count=_estimate_requested_count(task),
+    )
+    _mark_task_and_run(task, run, "排队中")
+    db.add(run)
+    db.add(task)
+    db.commit()
+    db.refresh(run)
+
+    try:
+        COLLECTION_EXECUTOR.submit(_run_collection_task_in_background, run.id)
+    except Exception as exc:
+        run.status = "失败"
+        run.error_message = f"后台排队失败：{_safe_error_text(exc)}"
+        run.finished_at = datetime.utcnow()
+        task.status = "失败"
+        task.last_run_status = "失败"
+        db.add(task)
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        raise CollectionError("采集任务加入后台队列失败，请稍后再试。") from exc
     return run

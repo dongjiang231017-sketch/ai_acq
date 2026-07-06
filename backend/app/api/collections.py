@@ -12,7 +12,7 @@ from app.schemas.collection import (
     LeadCollectionTaskRead,
     RawLeadRecordRead,
 )
-from app.services.collection import CollectionError, run_collection_task
+from app.services.collection import CollectionError, enqueue_collection_task, normalize_collection_mode
 
 router = APIRouter()
 
@@ -40,6 +40,7 @@ def create_collection_task(
     task = LeadCollectionTask(
         name=payload.name,
         provider=payload.provider,
+        collection_mode=normalize_collection_mode(payload.provider, payload.collection_mode),
         cities=payload.cities,
         categories=payload.categories,
         keywords=payload.keywords,
@@ -54,7 +55,7 @@ def create_collection_task(
     return task
 
 
-@router.post("/tasks/{task_id}/run", response_model=LeadCollectionRunRead)
+@router.post("/tasks/{task_id}/run", response_model=LeadCollectionRunRead, status_code=status.HTTP_202_ACCEPTED)
 def run_task(
     task_id: str,
     current_user: User = Depends(get_current_user),
@@ -69,7 +70,7 @@ def run_task(
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="采集任务不存在")
     try:
-        return run_collection_task(db, task)
+        return enqueue_collection_task(db, task)
     except CollectionError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
