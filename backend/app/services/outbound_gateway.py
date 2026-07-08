@@ -7,6 +7,9 @@ from app.core.config import settings
 from app.models.lead import MerchantLead
 from app.models.task import OutreachTask
 from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, render_originate_channel
+from app.services.realtime_intent_capture import register_realtime_test_call_context
+from app.services.realtime_route_health import prepare_realtime_route_for_call
+from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.telephony_runtime_config import telephony_bool, telephony_int, telephony_str
 from app.services.voice_gateway_profiles import current_voice_gateway_profile, voice_gateway_label
 
@@ -139,6 +142,18 @@ class AsteriskGateway:
 
         try:
             render_originate_channel(attempt.lead.phone)
+            requested_route = _bulk_conversation_route()
+            route_probe = prepare_realtime_route_for_call(requested_route)
+            register_realtime_test_call_context(
+                phone=attempt.lead.phone,
+                caller_id=None,
+                merchant_name=attempt.lead.name,
+                requested_route=requested_route,
+                effective_route=route_probe.effective_route,
+                source="outbound_task",
+                task_id=attempt.task.id,
+                lead_id=attempt.lead.id,
+            )
             with AsteriskAmiClient() as client:
                 channel_limit = min(
                     max(1, int(attempt.task.concurrency or 1)),
@@ -158,6 +173,7 @@ class AsteriskGateway:
                         "AI_ACQ_SEAT": attempt.ai_seat,
                         "AI_ACQ_CHANNEL_LIMIT": str(channel_limit),
                         "AI_ACQ_ACTIVE_CHANNELS_BEFORE_SUBMIT": str(active_before_submit),
+                        "AI_ACQ_CONVERSATION_ROUTE": route_probe.effective_route,
                     },
                 )
         except AsteriskAmiError as exc:
@@ -194,3 +210,12 @@ def get_outbound_gateway() -> OutboundGateway:
     if telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode) == "asterisk":
         return AsteriskGateway()
     return SimulatorGateway()
+
+
+def _bulk_conversation_route() -> str:
+    route = (get_runtime_ai_config().realtime_conversation_mode or "omni").strip().lower()
+    if route in {"qwen_omni", "omni_realtime_interruptible"}:
+        return "omni"
+    if route in {"pipeline", "half_duplex_interruptible"}:
+        return "pipeline"
+    return "omni"

@@ -73,7 +73,9 @@ import {
   TelephonyLineRecovery,
   TelephonyPreflight,
   TelephonyTestCallResult,
+  VoiceGatewayLine,
   VoiceGatewayProfile,
+  VoiceCacheStatus,
   VoiceCloneRecord,
   VoiceOverview,
   VoiceProfile,
@@ -84,6 +86,7 @@ import {
   SettingsOverview,
   SystemSetting,
   API_BASE_URL,
+  VoiceDefaultSelection,
   api,
   apiAssetUrl,
   clearStoredAuth,
@@ -301,18 +304,28 @@ const fallbackTelephonyPreflight: TelephonyPreflight = {
 };
 
 const fallbackRealtimePipeline: RealtimePipeline = {
-  mode: "half_duplex_interruptible",
-  bridgeMode: "mock_media",
-  targetLatencyMs: 1500,
-  estimatedLatencyMs: 1380,
-  estimatedAiCostPerMinute: 0.04,
+  mode: "omni_realtime_interruptible",
+  bridgeMode: "asterisk_audiosocket",
+  targetLatencyMs: 850,
+  estimatedLatencyMs: 720,
+  estimatedAiCostPerMinute: 0.09,
   readyForMockCall: true,
   readyForAsteriskMedia: false,
-  configuredRoute: "pipeline",
-  actualBridgeRoute: "pipeline",
+  configuredRoute: "omni",
+  actualBridgeRoute: "omni",
   routeMatched: true,
-  nextStep: "先用模拟通话验证 ASR/意图/LLM/TTS/打断；设备识卡后再接 Asterisk 媒体桥。",
+  nextStep: "启动 AudioSocket bridge 的 Omni 模式，并确认语音网关/Asterisk 在线。",
   routeOptions: [
+    {
+      key: "livekit",
+      label: "LiveKit Agent 外呼",
+      mode: "livekit_agent_sip",
+      summary: "LiveKit room + SIP outbound + AgentSession，替代当前 AudioSocket 自建桥。",
+      estimatedLatencyMs: 450,
+      estimatedAiCostPerMinute: 0.12,
+      readyForAsteriskMedia: false,
+      isActive: false,
+    },
     {
       key: "omni",
       label: "极速人声 Omni",
@@ -321,7 +334,7 @@ const fallbackRealtimePipeline: RealtimePipeline = {
       estimatedLatencyMs: 720,
       estimatedAiCostPerMinute: 0.09,
       readyForAsteriskMedia: false,
-      isActive: false,
+      isActive: true,
     },
     {
       key: "pipeline",
@@ -331,7 +344,7 @@ const fallbackRealtimePipeline: RealtimePipeline = {
       estimatedLatencyMs: 1055,
       estimatedAiCostPerMinute: 0.04,
       readyForAsteriskMedia: false,
-      isActive: true,
+      isActive: false,
     },
   ],
   steps: [
@@ -391,6 +404,7 @@ const fallbackRealtimeLiveEvents: RealtimeLiveEvents = {
   hasEvents: false,
   latestAt: null,
   score: null,
+  state: null,
   events: [],
 };
 
@@ -1062,6 +1076,18 @@ const fallbackVoiceOverview: VoiceOverview = {
   cloneEngineMessage: "真实声音克隆服务未接入",
 };
 
+const fallbackVoiceCacheStatus: VoiceCacheStatus = {
+  enabled: false,
+  root: "",
+  profile: "owner_clone_natural_v2_callready",
+  displayName: "本人克隆音色-自然电销-v2",
+  assetVersion: "2026-07-06-natural-v2-callready",
+  manifestLoaded: false,
+  itemCount: 0,
+  intentCount: 0,
+  minConfidence: 0.9,
+};
+
 const fallbackVoiceProviderStatus: VoiceProviderStatus = {
   provider: "dashscope",
   configured: false,
@@ -1391,9 +1417,27 @@ function apiServerHostLabel() {
   }
 }
 
-function serverSipRegistrationTarget(config: TelephonyConfig) {
-  const sipPort = config.voiceGatewayProfile.sipPort || 5060;
-  return `${apiServerHostLabel()}:${sipPort}`;
+function serverSipRegistrationTarget(config: TelephonyConfig, line?: VoiceGatewayLine | null) {
+  const sipHost = line?.sipServerHost?.trim() || config.voiceGatewayProfile.host || apiServerHostLabel();
+  const sipPort = line?.sipServerPort || config.voiceGatewayProfile.sipPort || 5060;
+  return `${sipHost}:${sipPort}`;
+}
+
+function serverSipAccount(config: TelephonyConfig, line?: VoiceGatewayLine | null) {
+  return line?.sipUsername?.trim() || config.voiceGatewayProfile.trunkName || config.asteriskTrunkName || "待配置";
+}
+
+function customerRegistrationLabel(health: TelephonyHealth, line?: VoiceGatewayLine | null) {
+  if (health.trunkReachable) return "已注册";
+  if (line?.registrationStatus?.trim()) return line.registrationStatus.trim();
+  if (health.trunkReachable === false) return "未注册";
+  return "待检测";
+}
+
+function customerRegistrationDetail(health: TelephonyHealth, line?: VoiceGatewayLine | null) {
+  if (health.trunkReachable) return "已注册到云端";
+  if (line?.registrationStatus?.trim()) return line.registrationStatus.trim();
+  return "未收到注册";
 }
 
 function serverAmiDisplay(config: TelephonyConfig) {
@@ -1536,6 +1580,7 @@ function realtimeSessionStatusText(status: string) {
 
 function realtimeLiveEventTitle(type: string) {
   if (type === "call_connected") return "电话接通";
+  if (type === "opening_start") return "开场播放";
   if (type === "remote_speech_started") return "听到对端声音";
   if (type === "human_speech_confirmed") return "真人已说话";
   if (type === "call_screening_detected") return "电话助理";
@@ -1543,6 +1588,8 @@ function realtimeLiveEventTitle(type: string) {
   if (type === "audio_capture_started") return "开始录音证据";
   if (type === "audio_capture_saved") return "录音证据已保存";
   if (type === "asr_final") return "客户语音";
+  if (type === "omni_transcription_observed") return "Omni转写记录";
+  if (type === "turn_reply_preparing") return "准备回复";
   if (type === "llm_reply") return "AI 回复";
   if (type === "tts_start") return "开始播放";
   if (type === "tts_interrupted") return "播放打断";
@@ -1554,9 +1601,20 @@ function realtimeLiveEventTitle(type: string) {
   if (type === "barge_transcription_after_forced_response") return "打断转写已记录";
   if (type === "omni_input_buffer_event") return "语音缓冲";
   if (type === "omni_no_audio_response") return "无音频兜底";
+  if (type === "omni_response_slow_fallback") return "慢响应兜底";
   if (type === "omni_unavailable") return "实时模型断开";
   if (type === "call_disconnected") return "电话结束";
   return type;
+}
+
+function realtimeLiveStatusText(status?: string | null) {
+  if (status === "active") return "通话中";
+  if (status === "closed") return "已结束";
+  if (status === "attention") return "需关注";
+  if (status === "pass") return "正常";
+  if (status === "warn") return "偏慢";
+  if (status === "fail") return "异常";
+  return "等待事件";
 }
 
 function formatDuration(seconds: number) {
@@ -1608,6 +1666,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [telephonyConfig, setTelephonyConfig] = useState<TelephonyConfig>(fallbackTelephonyConfig);
   const [telephonyHealth, setTelephonyHealth] = useState<TelephonyHealth>(fallbackTelephonyHealth);
   const [telephonyPreflight, setTelephonyPreflight] = useState<TelephonyPreflight>(fallbackTelephonyPreflight);
+  const [voiceGatewayLines, setVoiceGatewayLines] = useState<VoiceGatewayLine[]>([]);
   const [realtimePipeline, setRealtimePipeline] = useState<RealtimePipeline>(fallbackRealtimePipeline);
   const [realtimeLiveEvents, setRealtimeLiveEvents] = useState<RealtimeLiveEvents>(fallbackRealtimeLiveEvents);
   const [realtimeSession, setRealtimeSession] = useState<RealtimeSession | null>(null);
@@ -1651,6 +1710,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [intentEvents, setIntentEvents] = useState<IntentEvent[]>(fallbackIntentEvents);
   const [followUpWorkOrders, setFollowUpWorkOrders] = useState<FollowUpWorkOrder[]>(fallbackWorkOrders);
   const [voiceOverview, setVoiceOverview] = useState<VoiceOverview>(fallbackVoiceOverview);
+  const [voiceCacheStatus, setVoiceCacheStatus] = useState<VoiceCacheStatus>(fallbackVoiceCacheStatus);
   const [voiceProviderStatus, setVoiceProviderStatus] = useState<VoiceProviderStatus>(fallbackVoiceProviderStatus);
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>(fallbackSystemVoices);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>(fallbackVoiceProfiles);
@@ -1740,6 +1800,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [telephonyTestForm, setTelephonyTestForm] = useState({
     phone: "",
     callerId: "",
+    conversationRoute: "omni" as "pipeline" | "omni" | "livekit",
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
   const [telephonyLineRecovery, setTelephonyLineRecovery] = useState<TelephonyLineRecovery | null>(null);
@@ -1750,7 +1811,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [realtimeForm, setRealtimeForm] = useState({
     merchantName: "模拟火锅店",
     phone: "",
-    conversationRoute: "omni" as "pipeline" | "omni",
+    conversationRoute: "omni" as "pipeline" | "omni" | "livekit",
     voiceChoice: `system:${fallbackSystemVoices[0]?.id ?? "qwen_tts_ethan"}`,
     customerText: "你们这个怎么收费？",
   });
@@ -1826,6 +1887,9 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   });
   const [voiceSampleFile, setVoiceSampleFile] = useState<File | null>(null);
   const [voiceSampleMessage, setVoiceSampleMessage] = useState("");
+  const [voiceDefaultMessage, setVoiceDefaultMessage] = useState("");
+  const [isSavingDefaultVoice, setIsSavingDefaultVoice] = useState(false);
+  const [isSavingVoiceCache, setIsSavingVoiceCache] = useState(false);
   const [isUploadingVoiceSample, setIsUploadingVoiceSample] = useState(false);
   const [isCheckingVoiceProvider, setIsCheckingVoiceProvider] = useState(false);
   const [creatingVoiceCloneProfileId, setCreatingVoiceCloneProfileId] = useState<string | null>(null);
@@ -2080,6 +2144,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
           voiceName: voice.name,
           voiceType: "system",
           provider: voice.provider,
+          voiceParam: voice.voiceParam,
           externalVoiceId: voice.voiceParam,
         } satisfies RealtimeVoiceSelection,
       })),
@@ -2099,6 +2164,29 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     [availableCloneVoiceRecords, systemVoices],
   );
   const activeRealtimeVoiceOption = realtimeVoiceOptions.find((option) => option.key === realtimeForm.voiceChoice) ?? realtimeVoiceOptions[0];
+  useEffect(() => {
+    let cancelled = false;
+    void api.voiceCacheStatus()
+      .then((status) => {
+        if (!cancelled) setVoiceCacheStatus(status);
+      })
+      .catch(() => undefined);
+    api.defaultVoice()
+      .then((selection) => {
+        if (cancelled) return;
+        setVoiceOverview((current) => ({ ...current, defaultVoice: selection.voiceName }));
+        if (selection.voiceType === "clone") {
+          setRealtimeForm((current) => ({ ...current, voiceChoice: `clone:${selection.voiceId}` }));
+          return;
+        }
+        setSelectedSystemVoiceId(selection.voiceId);
+        setRealtimeForm((current) => ({ ...current, voiceChoice: `system:${selection.voiceId}` }));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const backendActiveRealtimeRoute = realtimePipeline.routeOptions.find((option) => option.isActive);
   const activeRealtimeRoute =
     backendActiveRealtimeRoute ??
@@ -2149,15 +2237,17 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   }, [isDesktopClient]);
 
   useEffect(() => {
-    if (activeModule !== "outbound" || activeOutboundTab !== "实时监听") return;
-    void refreshRealtimeLiveEvents();
+    if (activeModule !== "outbound") return;
+    if (activeOutboundTab !== "实时监听" && activeOutboundTab !== "外呼总览") return;
+    void refreshRealtimeLiveEvents(activeOutboundTab === "实时监听");
   }, [activeModule, activeOutboundTab]);
 
   useEffect(() => {
-    if (activeModule !== "outbound" || activeOutboundTab !== "实时监听" || !isTestingTelephony) return;
+    if (activeModule !== "outbound") return;
+    if (activeOutboundTab !== "实时监听" && activeOutboundTab !== "外呼总览") return;
     const timer = window.setInterval(() => {
       void refreshRealtimeLiveEvents(false);
-    }, 1000);
+    }, isTestingTelephony ? 1000 : 5000);
     return () => window.clearInterval(timer);
   }, [activeModule, activeOutboundTab, isTestingTelephony]);
 
@@ -2303,6 +2393,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
       api.collectionTasks(),
       api.collectionRuns(),
       api.rawLeadRecords(),
+      api.voiceGatewayLines(),
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -2435,6 +2526,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     if (results[40].status === "fulfilled") setCollectionTasks(results[40].value);
     if (results[41].status === "fulfilled") setCollectionRuns(results[41].value);
     if (results[42].status === "fulfilled") setRawLeadRecords(results[42].value);
+    if (results[43].status === "fulfilled") setVoiceGatewayLines(results[43].value);
     setIsLoading(false);
   }
 
@@ -2445,6 +2537,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     setCollectionTasks([]);
     setCollectionRuns([]);
     setRawLeadRecords([]);
+    setVoiceGatewayLines([]);
     setSelectedLeadIds([]);
     setSelectedDmLeadIds([]);
     void loadData();
@@ -2756,10 +2849,15 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     setIsCheckingTelephony(true);
     setTelephonyMessage("正在预检语音网关/Asterisk 线路...");
     try {
-      const [config, preflight] = await Promise.all([api.telephonyConfig(), api.telephonyPreflight(telephonyTestForm.phone)]);
+      const [config, preflight, lines] = await Promise.all([
+        api.telephonyConfig(),
+        api.telephonyPreflight(telephonyTestForm.phone),
+        api.voiceGatewayLines(),
+      ]);
       setTelephonyConfig(config);
       setTelephonyHealth(preflight.health);
       setTelephonyPreflight(preflight);
+      setVoiceGatewayLines(lines);
       setTelephonyMessage(preflight.nextStep || telephonyReadinessDetail(config, preflight.health));
       await refreshAsteriskSidecarStatus();
     } catch (error) {
@@ -2771,7 +2869,10 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
 
   async function submitTelephonyTestCall(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!telephonyTestForm.phone.trim()) return;
+    if (!telephonyTestForm.phone.trim()) {
+      setTelephonyMessage("请先填写单号试拨号码。");
+      return;
+    }
     setIsTestingTelephony(true);
     setTelephonyTestResult(null);
     setTelephonyLineRecovery(null);
@@ -2781,6 +2882,8 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
       const result = await api.createTelephonyTestCall({
         phone: telephonyTestForm.phone.trim(),
         callerId: telephonyTestForm.callerId.trim() || null,
+        merchantName: telephonyTestForm.callerId.trim() || "单号真实试拨",
+        conversationRoute: telephonyTestForm.conversationRoute,
       });
       setTelephonyTestResult(result);
       setTelephonyLineRecovery(result.autoRecovery ?? null);
@@ -3780,9 +3883,59 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     });
   }
 
-  function selectSystemVoice(voice: SystemVoice) {
+  async function saveDefaultVoiceSelection(payload: VoiceDefaultSelection, selectedKey: string) {
+    setIsSavingDefaultVoice(true);
+    setVoiceDefaultMessage("");
+    try {
+      const result = await api.saveDefaultVoice(payload);
+      setRealtimeForm((current) => ({ ...current, voiceChoice: selectedKey }));
+      setVoiceOverview((current) => ({ ...current, defaultVoice: result.voiceName }));
+      setSystemVoices((current) =>
+        current.map((item) => ({
+          ...item,
+          isDefault: result.voiceType === "system" && item.voiceParam === result.voiceParam,
+        })),
+      );
+      setVoiceDefaultMessage(result.message || "默认音色已保存，下一通电话自动生效。");
+    } catch (error) {
+      setVoiceDefaultMessage(error instanceof Error ? error.message : "默认音色保存失败，请刷新后重试。");
+    } finally {
+      setIsSavingDefaultVoice(false);
+    }
+  }
+
+  async function updateVoiceCachePreference(enabled: boolean) {
+    setIsSavingVoiceCache(true);
+    setVoiceDefaultMessage("");
+    try {
+      const status = await api.saveVoiceCacheStatus({ enabled });
+      setVoiceCacheStatus(status);
+      setVoiceDefaultMessage(
+        status.enabled
+          ? `已启用「${status.displayName || "外呼语音包"}」，命中固定话术时会优先播放你的声音。`
+          : "已停用外呼语音包，后续固定话术会回到实时合成音色。",
+      );
+    } catch (error) {
+      setVoiceDefaultMessage(error instanceof Error ? error.message : "语音包状态保存失败，请刷新后重试。");
+    } finally {
+      setIsSavingVoiceCache(false);
+    }
+  }
+
+  async function selectSystemVoice(voice: SystemVoice) {
     setSelectedSystemVoiceId(voice.id);
     setVoiceProfileForm((current) => ({ ...current, fallbackVoice: voice.name }));
+    await saveDefaultVoiceSelection(
+      {
+        voiceId: voice.id,
+        voiceName: voice.name,
+        voiceType: "system",
+        provider: voice.provider,
+        voiceParam: voice.voiceParam,
+        externalVoiceId: voice.voiceParam,
+      },
+      `system:${voice.id}`,
+    );
   }
 
   async function previewSystemVoice(voice: SystemVoice) {
@@ -3827,6 +3980,23 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     void audio.play().catch(() => {
       setVoiceSampleMessage("试听播放失败，请刷新后重试。");
     });
+  }
+
+  async function selectCloneVoice(record: VoiceCloneRecord) {
+    if (!record.externalVoiceId) {
+      setVoiceDefaultMessage("这个复刻音色缺少 voice_id，不能设为默认。");
+      return;
+    }
+    await saveDefaultVoiceSelection(
+      {
+        voiceId: record.id,
+        voiceName: record.clonedVoiceName,
+        voiceType: "clone",
+        provider: record.engine,
+        externalVoiceId: record.externalVoiceId,
+      },
+      `clone:${record.id}`,
+    );
   }
 
   function voiceLabelForUsage(profileId?: string | null) {
@@ -4266,7 +4436,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
             <select
               value={realtimeForm.conversationRoute}
               onChange={(event) => {
-                const nextRoute = event.target.value as "pipeline" | "omni";
+                const nextRoute = event.target.value as "pipeline" | "omni" | "livekit";
                 setRealtimeForm({ ...realtimeForm, conversationRoute: nextRoute });
                 setRealtimeSession(null);
                 setRealtimeLastReply("");
@@ -5249,14 +5419,16 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                   <div className="empty-state compact">没有匹配的复刻音色。</div>
                 ) : (
                   <div className="voice-library-grid cloned-voice-grid">
-                    {filteredCloneVoiceRecords.map((record) => (
-                      <article className="voice-option-card clone-voice-card" key={record.id}>
+                    {filteredCloneVoiceRecords.map((record) => {
+                      const isSelectedCloneVoice = realtimeForm.voiceChoice === `clone:${record.id}`;
+                      return (
+                      <article className={isSelectedCloneVoice ? "voice-option-card clone-voice-card is-selected" : "voice-option-card clone-voice-card"} key={record.id}>
                         <div className="voice-option-top">
                           <div>
                             <strong>{record.clonedVoiceName}</strong>
                             <small>{record.engine}</small>
                           </div>
-                          <span>{record.status}</span>
+                          <span>{isSelectedCloneVoice ? "默认" : record.status}</span>
                         </div>
                         <p>
                           <span>voice_id</span>
@@ -5276,7 +5448,14 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                           >
                             试听
                           </button>
-                          <span className="voice-id-chip">复刻音色</span>
+                          <button
+                            className={isSelectedCloneVoice ? "row-action is-primary" : "row-action"}
+                            disabled={isSavingDefaultVoice}
+                            onClick={() => void selectCloneVoice(record)}
+                            type="button"
+                          >
+                            {isSelectedCloneVoice ? "当前默认" : "设为默认"}
+                          </button>
                         </div>
                         {record.previewAudioUrl ? (
                           <audio controls preload="none" src={apiAssetUrl(record.previewAudioUrl)} />
@@ -5284,10 +5463,12 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                           <div className="voice-preview-message is-error">暂无试听音频</div>
                         )}
                       </article>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </section>
+              {voiceDefaultMessage && <div className="voice-preview-message">{voiceDefaultMessage}</div>}
               <section className="voice-library-section">
                 <div className="voice-library-section-head">
                   <div>
@@ -5303,7 +5484,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     <article
                       className={voice.id === activeSystemVoice?.id ? "voice-option-card is-selected" : "voice-option-card"}
                       key={voice.id}
-                      onClick={() => selectSystemVoice(voice)}
+                      onClick={() => void selectSystemVoice(voice)}
                     >
                       <div className="voice-option-top">
                         <div>
@@ -5332,9 +5513,10 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                         </button>
                         <button
                           className={voice.id === activeSystemVoice?.id ? "row-action is-primary" : "row-action"}
+                          disabled={isSavingDefaultVoice}
                           onClick={(event) => {
                             event.stopPropagation();
-                            selectSystemVoice(voice);
+                            void selectSystemVoice(voice);
                           }}
                           type="button"
                         >
@@ -5368,10 +5550,16 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                   <Radio size={24} />
                 </div>
                 <div className="voice-default-copy">
-                  <strong>{activeSystemVoice?.name ?? voiceOverview.defaultVoice}</strong>
-                  <p>{activeSystemVoice?.sampleText ?? "用于系统内置 TTS 回退和默认外呼试听。"}</p>
+                  <strong>{activeRealtimeVoiceOption?.label ?? activeSystemVoice?.name ?? voiceOverview.defaultVoice}</strong>
+                  <p>
+                    {activeRealtimeVoiceOption?.selection.voiceType === "clone"
+                      ? "已选择授权复刻音色，用于 Pipeline 线路的外呼语音合成。"
+                      : activeSystemVoice?.sampleText ?? "用于系统内置 TTS 回退和默认外呼试听。"}
+                  </p>
                   <small>
-                    {activeSystemVoice
+                    {activeRealtimeVoiceOption?.selection.voiceType === "clone"
+                      ? `${activeRealtimeVoiceOption.selection.provider} · ${activeRealtimeVoiceOption.selection.externalVoiceId}`
+                      : activeSystemVoice
                       ? `${activeSystemVoice.provider} · ${activeSystemVoice.voiceParam} · ${activeSystemVoice.gender} · ${activeSystemVoice.style} · ${activeSystemVoice.scenario}`
                       : `${systemVoices.length || voiceOverview.systemVoices} 个系统音色可用`}
                   </small>
@@ -5394,6 +5582,61 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
               {activeSystemVoice && systemVoicePreviewState[activeSystemVoice.id]?.error && (
                 <div className="voice-preview-message is-error">{systemVoicePreviewState[activeSystemVoice.id].error}</div>
               )}
+              {voiceDefaultMessage && <div className="voice-preview-message">{voiceDefaultMessage}</div>}
+              <div className={voiceCacheStatus.enabled ? "voice-cache-panel is-enabled" : "voice-cache-panel"}>
+                <div className="voice-cache-head">
+                  <div>
+                    <span>外呼语音包</span>
+                    <strong>{voiceCacheStatus.displayName || "未导入语音包"}</strong>
+                  </div>
+                  <em>
+                    {voiceCacheStatus.enabled && voiceCacheStatus.manifestLoaded
+                      ? "正在用于外呼"
+                      : voiceCacheStatus.manifestLoaded
+                      ? "已导入未启用"
+                      : "未导入"}
+                  </em>
+                </div>
+                <p>
+                  启用后，外呼命中开场白、常见异议和固定话术时会优先播放这套语音包；未命中的自由回复继续使用上面的默认实时音色。
+                </p>
+                <div className="profile-grid voice-cache-grid">
+                  <div>
+                    <span>音频数量</span>
+                    <strong>{voiceCacheStatus.itemCount}</strong>
+                  </div>
+                  <div>
+                    <span>意图映射</span>
+                    <strong>{voiceCacheStatus.intentCount}</strong>
+                  </div>
+                  <div>
+                    <span>版本</span>
+                    <strong>{voiceCacheStatus.assetVersion || "未读取"}</strong>
+                  </div>
+                  <div>
+                    <span>匹配阈值</span>
+                    <strong>{Math.round(voiceCacheStatus.minConfidence * 100)}%</strong>
+                  </div>
+                  <div className="wide">
+                    <span>缓存目录</span>
+                    <strong>{voiceCacheStatus.root || "未配置"}</strong>
+                  </div>
+                </div>
+                <div className="voice-default-actions voice-cache-actions">
+                  <button
+                    className={voiceCacheStatus.enabled ? "row-action" : "row-action is-primary"}
+                    disabled={isSavingVoiceCache || !voiceCacheStatus.manifestLoaded || voiceCacheStatus.itemCount <= 0}
+                    onClick={() => void updateVoiceCachePreference(!voiceCacheStatus.enabled)}
+                    type="button"
+                  >
+                    {isSavingVoiceCache
+                      ? "保存中"
+                      : voiceCacheStatus.enabled
+                      ? "停用语音包"
+                      : "启用为外呼语音包"}
+                  </button>
+                </div>
+              </div>
             </article>
 
             <article className="panel">
@@ -6271,7 +6514,11 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     const showRules = activeOutboundTab === "重拨规则";
     const showRealtime = activeOutboundTab === "实时监听";
     const routeStatus = routeHealthSummary(telephonyHealth, telephonyPreflight);
-    const serverRegistrationTarget = serverSipRegistrationTarget(telephonyConfig);
+    const activeVoiceGatewayLine = voiceGatewayLines[0] ?? null;
+    const serverRegistrationTarget = serverSipRegistrationTarget(telephonyConfig, activeVoiceGatewayLine);
+    const sipAccount = serverSipAccount(telephonyConfig, activeVoiceGatewayLine);
+    const registrationLabel = customerRegistrationLabel(telephonyHealth, activeVoiceGatewayLine);
+    const registrationDetail = customerRegistrationDetail(telephonyHealth, activeVoiceGatewayLine);
     const deviceDiscoveryLabel = voiceGatewayDiscoveryLabel(asteriskSidecarStatus);
     const deviceDiscoveryDetail = voiceGatewayDiscoveryDetail(asteriskSidecarStatus);
     const discoveredGatewayAddress =
@@ -6292,6 +6539,12 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     const totalIntentCount = outboundTasks.reduce((sum, task) => sum + task.intentCount, 0);
     const latestTask = outboundTasks[0];
     const latestCall = callRecords[0];
+    const liveState = realtimeLiveEvents.state;
+    const latestLiveEvents = [...realtimeLiveEvents.events.slice(-6)].reverse();
+    const latestLiveAt = realtimeLiveEvents.latestAt
+      ? new Date(realtimeLiveEvents.latestAt).toLocaleString("zh-CN", { hour12: false })
+      : "等待事件";
+    const latestTurnLatency = liveState?.latestTurnResponseMs != null ? `${liveState.latestTurnResponseMs} ms` : "等待统计";
 
     return (
       <>
@@ -6320,6 +6573,86 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
             </section>
 
             <section className="content-grid lower">
+              <article className="panel span-2 outbound-voice-panel">
+                <div className="panel-title">
+                  <div>
+                    <p>外呼语音</p>
+                    <h2>当前音色与语音包</h2>
+                  </div>
+                  <Radio size={22} />
+                </div>
+                <div className="line-health-grid">
+                  <div>
+                    <span>默认音色</span>
+                    <strong>{activeRealtimeVoiceOption?.label ?? activeSystemVoice?.name ?? voiceOverview.defaultVoice}</strong>
+                  </div>
+                  <div>
+                    <span>音色类型</span>
+                    <strong>{activeRealtimeVoiceOption?.selection.voiceType === "clone" ? "复刻音色" : "系统音色"}</strong>
+                  </div>
+                  <div>
+                    <span>语音包</span>
+                    <strong>{voiceCacheStatus.displayName || "未导入"}</strong>
+                  </div>
+                  <div>
+                    <span>启用状态</span>
+                    <strong>{voiceCacheStatus.enabled ? "正在用于外呼" : "未启用"}</strong>
+                  </div>
+                </div>
+                <div className={voiceCacheStatus.enabled ? "voice-cache-panel is-enabled" : "voice-cache-panel"}>
+                  <div className="voice-cache-head">
+                    <div>
+                      <span>外呼语音包</span>
+                      <strong>{voiceCacheStatus.displayName || "未导入语音包"}</strong>
+                    </div>
+                    <em>
+                      {voiceCacheStatus.enabled && voiceCacheStatus.manifestLoaded
+                        ? "正在用于外呼"
+                        : voiceCacheStatus.manifestLoaded
+                        ? "已导入未启用"
+                        : "未导入"}
+                    </em>
+                  </div>
+                  <div className="profile-grid voice-cache-grid">
+                    <div>
+                      <span>音频数量</span>
+                      <strong>{voiceCacheStatus.itemCount}</strong>
+                    </div>
+                    <div>
+                      <span>意图映射</span>
+                      <strong>{voiceCacheStatus.intentCount}</strong>
+                    </div>
+                    <div>
+                      <span>版本</span>
+                      <strong>{voiceCacheStatus.assetVersion || "未读取"}</strong>
+                    </div>
+                    <div>
+                      <span>匹配阈值</span>
+                      <strong>{Math.round(voiceCacheStatus.minConfidence * 100)}%</strong>
+                    </div>
+                  </div>
+                  <div className="voice-default-actions voice-cache-actions">
+                    <button
+                      className={voiceCacheStatus.enabled ? "row-action" : "row-action is-primary"}
+                      disabled={isSavingVoiceCache || !voiceCacheStatus.manifestLoaded || voiceCacheStatus.itemCount <= 0}
+                      onClick={() => void updateVoiceCachePreference(!voiceCacheStatus.enabled)}
+                      type="button"
+                    >
+                      {isSavingVoiceCache
+                        ? "保存中"
+                        : voiceCacheStatus.enabled
+                        ? "停用语音包"
+                        : "启用为外呼语音包"}
+                    </button>
+                    {!outboundLocked && (
+                      <button className="row-action" onClick={() => setActiveModule("voice")} type="button">
+                        打开声音档案
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </article>
+
               <article className="panel">
                 <div className="panel-title">
                   <div>
@@ -6347,6 +6680,112 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                       <span>最近检测</span>
                       <strong>{routeCheckedAt}</strong>
                     </div>
+                  </div>
+                </div>
+                <form className="form-grid line-overview-test-form" onSubmit={submitTelephonyTestCall}>
+                  <label>
+                    单号试拨号码
+	                    <input
+	                      inputMode="tel"
+	                      placeholder="请输入测试手机号"
+	                      value={telephonyTestForm.phone}
+	                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, phone: event.target.value })}
+	                    />
+	                  </label>
+	                  <label>
+	                    商户/店名
+	                    <input
+	                      placeholder="如：青岚美甲工作室"
+	                      value={telephonyTestForm.callerId}
+	                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, callerId: event.target.value })}
+	                    />
+	                  </label>
+	                  <label>
+	                    实时路线
+	                    <select
+	                      value={telephonyTestForm.conversationRoute}
+	                      onChange={(event) =>
+	                        setTelephonyTestForm({
+                          ...telephonyTestForm,
+                          conversationRoute:
+                            event.target.value === "pipeline"
+                              ? "pipeline"
+                              : event.target.value === "omni"
+                                ? "omni"
+                                : "livekit",
+                        })
+                      }
+                    >
+                      <option value="livekit">LiveKit Agent 外呼</option>
+                      <option value="omni">千问 Omni 实时语音</option>
+                      <option value="pipeline">分段 Pipeline</option>
+                    </select>
+                  </label>
+                  <div className="button-row">
+                    <button className="secondary-button" disabled={isCheckingTelephony} onClick={() => void refreshTelephonyStatus()} type="button">
+                      <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
+                      {isCheckingTelephony ? "检查中" : "检查线路"}
+                    </button>
+                    <button className="primary-button" disabled={isTestingTelephony} type="submit">
+                      <PhoneCall size={16} />
+                      {isTestingTelephony ? "试拨中" : "单号试拨"}
+                    </button>
+                  </div>
+                  <p className="form-result wide" aria-live="polite">{telephonyMessage}</p>
+                </form>
+                <div className="telephony-live-monitor">
+                  <div className="telephony-live-monitor-head">
+                    <div>
+                      <span>单号试拨实时监控</span>
+                      <strong>{liveState?.phaseLabel ?? realtimeLiveStatusText(liveState?.status)}</strong>
+                    </div>
+                    <button className="row-action" disabled={isRefreshingRealtimeEvents} onClick={() => void refreshRealtimeLiveEvents(false)} type="button">
+                      <RefreshCw size={15} className={isRefreshingRealtimeEvents ? "spin" : ""} />
+                      刷新状态
+                    </button>
+                  </div>
+                  <div className="line-health-grid telephony-live-state-grid">
+                    <div>
+                      <span>通话状态</span>
+                      <strong>{liveState?.label ?? "等待单号试拨"}</strong>
+                      <small>{latestLiveAt}</small>
+                    </div>
+                    <div>
+                      <span>真人语音</span>
+                      <strong>{liveState?.humanSpeechConfirmed ? "已确认" : "待确认"}</strong>
+                      <small>{liveState?.lastCustomerText || "等待客户说话"}</small>
+                    </div>
+                    <div>
+                      <span>AI 播放</span>
+                      <strong>{liveState?.aiSpeechConfirmed ? "已播放" : "待播放"}</strong>
+                      <small>{liveState?.lastAiReply || "等待 AI 回复"}</small>
+                    </div>
+                    <div>
+                      <span>最近响应</span>
+                      <strong>{latestTurnLatency}</strong>
+                      <small>{realtimeLiveStatusText(liveState?.turnTakingStatus)}</small>
+                    </div>
+                  </div>
+                  {liveState?.issues?.length ? (
+                    <div className="telephony-live-issues">
+                      {liveState.issues.slice(0, 2).map((issue) => (
+                        <span key={issue}>{issue}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="realtime-event-list telephony-live-events">
+                    {latestLiveEvents.length === 0 && <div className="empty-state compact">暂无单号试拨实时事件。</div>}
+                    {latestLiveEvents.map((event) => (
+                      <div className="timeline-item" key={event.id}>
+                        <span>{event.callId ? event.callId.slice(0, 8) : "bridge"}</span>
+                        <strong>{realtimeLiveEventTitle(event.type)}</strong>
+                        <p>{event.reply || event.text || event.detail || "等待下一步事件"}</p>
+                        <small>
+                          {event.at ? new Date(event.at).toLocaleString("zh-CN", { hour12: false }) : "无时间"}
+                          {event.latencyMs ? ` · ${event.latencyMs} ms` : ""}
+                        </small>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </article>
@@ -6573,7 +7012,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                   </div>
                   <div>
                     <span>SIP账号</span>
-                    <strong>{telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}</strong>
+                    <strong>{sipAccount}</strong>
                     <small>鉴权密码由交付人员配置，不在客户前端展示。</small>
                   </div>
                 </div>
@@ -6602,7 +7041,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     </div>
                     <div>
                       <span>SIP 注册</span>
-                      <strong>{serverSipRegistrationTarget(telephonyConfig)}</strong>
+                      <strong>{serverRegistrationTarget}</strong>
                     </div>
                     <div>
                       <span>交付设备</span>
@@ -6730,7 +7169,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     <span>{telephonyConfig.asteriskDeploymentMode === "server" ? "UC100 注册目标" : "当前绑定"}</span>
                     <strong>
                       {telephonyConfig.asteriskDeploymentMode === "server"
-                        ? serverSipRegistrationTarget(telephonyConfig)
+                        ? serverRegistrationTarget
                         : asteriskSidecarStatus?.customerDelivery?.gatewayAddress ||
                           `${telephonyConfig.voiceGatewayProfile.host}:${telephonyConfig.voiceGatewayProfile.sipPort}`}
                     </strong>
@@ -6739,9 +7178,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     <span>自动匹配</span>
                     <strong>
                       {telephonyConfig.asteriskDeploymentMode === "server"
-                        ? telephonyHealth.trunkReachable
-                          ? "已注册"
-                          : "待注册"
+                        ? registrationLabel
                         : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "updated"
                         ? "已重绑"
                         : asteriskSidecarStatus?.customerDelivery?.discoveryStatus === "current"
@@ -6757,9 +7194,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     <span>{telephonyConfig.asteriskDeploymentMode === "server" ? "设备注册状态" : "上一地址"}</span>
                     <strong>
                       {telephonyConfig.asteriskDeploymentMode === "server"
-                        ? telephonyHealth.trunkReachable
-                          ? "已注册到云端"
-                          : "未收到注册"
+                        ? registrationDetail
                         : asteriskSidecarStatus?.customerDelivery?.previousGatewayAddress || "无变更"}
                     </strong>
                   </div>
@@ -6767,8 +7202,8 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                 <div className="customer-delivery-actions">
                   {(telephonyConfig.asteriskDeploymentMode === "server"
                     ? [
-                        `在 ${telephonyConfig.voiceGatewayProfile.label} 后台把 SIP Server/Registrar 指向 ${serverSipRegistrationTarget(telephonyConfig)}。`,
-                        `SIP 用户名/鉴权账号使用 ${telephonyConfig.voiceGatewayProfile.trunkName || telephonyConfig.asteriskTrunkName}；密码由交付人员在服务器端配置。`,
+                        `在 ${telephonyConfig.voiceGatewayProfile.label} 后台把 SIP Server/Registrar 指向 ${serverRegistrationTarget}。`,
+                        `SIP 用户名/鉴权账号使用 ${sipAccount}；密码使用当前线路下发的 SIP 密码。`,
                         "单号试拨必须确认蜂窝侧、媒体链路和 AI 首句。",
                         "批量真实外呼保持关闭，直到单号验证稳定。",
                       ]
@@ -6867,6 +7302,89 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     </div>
                   ))}
                 </div>
+              </div>
+              <div className="line-preflight telephony-test-card">
+                <div className="line-preflight-header">
+                  <div>
+                    <span>单号试拨验收</span>
+                    <strong>先拨一个测试号码，再启动批量任务</strong>
+                  </div>
+                  <small>{telephonyTestResult ? telephonyVerificationStageText(telephonyTestResult) : "待试拨"}</small>
+                </div>
+                <form className="form-grid telephony-test-form" onSubmit={submitTelephonyTestCall}>
+                  <label>
+                    试拨号码
+                    <input
+                      inputMode="tel"
+                      placeholder="请输入测试手机号"
+                      value={telephonyTestForm.phone}
+                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, phone: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    商户/店名
+                    <input
+                      placeholder="如：青岚美甲工作室"
+                      value={telephonyTestForm.callerId}
+                      onChange={(event) => setTelephonyTestForm({ ...telephonyTestForm, callerId: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    实时路线
+                    <select
+                      value={telephonyTestForm.conversationRoute}
+                      onChange={(event) =>
+                        setTelephonyTestForm({
+                          ...telephonyTestForm,
+                          conversationRoute:
+                            event.target.value === "pipeline"
+                              ? "pipeline"
+                              : event.target.value === "omni"
+                                ? "omni"
+                                : "livekit",
+                        })
+                      }
+                    >
+                      <option value="livekit">LiveKit Agent 外呼</option>
+                      <option value="omni">千问 Omni 实时语音</option>
+                      <option value="pipeline">分段 Pipeline</option>
+                    </select>
+                  </label>
+                  <div className="button-row">
+                    <button className="secondary-button" disabled={isCheckingTelephony} onClick={() => void refreshTelephonyStatus()} type="button">
+                      <RefreshCw size={16} className={isCheckingTelephony ? "spin" : ""} />
+                      {isCheckingTelephony ? "检查中" : "检查线路"}
+                    </button>
+                    <button className="primary-button" disabled={isTestingTelephony} type="submit">
+                      <PhoneCall size={16} />
+                      {isTestingTelephony ? "试拨中" : "单号试拨"}
+                    </button>
+                  </div>
+                </form>
+                <p className="form-result" aria-live="polite">{telephonyMessage}</p>
+                {telephonyTestResult && (
+                  <div className="line-health-grid">
+                    <div>
+                      <span>提交状态</span>
+                      <strong>{telephonyTestResult.accepted ? "已提交" : "失败"}</strong>
+                    </div>
+                    <div>
+                      <span>媒体链路</span>
+                      <strong>{telephonyTestResult.mediaLoopConfirmed ? "已确认" : "待确认"}</strong>
+                    </div>
+                    <div>
+                      <span>真人语音</span>
+                      <strong>{telephonyTestResult.humanSpeechConfirmed ? "已识别" : "待识别"}</strong>
+                    </div>
+                    <div>
+                      <span>AI首句</span>
+                      <strong>{telephonyTestResult.aiSpeechConfirmed ? "已播放" : "待确认"}</strong>
+                    </div>
+                  </div>
+                )}
+                {telephonyTestPayloadSummary(telephonyTestResult) && (
+                  <code className="telephony-test-payload">{telephonyTestPayloadSummary(telephonyTestResult)}</code>
+                )}
               </div>
               {telephonyTestResult?.cellularDiagnostic && (
                 <div className={`cellular-diagnostic is-${telephonyTestResult.cellularDiagnostic.status}`}>
@@ -7008,10 +7526,13 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                     onChange={(event) => setOutboundForm({ ...outboundForm, scheduledAt: event.target.value })}
                   />
                 </label>
-                <button className="primary-button" disabled={selectedCallableLeadIds.length === 0} type="submit">
+                <button className="primary-button" type="submit">
                   <Plus size={16} />
                   创建外呼任务
                 </button>
+                <p className="form-result wide" aria-live="polite">
+                  {outboundTaskMessage}
+                </p>
               </form>
 
               <div className="lead-picker">
@@ -7027,7 +7548,6 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                 </div>
                 <LeadTable leads={callableLeads} selectable selectedLeadIds={selectedLeadIds} onToggleLead={toggleLead} />
               </div>
-              <p className="form-result">{outboundTaskMessage}</p>
             </article>
 
             <article className="panel">

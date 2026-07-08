@@ -34,9 +34,15 @@ class RuntimeAiConfig:
     deepseek_max_tokens: int
     deepseek_stream_first_sentence: bool
     realtime_asr_model: str
+    realtime_tts_voice_id: str
+    realtime_tts_voice_name: str
+    realtime_tts_voice_type: str
     realtime_conversation_mode: str
     realtime_llm_timeout_seconds: float
     realtime_reply_max_chars: int
+    realtime_voice_cache_enabled: bool
+    realtime_voice_cache_dir: str
+    realtime_voice_cache_min_confidence: float
     voice_clone_provider: str
     voice_clone_training_enabled: bool
     voice_clone_engine_name: str
@@ -67,9 +73,15 @@ MODEL_SETTING_MAP = {
     "deepseek_max_tokens": "deepseek_max_tokens",
     "deepseek_stream_first_sentence": "deepseek_stream_first_sentence",
     "realtime_asr_model": "realtime_asr_model",
+    "realtime_tts_voice_id": "realtime_tts_voice_id",
+    "realtime_tts_voice_name": "realtime_tts_voice_name",
+    "realtime_tts_voice_type": "realtime_tts_voice_type",
     "realtime_conversation_mode": "realtime_conversation_mode",
     "realtime_llm_timeout_seconds": "realtime_llm_timeout_seconds",
     "realtime_reply_max_chars": "realtime_reply_max_chars",
+    "realtime_voice_cache_enabled": "realtime_voice_cache_enabled",
+    "realtime_voice_cache_dir": "realtime_voice_cache_dir",
+    "realtime_voice_cache_min_confidence": "realtime_voice_cache_min_confidence",
     "voice_clone_provider": "voice_clone_provider",
     "voice_clone_training_enabled": "voice_clone_training_enabled",
     "voice_clone_engine_name": "voice_clone_engine_name",
@@ -119,9 +131,27 @@ def get_runtime_ai_config() -> RuntimeAiConfig:
             settings.deepseek_stream_first_sentence,
         ),
         realtime_asr_model=_str(overrides, "realtime_asr_model", settings.realtime_asr_model),
+        realtime_tts_voice_id=_str(overrides, "realtime_tts_voice_id", settings.realtime_tts_voice_id),
+        realtime_tts_voice_name=_str(overrides, "realtime_tts_voice_name", settings.realtime_tts_voice_name),
+        realtime_tts_voice_type=_str(overrides, "realtime_tts_voice_type", settings.realtime_tts_voice_type),
         realtime_conversation_mode=_str(overrides, "realtime_conversation_mode", settings.realtime_conversation_mode),
         realtime_llm_timeout_seconds=_float(overrides, "realtime_llm_timeout_seconds", settings.realtime_llm_timeout_seconds),
         realtime_reply_max_chars=_int(overrides, "realtime_reply_max_chars", settings.realtime_reply_max_chars),
+        realtime_voice_cache_enabled=_bool(
+            overrides,
+            "realtime_voice_cache_enabled",
+            settings.realtime_voice_cache_enabled,
+        ),
+        realtime_voice_cache_dir=_str(
+            overrides,
+            "realtime_voice_cache_dir",
+            settings.realtime_voice_cache_dir,
+        ),
+        realtime_voice_cache_min_confidence=_float(
+            overrides,
+            "realtime_voice_cache_min_confidence",
+            settings.realtime_voice_cache_min_confidence,
+        ),
         voice_clone_provider=_str(overrides, "voice_clone_provider", settings.voice_clone_provider),
         voice_clone_training_enabled=_bool(overrides, "voice_clone_training_enabled", settings.voice_clone_training_enabled),
         voice_clone_engine_name=_str(overrides, "voice_clone_engine_name", settings.voice_clone_engine_name),

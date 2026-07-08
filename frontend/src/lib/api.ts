@@ -475,9 +475,9 @@ export type TelephonyTestCallResult = {
   accepted: boolean;
   actionId: string;
   channel: string;
-  requestedRoute: "pipeline" | "omni" | string;
-  actualBridgeRoute: "pipeline" | "omni" | string;
-  effectiveRoute: "pipeline" | "omni" | string;
+  requestedRoute: "pipeline" | "omni" | "livekit" | string;
+  actualBridgeRoute: "pipeline" | "omni" | "livekit" | string;
+  effectiveRoute: "pipeline" | "omni" | "livekit" | string;
   routeFallbackReason: string;
   routeMatched: boolean;
   gatewayStatus: string;
@@ -507,7 +507,7 @@ export type RealtimePipelineStep = {
 };
 
 export type RealtimeRouteOption = {
-  key: "pipeline" | "omni";
+  key: "pipeline" | "omni" | "livekit";
   label: string;
   mode: string;
   summary: string;
@@ -518,7 +518,7 @@ export type RealtimeRouteOption = {
 };
 
 export type RealtimeRouteBenchmark = {
-  key: "pipeline" | "omni" | string;
+  key: "pipeline" | "omni" | "livekit" | string;
   label: string;
   status: "pass" | "warn" | "fail" | string;
   qualityScore: number;
@@ -533,7 +533,7 @@ export type RealtimeRouteBenchmark = {
 };
 
 export type RealtimeRouteBenchmarkReport = {
-  recommendedRoute: "pipeline" | "omni" | string;
+  recommendedRoute: "pipeline" | "omni" | "livekit" | string;
   status: "pass" | "warn" | "fail" | string;
   summary: string;
   lowCostFirst: boolean;
@@ -560,8 +560,8 @@ export type RealtimePipeline = {
   estimatedAiCostPerMinute: number;
   readyForMockCall: boolean;
   readyForAsteriskMedia: boolean;
-  configuredRoute: "pipeline" | "omni" | string;
-  actualBridgeRoute: "pipeline" | "omni" | string;
+  configuredRoute: "pipeline" | "omni" | "livekit" | string;
+  actualBridgeRoute: "pipeline" | "omni" | "livekit" | string;
   routeMatched: boolean;
   nextStep: string;
   routeOptions: RealtimeRouteOption[];
@@ -575,6 +575,7 @@ export type RealtimeVoiceSelection = {
   voiceName: string;
   voiceType: string;
   provider: string;
+  voiceParam?: string | null;
   externalVoiceId?: string | null;
 };
 
@@ -1121,6 +1122,32 @@ export type SystemVoicePreview = {
   message: string;
 };
 
+export type VoiceDefaultSelection = {
+  voiceId: string;
+  voiceName: string;
+  voiceType: "system" | "clone" | string;
+  provider: string;
+  voiceParam?: string | null;
+  externalVoiceId?: string | null;
+};
+
+export type VoiceDefaultSelectionResult = VoiceDefaultSelection & {
+  message: string;
+  effectiveWithoutRestart: boolean;
+};
+
+export type VoiceCacheStatus = {
+  enabled: boolean;
+  root: string;
+  profile: string;
+  displayName: string;
+  assetVersion: string;
+  manifestLoaded: boolean;
+  itemCount: number;
+  intentCount: number;
+  minConfidence: number;
+};
+
 export type VoiceProviderStatus = {
   provider: string;
   configured: boolean;
@@ -1516,7 +1543,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  createTelephonyTestCall: (payload: { phone: string; callerId?: string | null; conversationRoute?: "pipeline" | "omni" }) =>
+  createTelephonyTestCall: (payload: {
+    phone: string;
+    callerId?: string | null;
+    merchantName?: string | null;
+    conversationRoute?: "pipeline" | "omni" | "livekit";
+  }) =>
     request<TelephonyTestCallResult>("/outbound/telephony/test-call", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -1535,7 +1567,7 @@ export const api = {
     merchantName: string;
     phone?: string | null;
     voice: RealtimeVoiceSelection;
-    conversationRoute?: "pipeline" | "omni";
+    conversationRoute?: "pipeline" | "omni" | "livekit";
   }) =>
     request<RealtimeSession>("/outbound/realtime/sessions", {
       method: "POST",
@@ -1732,6 +1764,18 @@ export const api = {
   voiceProviderStatus: (probe = false) => request<VoiceProviderStatus>(`/voice/provider/status${probe ? "?probe=true" : ""}`),
   systemVoices: () => request<SystemVoice[]>("/voice/system-voices"),
   systemVoicePreview: (voiceId: string) => request<SystemVoicePreview>(`/voice/system-voices/${voiceId}/preview`, { method: "POST" }),
+  voiceCacheStatus: () => request<VoiceCacheStatus>("/voice/cache/status"),
+  saveVoiceCacheStatus: (payload: { enabled: boolean }) =>
+    request<VoiceCacheStatus>("/voice/cache/status", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  defaultVoice: () => request<VoiceDefaultSelectionResult>("/voice/default-voice"),
+  saveDefaultVoice: (payload: VoiceDefaultSelection) =>
+    request<VoiceDefaultSelectionResult>("/voice/default-voice", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   voiceProfiles: () => request<VoiceProfile[]>("/voice/profiles"),
   createVoiceProfile: (profile: Omit<VoiceProfile, "id" | "createdAt" | "updatedAt">) =>
     request<VoiceProfile>("/voice/profiles", {

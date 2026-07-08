@@ -198,7 +198,8 @@ class TelephonyPreflightRead(BaseModel):
 class TelephonyTestCallCreate(BaseModel):
     phone: Annotated[str, Field(min_length=3, max_length=40)]
     caller_id: Annotated[str | None, Field(alias="callerId")] = None
-    conversation_route: Annotated[str | None, Field(alias="conversationRoute", pattern="^(pipeline|omni)$")] = None
+    merchant_name: Annotated[str | None, Field(alias="merchantName", max_length=120)] = None
+    conversation_route: Annotated[str | None, Field(alias="conversationRoute", pattern="^(pipeline|omni|livekit)$")] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -344,7 +345,7 @@ class RealtimeSessionCreate(BaseModel):
     merchant_name: Annotated[str, Field(alias="merchantName", min_length=1, max_length=120)] = "模拟商家"
     phone: Annotated[str | None, Field(max_length=40)] = None
     voice: RealtimeVoiceSelection
-    conversation_route: Annotated[str, Field(alias="conversationRoute", pattern="^(pipeline|omni)$")] = "pipeline"
+    conversation_route: Annotated[str, Field(alias="conversationRoute", pattern="^(pipeline|omni|livekit)$")] = "pipeline"
 
     model_config = ConfigDict(populate_by_name=True)
 

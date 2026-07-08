@@ -12,3 +12,5 @@ websocket-client==1.9.0
 redis==6.4.0
 python-multipart==0.0.32
 dashscope==1.26.0
+livekit-agents==1.6.4
+livekit-plugins-openai==1.6.4

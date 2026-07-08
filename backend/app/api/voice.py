@@ -11,8 +11,14 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.growth import VoiceCloneRecord, VoiceProfile, VoiceSample, VoiceTrainingJob, VoiceUsageRecord
+from app.models.operations import SystemSetting
 from app.schemas.voice import (
+    VoiceCacheLibraryRead,
+    VoiceCachePreferenceUpdate,
+    VoiceCacheStatusRead,
     VoiceCloneRecordRead,
+    VoiceDefaultSelection,
+    VoiceDefaultSelectionRead,
     VoiceOverview,
     VoiceProfileCreate,
     VoiceProfileRead,
@@ -31,8 +37,13 @@ from app.services.dashscope_voice import (
     dashscope_provider_status,
     synthesize_qwen_system_voice_preview,
 )
+from app.services.runtime_ai_config import get_runtime_ai_config
+from app.services.realtime_voice_cache import voice_cache_item_audio_path, voice_cache_library, voice_cache_status
 
 router = APIRouter()
+
+QWEN35_OMNI_DEFAULT_VOICE = "Tina"
+QWEN35_OMNI_UNSUPPORTED_TTS_VOICES = {"Cherry"}
 
 QWEN_TTS_PRESET_VOICES = [
     ("Cherry", "芊悦", "阳光积极、亲切自然小姐姐（女性）", "女声", "自然对话", "客服外呼"),
@@ -120,6 +131,15 @@ ALLOWED_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".web
 MOCK_VOICE_ENGINE = "mock-voice-engine"
 DEFAULT_REAL_CLONE_ENGINE = "真实声音克隆服务"
 
+VOICE_MODEL_SETTING_META = {
+    "dashscope_realtime_tts_voice": ("实时系统音色", "Pipeline 系统音色 voice 参数。"),
+    "dashscope_omni_realtime_voice": ("Qwen Omni 系统音色", "Omni 线路默认系统音色。"),
+    "realtime_tts_voice_id": ("默认外呼 voice_id", "声音档案选择的默认外呼音色 ID。"),
+    "realtime_tts_voice_name": ("默认外呼音色名称", "声音档案选择的默认外呼音色展示名称。"),
+    "realtime_tts_voice_type": ("默认外呼音色类型", "system 为系统音色，clone 为复刻音色。"),
+    "realtime_voice_cache_enabled": ("外呼语音包开关", "启用后外呼会优先命中已导入的固定话术语音包。"),
+}
+
 
 def _is_system_profile(profile: VoiceProfile) -> bool:
     return profile.authorization_status == "系统内置" or profile.owner_name == "系统"
@@ -170,6 +190,102 @@ def _voice_clone_engine_name() -> str:
 
 def _voice_clone_training_ready() -> bool:
     return dashscope_provider_status(probe=False).ready
+
+
+def _normalize_qwen_voice_param(voice_value: str) -> str:
+    value = (voice_value or "").strip()
+    lower = value.lower()
+    if lower.startswith("qwen_tts_"):
+        value = value[len("qwen_tts_") :]
+        return " ".join(part.capitalize() for part in value.replace("-", "_").split("_") if part) or "Ethan"
+    return value or "Ethan"
+
+
+def _system_voice_for_value(voice_value: str) -> dict[str, str | bool] | None:
+    normalized = _normalize_qwen_voice_param(voice_value)
+    return next(
+        (
+            voice
+            for voice in SYSTEM_VOICES
+            if str(voice["id"]) == voice_value
+            or str(voice["voiceParam"]).lower() == normalized.lower()
+            or str(voice["voiceParam"]).lower() == voice_value.lower()
+        ),
+        None,
+    )
+
+
+def _current_system_voice() -> dict[str, str | bool]:
+    runtime_config = get_runtime_ai_config()
+    return _system_voice_for_value(runtime_config.dashscope_realtime_tts_voice) or DEFAULT_SYSTEM_VOICE
+
+
+def _current_default_voice_selection(db: Session) -> dict[str, str | bool | None]:
+    runtime_config = get_runtime_ai_config()
+    voice_type = (runtime_config.realtime_tts_voice_type or "system").strip().lower()
+    if voice_type in {"clone", "cloned", "voice_clone"} and runtime_config.realtime_tts_voice_id:
+        record = db.scalar(
+            select(VoiceCloneRecord)
+            .where(VoiceCloneRecord.external_voice_id == runtime_config.realtime_tts_voice_id)
+            .order_by(VoiceCloneRecord.completed_at.desc(), VoiceCloneRecord.created_at.desc())
+        )
+        voice_name = runtime_config.realtime_tts_voice_name or (record.cloned_voice_name if record else runtime_config.realtime_tts_voice_id)
+        return {
+            "voiceId": record.id if record else runtime_config.realtime_tts_voice_id,
+            "voiceName": voice_name,
+            "voiceType": "clone",
+            "provider": record.engine if record else DEFAULT_REAL_CLONE_ENGINE,
+            "voiceParam": None,
+            "externalVoiceId": runtime_config.realtime_tts_voice_id,
+            "message": f"当前默认外呼音色为复刻音色「{voice_name}」。",
+            "effectiveWithoutRestart": True,
+        }
+    voice = _system_voice_for_value(runtime_config.realtime_tts_voice_id or runtime_config.dashscope_realtime_tts_voice) or DEFAULT_SYSTEM_VOICE
+    return {
+        "voiceId": str(voice["id"]),
+        "voiceName": str(voice["name"]),
+        "voiceType": "system",
+        "provider": str(voice["provider"]),
+        "voiceParam": str(voice["voiceParam"]),
+        "externalVoiceId": str(voice["voiceParam"]),
+        "message": f"当前默认外呼音色为系统音色「{voice['name']}」。",
+        "effectiveWithoutRestart": True,
+    }
+
+
+def _system_voices_with_current_default() -> list[dict[str, str | bool]]:
+    current_voice = _current_system_voice()
+    current_param = str(current_voice["voiceParam"]).lower()
+    return [
+        {
+            **voice,
+            "isDefault": str(voice["voiceParam"]).lower() == current_param,
+        }
+        for voice in SYSTEM_VOICES
+    ]
+
+
+def _upsert_model_setting(db: Session, item_key: str, value: str, *, updated_by: str = "声音档案") -> SystemSetting:
+    label, description = VOICE_MODEL_SETTING_META.get(item_key, (item_key, "声音档案自动写入的模型配置。"))
+    setting = db.scalar(
+        select(SystemSetting).where(SystemSetting.group_key == "model", SystemSetting.item_key == item_key)
+    )
+    if not setting:
+        setting = SystemSetting(
+            group_key="model",
+            item_key=item_key,
+            label=label,
+            value_type="text",
+            description=description,
+        )
+        db.add(setting)
+    setting.label = setting.label or label
+    setting.value = value
+    setting.status = "已配置" if value else "待配置"
+    setting.description = setting.description or description
+    setting.updated_by = updated_by
+    setting.updated_at = datetime.utcnow()
+    return setting
 
 
 def _voice_clone_status() -> dict[str, str | bool]:
@@ -230,6 +346,7 @@ def _seed_voice_assets(db: Session) -> None:
 @router.get("/overview", response_model=VoiceOverview)
 def voice_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     _seed_voice_assets(db)
+    default_voice = _current_system_voice()
     profiles = db.scalar(select(func.count()).select_from(VoiceProfile).where(_clone_profile_filter())) or 0
     usable = (
         db.scalar(select(func.count()).select_from(VoiceProfile).where(_clone_profile_filter(), VoiceProfile.status == "可用"))
@@ -262,14 +379,14 @@ def voice_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "usageRecords": int(usage),
         "fallbackUsage": int(fallback),
         "systemVoices": len(SYSTEM_VOICES),
-        "defaultVoice": DEFAULT_SYSTEM_VOICE["name"],
+        "defaultVoice": default_voice["name"],
         **_voice_clone_status(),
     }
 
 
 @router.get("/system-voices", response_model=list[SystemVoiceRead])
 def list_system_voices() -> list[dict[str, str | bool]]:
-    return SYSTEM_VOICES
+    return _system_voices_with_current_default()
 
 
 @router.post("/system-voices/{voice_id}/preview", response_model=SystemVoicePreviewRead)
@@ -296,6 +413,106 @@ def preview_system_voice(voice_id: str) -> dict[str, str]:
 @router.get("/provider/status", response_model=VoiceProviderStatusRead)
 def voice_provider_status(probe: bool = Query(False)) -> object:
     return dashscope_provider_status(probe=probe)
+
+
+@router.get("/cache/status", response_model=VoiceCacheStatusRead)
+def read_voice_cache_status() -> dict[str, object]:
+    return voice_cache_status()
+
+
+@router.post("/cache/status", response_model=VoiceCacheStatusRead)
+def update_voice_cache_status(payload: VoiceCachePreferenceUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    current = voice_cache_status()
+    if payload.enabled and (not current.get("manifestLoaded") or not current.get("itemCount")):
+        raise HTTPException(status_code=400, detail="语音包还没有导入成功，不能启用为外呼语音包。")
+    _upsert_model_setting(
+        db,
+        "realtime_voice_cache_enabled",
+        "true" if payload.enabled else "false",
+        updated_by="声音档案",
+    )
+    db.commit()
+    return voice_cache_status()
+
+
+@router.get("/cache/library", response_model=VoiceCacheLibraryRead)
+def read_voice_cache_library(limit: int = Query(100, ge=1, le=500)) -> dict[str, object]:
+    return voice_cache_library(limit=limit)
+
+
+@router.get("/cache/items/{seq}/file")
+def read_voice_cache_item_file(seq: str) -> FileResponse:
+    path = voice_cache_item_audio_path(seq)
+    if not path:
+        raise HTTPException(status_code=404, detail="语音包素材不存在")
+    return FileResponse(path, media_type="audio/wav", filename=path.name)
+
+
+@router.get("/default-voice", response_model=VoiceDefaultSelectionRead)
+def read_default_voice(db: Session = Depends(get_db)) -> dict[str, str | bool | None]:
+    return _current_default_voice_selection(db)
+
+
+def _compatible_omni_voice_for_default_system_voice(voice_param: str) -> str:
+    runtime_config = get_runtime_ai_config()
+    if "qwen3.5-omni" in runtime_config.dashscope_omni_realtime_model.strip().lower():
+        return QWEN35_OMNI_DEFAULT_VOICE if voice_param in QWEN35_OMNI_UNSUPPORTED_TTS_VOICES else voice_param
+    return voice_param
+
+
+@router.post("/default-voice", response_model=VoiceDefaultSelectionRead)
+def save_default_voice(payload: VoiceDefaultSelection, db: Session = Depends(get_db)) -> dict[str, str | bool | None]:
+    voice_type = payload.voice_type.strip().lower()
+    if voice_type in {"clone", "cloned", "voice_clone"}:
+        external_voice_id = (payload.external_voice_id or payload.voice_id or "").strip()
+        if not external_voice_id:
+            raise HTTPException(status_code=400, detail="复刻音色缺少 voice_id，不能设为默认。")
+        record = db.scalar(
+            select(VoiceCloneRecord)
+            .where(VoiceCloneRecord.external_voice_id == external_voice_id)
+            .order_by(VoiceCloneRecord.completed_at.desc(), VoiceCloneRecord.created_at.desc())
+        )
+        if not record:
+            record = db.get(VoiceCloneRecord, payload.voice_id)
+        if record and record.status != "可用":
+            raise HTTPException(status_code=400, detail="这个复刻音色还不可用，不能设为默认。")
+        voice_name = payload.voice_name.strip() or (record.cloned_voice_name if record else external_voice_id)
+        _upsert_model_setting(db, "realtime_tts_voice_id", external_voice_id)
+        _upsert_model_setting(db, "realtime_tts_voice_name", voice_name)
+        _upsert_model_setting(db, "realtime_tts_voice_type", "clone")
+        db.commit()
+        return {
+            "voiceId": payload.voice_id,
+            "voiceName": voice_name,
+            "voiceType": "clone",
+            "provider": payload.provider or (record.engine if record else DEFAULT_REAL_CLONE_ENGINE),
+            "voiceParam": None,
+            "externalVoiceId": external_voice_id,
+            "message": f"已把复刻音色「{voice_name}」设为默认外呼音色，下一通电话自动生效。",
+            "effectiveWithoutRestart": True,
+        }
+
+    voice = _system_voice_for_value(payload.voice_param or payload.voice_id)
+    if not voice:
+        raise HTTPException(status_code=404, detail="系统音色不存在，请刷新声音档案后重试。")
+    voice_param = str(voice["voiceParam"])
+    voice_name = str(voice["name"])
+    _upsert_model_setting(db, "dashscope_realtime_tts_voice", voice_param)
+    _upsert_model_setting(db, "dashscope_omni_realtime_voice", _compatible_omni_voice_for_default_system_voice(voice_param))
+    _upsert_model_setting(db, "realtime_tts_voice_id", voice_param)
+    _upsert_model_setting(db, "realtime_tts_voice_name", voice_name)
+    _upsert_model_setting(db, "realtime_tts_voice_type", "system")
+    db.commit()
+    return {
+        "voiceId": str(voice["id"]),
+        "voiceName": voice_name,
+        "voiceType": "system",
+        "provider": str(voice["provider"]),
+        "voiceParam": voice_param,
+        "externalVoiceId": voice_param,
+        "message": f"已把系统音色「{voice_name}」设为默认外呼音色，下一通电话自动生效。",
+        "effectiveWithoutRestart": True,
+    }
 
 
 @router.get("/profiles", response_model=list[VoiceProfileRead])

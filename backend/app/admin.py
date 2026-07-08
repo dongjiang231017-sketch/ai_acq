@@ -1,4 +1,3 @@
-import os
 import re
 import subprocess
 from datetime import datetime
@@ -18,6 +17,7 @@ from starlette.responses import RedirectResponse, Response
 from wtforms import PasswordField
 from wtforms.validators import InputRequired, Optional
 
+from app.api.system_settings import _status_for_setting_value
 from app.core.config import settings
 from app.core.security import hash_password, verify_password
 from app.db.session import SessionLocal, engine
@@ -69,7 +69,9 @@ from app.services.voice_gateway_delivery import (
     VoiceGatewayRedeliveryError,
     find_redelivery_discovery_for_line,
     redeliver_voice_gateway_line,
+    resolve_asterisk_dynamic_pjsip_path,
 )
+from app.services.voice_gateway_local_match import match_local_voice_gateway_line
 from app.services.voice_gateway_profiles import PROFILE_DEFAULTS
 
 
@@ -82,7 +84,7 @@ DEFAULT_RTP_RANGE = "10000-20000/UDP"
 DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
 SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 ASTERISK_DYNAMIC_PJSIP_PATH = Path(
-    os.getenv("AI_ACQ_ASTERISK_DYNAMIC_PJSIP_PATH", "/etc/asterisk/pjsip_ai_acq_delivery_dynamic.conf")
+    resolve_asterisk_dynamic_pjsip_path()
 )
 PROFILE_CHANNEL_DEFAULTS = {
     "dinstar_8t_server": 8,
@@ -1572,6 +1574,87 @@ class SystemSettingAdmin(ModelView, model=SystemSetting):
         SystemSetting.updated_at: "更新时间",
     }
 
+    async def on_model_change(
+        self,
+        data: dict,
+        model: SystemSetting,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        data["status"] = _status_for_setting_value(
+            _admin_text(data.get("group_key") or getattr(model, "group_key", "")),
+            _admin_text(data.get("item_key") or getattr(model, "item_key", "")),
+            str(data.get("value") if data.get("value") is not None else getattr(model, "value", "")),
+        )
+        data["updated_by"] = _admin_text(request.session.get("admin_user")) or "后台管理员"
+
+
+class AiVoiceSettingAdmin(ModelView, model=SystemSetting):
+    name = "AI语音配置"
+    name_plural = "AI语音配置"
+    icon = "fa-solid fa-microphone-lines"
+
+    can_create = False
+    can_delete = False
+    column_list = [
+        SystemSetting.label,
+        SystemSetting.item_key,
+        SystemSetting.value,
+        SystemSetting.value_type,
+        SystemSetting.status,
+        SystemSetting.updated_by,
+        SystemSetting.updated_at,
+    ]
+    column_searchable_list = [SystemSetting.item_key, SystemSetting.label, SystemSetting.value]
+    column_sortable_list = [SystemSetting.item_key, SystemSetting.updated_at, SystemSetting.status]
+    column_default_sort = [(SystemSetting.item_key, False)]
+    form_include_columns = [
+        SystemSetting.value,
+        SystemSetting.description,
+    ]
+    form_widget_args = {
+        "value": {
+            "autocomplete": "off",
+            "placeholder": "在这里填写 API Key、模型名或开关值",
+        },
+        "description": {
+            "readonly": True,
+        },
+    }
+    column_labels = {
+        SystemSetting.label: "配置名称",
+        SystemSetting.item_key: "配置键",
+        SystemSetting.value: "当前值",
+        SystemSetting.value_type: "值类型",
+        SystemSetting.status: "状态",
+        SystemSetting.description: "说明",
+        SystemSetting.updated_by: "更新人",
+        SystemSetting.updated_at: "更新时间",
+    }
+
+    def list_query(self, request: Request):
+        return select(SystemSetting).where(SystemSetting.group_key == "model")
+
+    def count_query(self, request: Request):
+        return select(func.count(SystemSetting.id)).where(SystemSetting.group_key == "model")
+
+    async def on_model_change(
+        self,
+        data: dict,
+        model: SystemSetting,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        data["status"] = _status_for_setting_value(
+            model.group_key,
+            model.item_key,
+            str(data.get("value") if data.get("value") is not None else model.value),
+        )
+        data["updated_by"] = _admin_text(request.session.get("admin_user")) or "后台管理员"
+
+
+AiVoiceSettingAdmin.identity = "ai-voice-setting"
+
 
 def _admin_text(value: object) -> str:
     return str(value or "").strip()
@@ -1729,12 +1812,20 @@ def _admin_prepare_voice_gateway_line_data(data: dict, model: VoiceGatewayLine, 
             data["sip_auth_username"] = data["sip_username"]
         if not _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", "")):
             data["trunk_name"] = trunk_name
+        if not _admin_text(data.get("sip_password_plaintext") or getattr(model, "sip_password_plaintext", "")):
+            data["sip_password_plaintext"] = _admin_generate_sip_password()
         if not _admin_text(data.get("sip_password_hash") or getattr(model, "sip_password_hash", "")):
-            data["sip_password_hash"] = hash_password(_admin_generate_sip_password())
+            data["sip_password_hash"] = hash_password(
+                _admin_text(data.get("sip_password_plaintext") or getattr(model, "sip_password_plaintext", ""))
+            )
     else:
-        for field in ("sip_username", "sip_auth_username", "trunk_name", "sip_password_hash"):
+        for field in ("sip_username", "sip_auth_username", "trunk_name", "sip_password_plaintext", "sip_password_hash"):
             if not _admin_text(data.get(field)):
                 data[field] = getattr(model, field, "")
+
+    plaintext_password = _admin_text(data.get("sip_password_plaintext") or getattr(model, "sip_password_plaintext", ""))
+    if plaintext_password:
+        data["sip_password_hash"] = hash_password(plaintext_password)
 
     trunk_name = _admin_text(data.get("trunk_name") or getattr(model, "trunk_name", ""))
     if not _admin_text(data.get("sip_auth_username") or getattr(model, "sip_auth_username", "")):
@@ -1881,6 +1972,7 @@ def _admin_upsert_asterisk_dynamic_pjsip(line: VoiceGatewayLine, password: str) 
         updated = pattern.sub(next_block, current).strip() + "\n"
     else:
         updated = (current.rstrip() + "\n\n" + next_block).lstrip()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8")
 
 
@@ -1897,6 +1989,52 @@ def _admin_reload_asterisk_pjsip() -> str:
         if result.returncode != 0:
             raise RuntimeError(output or f"{' '.join(command)} 执行失败")
     return "；".join(item for item in outputs if item) or "Asterisk 已重新加载"
+
+
+def _admin_match_local_gateway_lines(selected_ids: list[str], actor_username: str | None) -> tuple[list[dict[str, str]], list[str], list[str]]:
+    results: list[dict[str, str]] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    with SessionLocal() as db:
+        for line_id in selected_ids:
+            line = db.get(VoiceGatewayLine, line_id)
+            if line is None:
+                errors.append(f"未找到线路：{line_id}")
+                continue
+            try:
+                result = match_local_voice_gateway_line(db, line)
+                db.add(
+                    AuditLog(
+                        actor_user_id=None,
+                        actor_username=actor_username,
+                        action="voice_gateway_line.match_local_gateway",
+                        resource_type="voice_gateway_line",
+                        resource_id=line.id,
+                        summary=(
+                            "SQLAdmin 一键匹配本地语音网关："
+                            f"{line.customer_name or line.owner_user_id} -> {result.gateway_host}"
+                        ),
+                    )
+                )
+                db.commit()
+                results.append(
+                    {
+                        "line_name": line.line_name or line.id,
+                        "customer_name": line.customer_name or line.line_name or line.id,
+                        "local_host": result.local_host,
+                        "gateway_host": result.gateway_host,
+                        "gateway_admin_url": result.gateway_admin_url,
+                        "runtime_env_path": str(result.runtime_env_path),
+                        "dynamic_pjsip_path": str(result.dynamic_pjsip_path),
+                        "reload_message": result.asterisk_sync_message,
+                    }
+                )
+                warnings.extend(f"{line.line_name or line.id}：{item}" for item in result.warnings)
+            except Exception as exc:
+                db.rollback()
+                errors.append(f"{line.line_name if line else line_id}：{exc}")
+                continue
+    return results, errors, warnings
 
 
 class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
@@ -1977,9 +2115,14 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
             "description": "可留空；默认与 SIP账号一致。",
             "validators": [Optional()],
         },
+        "sip_password_plaintext": {
+            "label": "当前SIP明文密码",
+            "description": "生成/轮换后会自动写入这里；你也可以直接改，保存时会同步刷新加密密码。",
+            "validators": [Optional()],
+        },
         "sip_password_secret_alias": {
             "label": "密码密钥别名",
-            "description": "这里不是明文密码。明文 SIP 密码只在生成或轮换时一次性显示；后台新增后如需交付给设备，请通过轮换/配置卡流程取得一次性密码。",
+            "description": "这是密码别名，不是设备里实际要填的密码；实际密码看上面的明文字段。",
             "validators": [Optional()],
         },
         "trunk_name": {
@@ -2035,6 +2178,7 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         VoiceGatewayLine.sip_transport: "SIP协议",
         VoiceGatewayLine.sip_username: "SIP账号",
         VoiceGatewayLine.sip_auth_username: "鉴权账号",
+        VoiceGatewayLine.sip_password_plaintext: "当前SIP明文密码",
         VoiceGatewayLine.sip_password_secret_alias: "密码密钥别名",
         VoiceGatewayLine.trunk_name: "云端Trunk",
         VoiceGatewayLine.channel_count: "通道数",
@@ -2076,6 +2220,34 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         request: Request,
     ) -> None:
         _admin_mark_latest_discovery_matched(model)
+
+    @action(
+        name="match-local-gateway",
+        label="一键匹配本地网关",
+        confirmation_message="确认扫描当前局域网，并把选中的线路同步到本机外呼运行配置？",
+        add_in_detail=True,
+        add_in_list=True,
+    )
+    async def match_local_gateway(self, request: Request) -> Response:
+        selected_ids = _admin_selected_ids(request)
+        if not selected_ids:
+            Flash.warning(request, "请先选择要匹配的语音网关线路")
+            return _admin_action_redirect(request, self.identity)
+
+        actor_username = request.session.get("admin_user")
+        results, errors, warnings = await run_in_threadpool(_admin_match_local_gateway_lines, selected_ids, actor_username)
+
+        if results:
+            summary = "；".join(
+                f"{item['customer_name']} -> 网关 {item['gateway_host']} / 本机 SIP {item['local_host']}"
+                for item in results
+            )
+            Flash.success(request, "已完成本地网关匹配：" + summary)
+        if warnings:
+            Flash.warning(request, "已同步线路和本机运行配置，但还有提示：" + "；".join(warnings))
+        if errors:
+            Flash.error(request, "部分线路匹配失败：" + "；".join(errors))
+        return _admin_action_redirect(request, self.identity)
 
     @action(
         name="redeliver-gateway",
@@ -2264,6 +2436,7 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
         actor_username = request.session.get("admin_user")
         results: list[dict[str, str]] = []
         errors: list[str] = []
+        warnings: list[str] = []
         with SessionLocal() as db:
             for line_id in selected_ids:
                 line = db.get(VoiceGatewayLine, line_id)
@@ -2273,7 +2446,20 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
                 try:
                     password = _admin_generate_sip_password()
                     _admin_upsert_asterisk_dynamic_pjsip(line, password)
-                    reload_message = _admin_reload_asterisk_pjsip()
+                    reload_message = f"已写入配置文件：{ASTERISK_DYNAMIC_PJSIP_PATH}"
+                    rotated_detail = (
+                        f"已写入配置文件 {ASTERISK_DYNAMIC_PJSIP_PATH}；"
+                        "交付人员需要立刻同步填写到现场语音网关后台。"
+                    )
+                    try:
+                        reload_message = _admin_reload_asterisk_pjsip()
+                        rotated_detail = "已写入云端 Asterisk；交付人员需要立刻同步填写到现场语音网关后台。"
+                    except Exception as exc:
+                        warnings.append(
+                            f"{line.line_name or line.id}：已生成密码并写入 {ASTERISK_DYNAMIC_PJSIP_PATH}，"
+                            f"但未自动重载 Asterisk（{exc}）"
+                        )
+                    line.sip_password_plaintext = password
                     line.sip_password_hash = hash_password(password)
                     line.status = "待重新下发"
                     line.registration_status = "待重新注册"
@@ -2286,7 +2472,7 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
                             event_type="credential_rotated",
                             status="rotated",
                             summary="SQLAdmin 生成一次性 SIP 密码",
-                            detail="已写入云端 Asterisk；交付人员需要立刻同步填写到现场语音网关后台。",
+                            detail=rotated_detail,
                         )
                     )
                     db.add(
@@ -2352,7 +2538,14 @@ class VoiceGatewayLineAdmin(ModelView, model=VoiceGatewayLine):
                 title="一次性 SIP 密码已生成",
                 label=secret_label,
             )
-            Flash.success(request, "一次性 SIP 密码已生成并写入云端 Asterisk。")
+            if warnings:
+                Flash.warning(
+                    request,
+                    "一次性 SIP 密码已生成，但以下线路还未自动重载 Asterisk："
+                    + "；".join(warnings),
+                )
+            else:
+                Flash.success(request, "一次性 SIP 密码已生成并写入云端 Asterisk。")
         if errors:
             Flash.error(request, "部分线路生成失败：" + "；".join(errors))
         if not results:
@@ -2589,5 +2782,6 @@ def setup_admin(app: FastAPI) -> None:
     admin.add_view(VoiceGatewayLineAdmin)
     admin.add_view(VoiceGatewayDeviceDiscoveryAdmin)
     admin.add_view(VoiceGatewayLineEventAdmin)
+    admin.add_view(AiVoiceSettingAdmin)
     admin.add_view(SystemSettingAdmin)
     admin.add_view(SystemAuditLogAdmin)

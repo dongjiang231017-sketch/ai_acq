@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ DEFAULT_DTMF_MODE = "RFC2833/RFC4733"
 DEFAULT_RTP_RANGE = "10000-20000/UDP"
 DEFAULT_ROUTE_DIRECTION = "SIP中继/SIP -> VoLTE/GSM/SIM"
 DEFAULT_ASTERISK_DYNAMIC_PJSIP_PATH = Path("/etc/asterisk/pjsip_ai_acq_delivery_dynamic.conf")
+LOCAL_ASTERISK_DYNAMIC_PJSIP_PATH = (
+    Path(__file__).resolve().parents[2] / ".runtime" / "asterisk" / "pjsip_ai_acq_delivery_dynamic.conf"
+)
 SECRET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 PROFILE_CHANNEL_DEFAULTS = {
     "dinstar_8t_server": 8,
@@ -60,6 +64,17 @@ class VoiceGatewayRedeliveryResult:
     previous_trunk_name: str
     sip_password_one_time: str
     asterisk_sync_message: str
+
+
+def resolve_asterisk_dynamic_pjsip_path(path: str | Path | None = None) -> Path:
+    if path is not None:
+        return Path(path).expanduser()
+    configured = os.getenv("AI_ACQ_ASTERISK_DYNAMIC_PJSIP_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    if DEFAULT_ASTERISK_DYNAMIC_PJSIP_PATH.parent.exists():
+        return DEFAULT_ASTERISK_DYNAMIC_PJSIP_PATH
+    return LOCAL_ASTERISK_DYNAMIC_PJSIP_PATH
 
 
 def generate_sip_password(length: int = 24) -> str:
@@ -218,6 +233,7 @@ def redeliver_voice_gateway_line(
     line.sip_transport = line.sip_transport or "UDP"
     line.sip_username = sip_username
     line.sip_auth_username = sip_username
+    line.sip_password_plaintext = password
     line.sip_password_hash = hash_password(password)
     line.trunk_name = trunk_name
     line.sip_password_secret_alias = f"voice-gateway/{target_owner.id}/{trunk_name}/sip-password"
@@ -416,9 +432,10 @@ def upsert_asterisk_dynamic_pjsip(
     line: VoiceGatewayLine,
     password: str,
     *,
-    path: Path = DEFAULT_ASTERISK_DYNAMIC_PJSIP_PATH,
+    path: Path | None = None,
     reload_callback: Callable[[], str] | None = None,
 ) -> str:
+    path = resolve_asterisk_dynamic_pjsip_path(path)
     marker_start = f"; BEGIN AI_ACQ_LINE {line.id}"
     marker_end = f"; END AI_ACQ_LINE {line.id}"
     next_block = render_asterisk_dynamic_pjsip(line, password)

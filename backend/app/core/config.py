@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -49,6 +50,27 @@ class Settings(BaseSettings):
     deepseek_timeout_seconds: float = 5.0
     deepseek_max_tokens: int = 80
     deepseek_stream_first_sentence: bool = True
+    openai_api_key: str = ""
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_agent_name: str = "ai-acq-outbound-agent"
+    livekit_sip_outbound_trunk_id: str = ""
+    livekit_sip_from_number: str = ""
+    livekit_default_country_code: str = "+86"
+    livekit_dispatch_timeout_seconds: float = 20.0
+    livekit_sip_wait_until_answered: bool = True
+    livekit_sip_krisp_enabled: bool = True
+    livekit_agent_mode: str = "openai_realtime"
+    livekit_agent_stt_model: str = "deepgram/flux-general-multi"
+    livekit_agent_stt_language: str = "multi"
+    livekit_agent_llm_model: str = "openai/gpt-5-mini"
+    livekit_agent_tts_model: str = "elevenlabs/eleven_multilingual_v2"
+    livekit_agent_tts_voice: str = ""
+    livekit_openai_realtime_model: str = "gpt-realtime"
+    livekit_openai_realtime_voice: str = "marin"
+    livekit_openai_realtime_base_url: str = ""
+    livekit_openai_realtime_api_key: str = ""
     telephony_gateway_mode: str = "simulator"
     asterisk_deployment_mode: str = "server"
     voice_gateway_profile: str = "dinstar_8t_server"
@@ -88,15 +110,18 @@ class Settings(BaseSettings):
     realtime_tts_voice_id: str = ""
     realtime_tts_voice_name: str = ""
     realtime_tts_voice_type: str = "system"
-    realtime_conversation_mode: str = "pipeline"
+    realtime_conversation_mode: str = "omni"
     realtime_llm_timeout_seconds: float = 1.2
-    realtime_call_opening_text: str = "喂，您好，我在。简单说一句，我这边是做视频号团购到店获客的。"
+    realtime_call_opening_text: str = "您好，我是做视频号团购到店获客的。"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
     realtime_call_learning_path: str = ""
     realtime_reply_max_chars: int = 48
     realtime_barge_rms_threshold: int = 2600
     realtime_barge_frames: int = 8
     realtime_tts_gain: float = 1.4
+    realtime_voice_cache_enabled: bool = True
+    realtime_voice_cache_dir: str = str(Path.home() / ".ai-acq-client/voice-cache/natural_v2")
+    realtime_voice_cache_min_confidence: float = 0.9
     realtime_opening_grace_seconds: float = 0.35
     realtime_debug_audio_capture_enabled: bool = False
     realtime_debug_audio_capture_dir: str = "/tmp/ai-acq-realtime-audio"

@@ -352,6 +352,7 @@ def rotate_voice_gateway_credential(
 ) -> dict[str, object]:
     line = _get_line(line_id, db, current_user)
     password = _generate_sip_password()
+    line.sip_password_plaintext = password
     line.sip_password_hash = hash_password(password)
     line.status = "待重新下发"
     line.registration_status = "待重新注册"
@@ -542,6 +543,7 @@ def _build_line(payload: VoiceGatewayLineCreate, owner: User, current_user: User
         sip_transport=payload.sip_transport,
         sip_username=sip_username,
         sip_auth_username=sip_username,
+        sip_password_plaintext=password,
         sip_password_hash=hash_password(password),
         sip_password_secret_alias=f"voice-gateway/{owner.id}/{trunk_name}/sip-password",
         trunk_name=trunk_name,
@@ -579,8 +581,9 @@ def _read_line(line: VoiceGatewayLine) -> dict[str, object]:
         "sipTransport": line.sip_transport,
         "sipUsername": line.sip_username,
         "sipAuthUsername": line.sip_auth_username,
+        "sipPasswordPlaintext": line.sip_password_plaintext,
         "sipPasswordSecretAlias": line.sip_password_secret_alias,
-        "sipPasswordDisplay": "********",
+        "sipPasswordDisplay": line.sip_password_plaintext or "********",
         "trunkName": line.trunk_name,
         "channelCount": line.channel_count,
         "codecPrimary": line.codec_primary,
@@ -619,7 +622,12 @@ def _config_card(line: VoiceGatewayLine) -> dict[str, object]:
         _field("Port / Transport", f"{line.sip_server_port}/{line.sip_transport}", "设备后台 SIP 注册页", "协议必须和云端 Asterisk 监听一致。"),
         _field("Account / SIP User", line.sip_username, "设备后台 SIP 注册页", "每个客户独立账号，不能复用测试 trunk。"),
         _field("Auth User", line.sip_auth_username, "设备后台 SIP 注册页", "多数设备可与 SIP User 相同。"),
-        _field("Password", "一次性密码 / 受控密钥别名", "设备后台 SIP 注册页", "只在生成或轮换时显示明文。"),
+        _field(
+            "Password",
+            line.sip_password_plaintext or "一次性密码 / 受控密钥别名",
+            "设备后台 SIP 注册页",
+            "后台已保存当前明文密码，修改后要同步到现场设备。",
+        ),
         _field("Codec", f"{line.codec_primary}, {line.codec_secondary}", "设备后台媒体/编码页", "优先 PCMA/alaw，兼容 PCMU/ulaw。"),
         _field("DTMF", line.dtmf_mode, "设备后台媒体/DTMF 页", "用于按键识别和部分运营商线路兼容。"),
         _field("Route", line.route_direction, "设备后台呼叫路由页", "外呼方向应为 SIP 中继/云端 trunk 到 VoLTE/GSM/SIM 通道。"),
@@ -636,8 +644,9 @@ def _config_card(line: VoiceGatewayLine) -> dict[str, object]:
         "sipTransport": line.sip_transport,
         "sipUsername": line.sip_username,
         "sipAuthUsername": line.sip_auth_username,
+        "sipPasswordPlaintext": line.sip_password_plaintext,
         "sipPasswordSecretAlias": line.sip_password_secret_alias,
-        "sipPasswordDisplay": "********",
+        "sipPasswordDisplay": line.sip_password_plaintext or "********",
         "trunkName": line.trunk_name,
         "channelCount": line.channel_count,
         "codecPrimary": line.codec_primary,

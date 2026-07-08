@@ -41,10 +41,14 @@ frontend/vite.config.d.ts
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+exports/
 
 # Local agent/tool caches
 .playwright-cli/
 .serena/
+.tmp_asterisk_build/
+.tmp_desktop_runtime/
+backend/platform_browser_profiles/
 
 # Editors
 .idea/

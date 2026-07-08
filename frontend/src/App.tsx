@@ -2,6 +2,8 @@ import TeammateWorkspace from "./TeammateWorkspace";
 
 const OUTBOUND_PATH = "/outbound";
 const OUTBOUND_EMBED_PATH = "/outbound-embed";
+const WORKSPACE_PATH = "/workspace";
+const UI_PREVIEW_PATH = "/ui-preview";
 
 function LegacyWorkspaceShell() {
   return (
@@ -26,6 +28,12 @@ function App() {
   }
   if (pathname === OUTBOUND_PATH) {
     return <TeammateWorkspace mode="outbound-only" />;
+  }
+  if (pathname === UI_PREVIEW_PATH) {
+    return <LegacyWorkspaceShell />;
+  }
+  if (pathname === WORKSPACE_PATH) {
+    return <TeammateWorkspace />;
   }
   return <LegacyWorkspaceShell />;
 }

@@ -9,11 +9,13 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.livekit_outbound import livekit_config_status
 from app.services.realtime_llm import deepseek_configured, generate_realtime_reply
 from app.services.realtime_call_state import summarize_realtime_call_state
 from app.services.realtime_call_learning import summarize_realtime_learning
 from app.services.realtime_route_benchmark import build_realtime_route_benchmark
 from app.services.realtime_sales_brain import score_realtime_events
+from app.services.realtime_sales_state import SalesStateMachine
 from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 from app.services.runtime_ai_config import get_runtime_ai_config
 from app.services.voice_gateway_profiles import voice_gateway_label
@@ -84,6 +86,7 @@ class RealtimeSession:
     updated_at: datetime = field(default_factory=datetime.utcnow)
     events: list[RealtimeEvent] = field(default_factory=list)
     conversation_history: list[dict[str, str]] = field(default_factory=list)
+    sales_fsm: SalesStateMachine = field(default_factory=SalesStateMachine)
 
     def add_event(
         self,
@@ -134,6 +137,8 @@ _SESSIONS: dict[str, RealtimeSession] = {}
 def _normalize_conversation_route(route: str | None) -> str:
     runtime_config = get_runtime_ai_config()
     normalized = (route or runtime_config.realtime_conversation_mode or "pipeline").strip().lower()
+    if normalized in {"livekit", "livekit_agent", "livekit_sip"}:
+        return "livekit"
     return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
 
 
@@ -157,16 +162,22 @@ def active_bridge_conversation_route() -> str | None:
 
 
 def _route_mode_label(route: str) -> str:
+    if route == "livekit":
+        return "livekit_agent_sip"
     return "omni_realtime_interruptible" if route == "omni" else "half_duplex_interruptible"
 
 
 def _route_cost(route: str, voice_type: str = "system") -> float:
+    if route == "livekit":
+        return 0.12
     if route == "omni":
         return 0.09
     return _estimate_cost(voice_type)
 
 
 def _route_latency(route: str, llm_ready: bool | None = None) -> int:
+    if route == "livekit":
+        return 450
     if route == "omni":
         return 720
     if llm_ready is None:
@@ -178,9 +189,21 @@ def _conversation_route_options(current_route: str, bridge_ready: bool) -> list[
     runtime_config = get_runtime_ai_config()
     llm_ready = deepseek_configured()
     dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
+    livekit_status = livekit_config_status()
+    livekit_ready = bool(livekit_status["readyForCall"])
     omni_bridge_ready = bridge_ready and current_route == "omni"
     pipeline_bridge_ready = bridge_ready and current_route in {"pipeline", "omni"}
     return [
+        {
+            "key": "livekit",
+            "label": "LiveKit Agent 外呼",
+            "mode": "livekit_agent_sip",
+            "summary": "LiveKit room + Agent worker + SIP outbound trunk，媒体和打断由实时通信框架接管，适合替换当前 AudioSocket 自建桥。",
+            "estimatedLatencyMs": _route_latency("livekit"),
+            "estimatedAiCostPerMinute": _route_cost("livekit"),
+            "readyForAsteriskMedia": livekit_ready,
+            "isActive": current_route == "livekit",
+        },
         {
             "key": "omni",
             "label": "极速人声 Omni",
@@ -211,12 +234,68 @@ def build_realtime_pipeline() -> dict[str, object]:
     bridge_ready = settings.telephony_gateway_mode == "asterisk" and settings.asterisk_live_call_enabled and audio_socket_ready
     configured_route = _normalize_conversation_route(runtime_config.realtime_conversation_mode)
     actual_bridge_route = active_bridge_conversation_route()
-    conversation_mode = actual_bridge_route or configured_route
+    conversation_mode = "livekit" if configured_route == "livekit" else actual_bridge_route or configured_route
     route_matched = (
-        not actual_bridge_route
+        configured_route == "livekit"
+        or not actual_bridge_route
         or actual_bridge_route == configured_route
         or (actual_bridge_route == "omni" and configured_route == "pipeline")
     )
+    if conversation_mode == "livekit":
+        livekit_status = livekit_config_status()
+        livekit_ready = bool(livekit_status["readyForCall"])
+        steps = [
+            _pipeline_step(
+                "livekit_dispatch",
+                "LiveKit Agent Dispatch",
+                "pass" if livekit_status["configured"] else "warn",
+                str(livekit_status["agentName"] or "ai-acq-outbound-agent"),
+                80,
+                "后端创建 LiveKit room dispatch，Agent worker 在接通前进入 room，避免接通后再慢慢拼链路。",
+            ),
+            _pipeline_step(
+                "livekit_sip",
+                "LiveKit SIP Outbound",
+                "pass" if livekit_status["sipOutboundTrunkConfigured"] else "warn",
+                "LiveKit SIP outbound trunk",
+                120,
+                "通过 LiveKit SIP trunk 拨真实号码，不再走 Asterisk AudioSocket 本地媒体桥。",
+            ),
+            _pipeline_step(
+                "livekit_agent",
+                "LiveKit 实时 Agent",
+                "pass" if livekit_status["agentReady"] else "warn",
+                str(livekit_status["mode"]),
+                250,
+                "AgentSession 负责 VAD、打断、端点检测、STT/LLM/TTS 或 OpenAI Realtime，对话规则复用现有销售话术。",
+            ),
+        ]
+        route_options = _conversation_route_options("livekit", bridge_ready)
+        return {
+            "mode": "livekit_agent_sip",
+            "bridgeMode": "livekit_sip",
+            "targetLatencyMs": 700,
+            "estimatedLatencyMs": sum(int(step["latencyMs"]) for step in steps),
+            "estimatedAiCostPerMinute": _route_cost("livekit"),
+            "readyForMockCall": False,
+            "readyForAsteriskMedia": livekit_ready,
+            "configuredRoute": configured_route,
+            "actualBridgeRoute": "livekit",
+            "routeMatched": True,
+            "nextStep": (
+                "LiveKit 外呼配置已就绪。启动 python -m app.tools.livekit_outbound_agent dev 后，从前端选择 LiveKit Agent 外呼做单号试拨。"
+                if livekit_ready
+                else "补齐 LIVEKIT_URL/API_KEY/API_SECRET、LIVEKIT_SIP_OUTBOUND_TRUNK_ID，并按模式配置 OPENAI_API_KEY 或 LiveKit Inference 模型。"
+            ),
+            "routeOptions": route_options,
+            "routeBenchmark": build_realtime_route_benchmark(
+                current_route="livekit",
+                bridge_ready=bridge_ready,
+                route_options=route_options,
+            ),
+            "learning": summarize_realtime_learning(),
+            "steps": steps,
+        }
     if conversation_mode == "omni":
         dashscope_ready = bool(runtime_config.dashscope_api_key.strip())
         steps = [
@@ -384,7 +463,7 @@ def create_realtime_session(
         "system",
         "ready",
         "模拟实时外呼会话已创建。",
-        f"使用音色：{selected_voice.voice_name}；路线：{'Omni 实时语音' if route == 'omni' else 'ASR+LLM+TTS 分段'}；两条路线都启用短句、情绪承接、不同问法不同回答和不机械推进策略。",
+        f"使用音色：{selected_voice.voice_name}；路线：{_route_display_name(route)}；所有路线都启用短句、情绪承接、不同问法不同回答和不机械推进策略。",
     )
     _SESSIONS[session.id] = session
     return session.as_dict()
@@ -419,25 +498,57 @@ def handle_customer_utterance(session_id: str, text: str, barge_in: bool = True)
     intent, node = _classify_intent(routed_text)
     session.current_intent = intent
     session.current_node = node
+    session.sales_fsm.update(routed_text, intent)
+    stage_instruction = session.sales_fsm.get_stage_instruction()
     session.add_event("intent", "router", "matched", intent, f"路由到话术节点：{node}。", latency_ms=50)
 
+    wechat_result = session.sales_fsm.handle_wechat_closing_turn(routed_text, intent, phone=session.phone or "")
+    if wechat_result and wechat_result.reply:
+        reply = wechat_result.reply
+        session.add_event(
+            "wechat_closing",
+            "router",
+            "matched",
+            reply,
+            f"微信收口动作：{wechat_result.action}。正式电话链路会按同样状态机执行。",
+            latency_ms=0,
+        )
+        reply_result = None
+    else:
+        reply_result = None
+        if wechat_result and not wechat_result.reply:
+            session.add_event(
+                "wechat_closing_waiting_more_text",
+                "router",
+                "waiting",
+                routed_text,
+                "客户微信确认还没说完整，正式电话链路会继续听下一句。",
+                latency_ms=0,
+            )
+            reply = ""
+        else:
+            reply = ""
+
     fallback_reply = _build_reply(routed_text, intent, session.merchant_name)
-    reply_result = generate_realtime_reply(
-        clean_text,
-        intent,
-        session.merchant_name,
-        fallback_reply,
-        list(session.conversation_history),
-    )
-    reply = reply_result.reply
+    if not reply:
+        reply_result = generate_realtime_reply(
+            clean_text,
+            intent,
+            session.merchant_name,
+            fallback_reply,
+            list(session.conversation_history),
+            stage_instruction=stage_instruction,
+        )
+        reply = session.sales_fsm.constrain_reply(reply_result.reply)
     _append_session_conversation_turn(session, clean_text, reply)
+    session.sales_fsm.record_assistant_reply(reply)
     session.add_event(
         "llm_reply",
         "assistant",
         "ready",
         reply,
-        _llm_event_detail(reply_result.strategy, reply_result.error),
-        latency_ms=reply_result.latency_ms,
+        _llm_event_detail(reply_result.strategy, reply_result.error) if reply_result else "本轮由正式销售状态机直接生成。",
+        latency_ms=reply_result.latency_ms if reply_result else 0,
     )
 
     chunks = _build_tts_chunks(reply, session.voice.provider)
@@ -536,6 +647,14 @@ def _pipeline_step(key: str, label: str, status: str, provider: str, latency_ms:
         "latencyMs": latency_ms,
         "detail": detail,
     }
+
+
+def _route_display_name(route: str) -> str:
+    if route == "livekit":
+        return "LiveKit Agent 外呼"
+    if route == "omni":
+        return "Omni 实时语音"
+    return "ASR+LLM+TTS 分段"
 
 
 def _estimate_cost(voice_type: str) -> float:
@@ -891,18 +1010,18 @@ def _build_reply(text: str, intent: str, merchant_name: str) -> str:
         "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
         "明确拒绝": "好的，不打扰了，再见。",
         "稍后联系": "可以，我不多打扰。今天下午还是明天上午再跟您确认方便？",
-        "加微信/发资料": "可以，我稍后把视频号团购资料和同品类案例发您，您看完再沟通。",
+        "加微信/发资料": "我先补充一下：我们会先看门店品类和客单价，设计团购套餐，小范围测曝光、咨询和到店数据。",
         "身份确认": "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。",
         "听不清/澄清": "我简单说：我们帮门店做视频号团购，到店获客。您方便听半分钟吗？",
         "礼貌结束": "好的，不打扰了，再见。",
         "系统提示": "",
-        "合作咨询": "我先说重点：帮门店设计团购套餐，再做视频号同城曝光和到店转化。",
+        "合作咨询": "流程是先看品类和客单价，再做可核销套餐，小范围测试曝光、咨询和到店数据。",
         "效果询问": "效果主要看品类和套餐，我们会先小范围测试曝光、咨询和到店数据。",
         "找负责人": "明白，那方便帮我转给负责团购或门店运营的人吗？我简单说明一下。",
         "已有渠道": "已经做团购更好；美团偏搜索成交，视频号补微信同城推荐和私域流量。",
         "来源/隐私": "您放心，不方便我就不再联系；这边只做门店业务回访确认。",
         "低信息确认": "我简单确认一下，您现在方便听我说半分钟吗？",
-        "需求探索": "我先说重点：我们帮门店做视频号团购曝光，合适再细聊。",
+        "需求探索": "我先说重点：我们帮门店做视频号团购套餐和同城曝光，先小范围测试，合适再放大。",
     }
     if intent in replies:
         return replies[intent]

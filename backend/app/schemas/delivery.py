@@ -34,6 +34,7 @@ class VoiceGatewayConfigCard(BaseModel):
     sip_transport: Annotated[str, Field(alias="sipTransport")]
     sip_username: Annotated[str, Field(alias="sipUsername")]
     sip_auth_username: Annotated[str, Field(alias="sipAuthUsername")]
+    sip_password_plaintext: Annotated[str, Field(alias="sipPasswordPlaintext")]
     sip_password_secret_alias: Annotated[str, Field(alias="sipPasswordSecretAlias")]
     sip_password_display: Annotated[str, Field(alias="sipPasswordDisplay")] = "********"
     trunk_name: Annotated[str, Field(alias="trunkName")]
@@ -103,6 +104,7 @@ class VoiceGatewayLineRead(BaseModel):
     sip_transport: Annotated[str, Field(alias="sipTransport")]
     sip_username: Annotated[str, Field(alias="sipUsername")]
     sip_auth_username: Annotated[str, Field(alias="sipAuthUsername")]
+    sip_password_plaintext: Annotated[str, Field(alias="sipPasswordPlaintext")]
     sip_password_secret_alias: Annotated[str, Field(alias="sipPasswordSecretAlias")]
     sip_password_display: Annotated[str, Field(alias="sipPasswordDisplay")] = "********"
     trunk_name: Annotated[str, Field(alias="trunkName")]

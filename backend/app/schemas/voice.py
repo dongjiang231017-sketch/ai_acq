@@ -48,6 +48,75 @@ class SystemVoicePreviewRead(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VoiceDefaultSelection(BaseModel):
+    voice_id: Annotated[str, Field(alias="voiceId")]
+    voice_name: Annotated[str, Field(alias="voiceName")]
+    voice_type: Annotated[str, Field(alias="voiceType")] = "system"
+    provider: str = "Qwen-TTS"
+    voice_param: Annotated[str | None, Field(alias="voiceParam")] = None
+    external_voice_id: Annotated[str | None, Field(alias="externalVoiceId")] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VoiceDefaultSelectionRead(VoiceDefaultSelection):
+    message: str
+    effective_without_restart: Annotated[bool, Field(alias="effectiveWithoutRestart")] = True
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VoiceCacheStatusRead(BaseModel):
+    enabled: bool
+    root: str
+    profile: str
+    display_name: Annotated[str, Field(alias="displayName")]
+    asset_version: Annotated[str, Field(alias="assetVersion")]
+    manifest_loaded: Annotated[bool, Field(alias="manifestLoaded")]
+    item_count: Annotated[int, Field(alias="itemCount")]
+    intent_count: Annotated[int, Field(alias="intentCount")]
+    min_confidence: Annotated[float, Field(alias="minConfidence")]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VoiceCachePreferenceUpdate(BaseModel):
+    enabled: bool
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VoiceCacheItemRead(BaseModel):
+    seq: str
+    scene_id: Annotated[str, Field(alias="sceneId")]
+    scene_title: Annotated[str, Field(alias="sceneTitle")]
+    section: str
+    customer_trigger: Annotated[str, Field(alias="customerTrigger")]
+    human_text: Annotated[str, Field(alias="humanText")]
+    audio_format: Annotated[str, Field(alias="audioFormat")]
+    audio_url: Annotated[str, Field(alias="audioUrl")]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VoiceCacheIntentRead(BaseModel):
+    intent_id: Annotated[str, Field(alias="intentId")]
+    priority: str
+    seq_candidates: Annotated[list[str], Field(alias="seqCandidates")]
+    scene_title: Annotated[str, Field(alias="sceneTitle")]
+    trigger_examples: Annotated[list[str], Field(alias="triggerExamples")]
+    recommended_action: Annotated[str, Field(alias="recommendedAction")]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VoiceCacheLibraryRead(VoiceCacheStatusRead):
+    items: list[VoiceCacheItemRead]
+    intents: list[VoiceCacheIntentRead]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class VoiceProviderStatusRead(BaseModel):
     provider: str
     configured: bool

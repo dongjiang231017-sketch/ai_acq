@@ -34,6 +34,7 @@ class VoiceGatewayLine(Base):
     sip_transport: Mapped[str] = mapped_column(String(20), default="UDP")
     sip_username: Mapped[str] = mapped_column(String(120), index=True)
     sip_auth_username: Mapped[str] = mapped_column(String(120), index=True)
+    sip_password_plaintext: Mapped[str] = mapped_column(String(120), default="")
     sip_password_hash: Mapped[str] = mapped_column(String(255), default="")
     sip_password_secret_alias: Mapped[str] = mapped_column(String(180), default="")
     trunk_name: Mapped[str] = mapped_column(String(120), index=True)

@@ -82,7 +82,10 @@ def generate_realtime_reply(
     signal = _analyze_dialogue_signal(text, intent, history)
     brain_reply = render_sales_reply(text, intent, merchant_name, fallback_reply, history)
     contextual_reply = brain_reply.reply
-    if intent in _CONTEXT_LOCAL_FIRST_INTENTS or _should_answer_locally_first(signal):
+    runtime_config = get_runtime_ai_config()
+    if not runtime_config.deepseek_api_key.strip() and (
+        intent in _CONTEXT_LOCAL_FIRST_INTENTS or _should_answer_locally_first(signal)
+    ):
         return RealtimeReplyResult(
             reply=contextual_reply,
             strategy=brain_reply.strategy,
@@ -97,7 +100,7 @@ def generate_realtime_reply(
             fallback_used=True,
             error="DeepSeek 最近超时，电话会话内临时使用本地上下文策略。",
         )
-    if not deepseek_configured():
+    if not runtime_config.deepseek_api_key.strip():
         return RealtimeReplyResult(
             reply=contextual_reply,
             strategy="local_context_no_deepseek_key",
@@ -107,7 +110,6 @@ def generate_realtime_reply(
         )
 
     started = time.perf_counter()
-    runtime_config = get_runtime_ai_config()
     future = _DEEPSEEK_EXECUTOR.submit(
         _request_deepseek_reply,
         text,
@@ -251,8 +253,8 @@ def _build_contextual_local_reply(
 
     if signal.topic == "materials":
         if _has_any(last_assistant, ["案例", "资料", "微信"]):
-            return "好的，我按微信发资料，电话里不多占您时间。"
-        return _avoid_repeat("可以，稍后微信发案例和流程给您。", last_assistant)
+            return _avoid_repeat("可以，那我确认一下，这个手机号就是您的微信吗？", last_assistant)
+        return _avoid_repeat("可以，方便加个微信吗？我微信上把案例和费用发您。", last_assistant)
 
     if signal.topic == "quality":
         return _avoid_repeat(
@@ -304,10 +306,10 @@ def _build_contextual_local_reply(
 
     if intent == "加微信/发资料":
         if _has_any(last_assistant, ["案例", "资料", "微信"]):
-            return "好的，我按微信发资料，电话里不多占您时间。"
+            return _avoid_repeat("可以，那我确认一下，这个手机号就是您的微信吗？", last_assistant)
         if _has_any(clean, ["怎么", "哪里", "发到", "短信"]):
             return _avoid_repeat("可以，短信或微信发案例和流程给您。", last_assistant)
-        return _avoid_repeat("可以，稍后微信发案例和流程给您。", last_assistant)
+        return _avoid_repeat("可以，方便加个微信吗？我微信上把案例和费用发您。", last_assistant)
 
     if intent == "听不清/澄清":
         if _has_any(clean + last_user, ["付费", "要钱", "花钱", "付钱", "费用", "收费", "价格"]):
@@ -624,6 +626,7 @@ def _request_deepseek_reply(
                     "不能承诺已合作、补贴、保底效果或未授权身份。"
                     "必须先回答客户当前问题，再轻轻推进下一步。"
                     "客户说不要资料、不加微信、直接回答、别重复时，本轮停止推进资料和微信，只回答问题。"
+                    "推进下一步时只问一次是否方便加微信；客户同意后先确认当前手机号是不是微信，不是再问微信号。"
                     "客户重复追问时必须换角度回答，不要复读上一轮。客户插话后直接接着答，不解释上一句为什么停了。"
                     "如果最近通话复盘指出某类问题重复回答，本轮必须换角度。"
                     "语气要像真人电销：先承接情绪，再给一个短解释，必要时问一个选择题。"

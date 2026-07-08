@@ -72,6 +72,7 @@ def _runtime_env_candidates() -> list[Path]:
     for app_dir in ["ai-acq-qian-frontend", "商家AI获客客户端", "AI ACQ", "Electron"]:
         candidates.append(support / app_dir / "asterisk-sidecar" / "state" / "backend-asterisk.env")
     candidates.append(home / ".ai-acq-client" / "asterisk-sidecar" / "state" / "backend-asterisk.env")
+    candidates.append(Path(__file__).resolve().parents[2] / ".runtime" / "asterisk" / "backend-asterisk.env")
     return _dedupe_paths(candidates)
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.services.livekit_outbound import livekit_config_status
 from app.services.realtime_call_state import summarize_realtime_call_state
 from app.services.realtime_sales_brain import score_realtime_events
 from app.services.runtime_ai_config import get_runtime_ai_config
@@ -17,6 +18,7 @@ def build_realtime_route_benchmark(
     route_options: list[dict[str, object]],
 ) -> dict[str, object]:
     runtime_config = get_runtime_ai_config()
+    livekit_status = livekit_config_status()
     latest_events = _load_recent_live_events()
     latest_score = score_realtime_events(latest_events) if latest_events else None
     latest_state = summarize_realtime_call_state(latest_events) if latest_events else None
@@ -30,6 +32,7 @@ def build_realtime_route_benchmark(
             bridge_ready=bridge_ready,
             dashscope_ready=bool(runtime_config.dashscope_api_key.strip()),
             deepseek_ready=bool(runtime_config.deepseek_api_key.strip()),
+            livekit_ready=bool(livekit_status["readyForCall"]),
             latest_score=latest_score_value,
             latest_turn_ms=latest_turn_ms,
             cost_rank=cost_rank.get(str(option.get("key") or ""), 9),
@@ -57,18 +60,26 @@ def _benchmark_route(
     bridge_ready: bool,
     dashscope_ready: bool,
     deepseek_ready: bool,
+    livekit_ready: bool,
     latest_score: int | None,
     latest_turn_ms: int | None,
     cost_rank: int,
 ) -> dict[str, object]:
     key = str(option.get("key") or "")
-    readiness = _readiness_score(key, bridge_ready=bridge_ready, dashscope_ready=dashscope_ready, deepseek_ready=deepseek_ready)
+    readiness = _readiness_score(
+        key,
+        bridge_ready=bridge_ready,
+        dashscope_ready=dashscope_ready,
+        deepseek_ready=deepseek_ready,
+        livekit_ready=livekit_ready,
+    )
     quality = _quality_score(key, current_route=current_route, latest_score=latest_score, latest_turn_ms=latest_turn_ms)
     risks = _route_risks(
         key,
         bridge_ready=bridge_ready,
         dashscope_ready=dashscope_ready,
         deepseek_ready=deepseek_ready,
+        livekit_ready=livekit_ready,
         latest_turn_ms=latest_turn_ms if current_route == key else None,
         latest_score=latest_score if current_route == key else None,
     )
@@ -90,7 +101,9 @@ def _benchmark_route(
     }
 
 
-def _readiness_score(key: str, *, bridge_ready: bool, dashscope_ready: bool, deepseek_ready: bool) -> int:
+def _readiness_score(key: str, *, bridge_ready: bool, dashscope_ready: bool, deepseek_ready: bool, livekit_ready: bool) -> int:
+    if key == "livekit":
+        return 94 if livekit_ready else 48
     if key == "omni":
         score = 45
         if dashscope_ready:
@@ -115,7 +128,7 @@ def _quality_score(
     latest_score: int | None,
     latest_turn_ms: int | None,
 ) -> int:
-    base = 84 if key == "omni" else 78
+    base = 92 if key == "livekit" else 84 if key == "omni" else 78
     if latest_score is None:
         return base
     if current_route == key:
@@ -123,6 +136,8 @@ def _quality_score(
         if latest_turn_ms is not None and latest_turn_ms > 1000:
             score -= min(22, (latest_turn_ms - 1000) // 80)
         return max(25, min(100, int(score)))
+    if key == "livekit" and latest_turn_ms is not None and latest_turn_ms > 900:
+        return min(96, base + 6)
     if key == "omni" and latest_turn_ms is not None and latest_turn_ms > 1200:
         return min(94, base + 8)
     if key == "pipeline" and latest_score < 70:
@@ -136,10 +151,19 @@ def _route_risks(
     bridge_ready: bool,
     dashscope_ready: bool,
     deepseek_ready: bool,
+    livekit_ready: bool,
     latest_turn_ms: int | None,
     latest_score: int | None,
 ) -> list[str]:
     risks: list[str] = []
+    if key == "livekit":
+        if not livekit_ready:
+            risks.append("LiveKit URL/API Key/SIP outbound trunk 或 Agent 模型配置未齐。")
+        if latest_turn_ms is not None and latest_turn_ms > 900:
+            risks.append(f"最近 LiveKit 真实通话首音频约 {latest_turn_ms}ms，需继续调 Agent 模型或 SIP 区域。")
+        if latest_score is not None and latest_score < 80:
+            risks.append(f"最近 LiveKit 通话评分 {latest_score}，还需回听录音优化话术。")
+        return risks[:4]
     if not bridge_ready:
         risks.append("真实媒体桥未就绪，不能证明真实电话低延迟。")
     if not dashscope_ready:
@@ -154,6 +178,8 @@ def _route_risks(
 
 
 def _route_strengths(key: str, *, deepseek_ready: bool) -> list[str]:
+    if key == "livekit":
+        return ["媒体、VAD、打断、Agent 生命周期交给 LiveKit，减少自建桥接抖动。", "SIP participant 进入同一 room，适合做真实电销的快速轮次。"]
     if key == "omni":
         return ["端到端实时语音，天然更利于打断和轮次衔接。", "适合单号 A/B 验证真人感和低延迟。"]
     strengths = ["分段链路可观测，适合在实时模型不可用时保持通话不断线。", "ASR、销售脑、TTS 分层可观测，便于定位问题。"]
@@ -172,6 +198,10 @@ def _route_status(readiness: int, quality: int) -> str:
 
 
 def _next_action(key: str, status: str, risks: list[str], latest_turn_ms: int | None) -> str:
+    if key == "livekit" and status != "pass":
+        return "先补齐 LiveKit/SIP/OpenAI 或 Inference 配置，然后启动 Agent worker 做单号试拨。"
+    if key == "livekit":
+        return "启动 LiveKit Agent worker 后，用同一号码做单号试拨并回听录音。"
     if key == "omni" and status != "pass":
         return "先补齐 DashScope/媒体桥，再用同一号码和同一话术做单号 A/B。"
     if key == "pipeline" and latest_turn_ms is not None and latest_turn_ms > 1000:
@@ -190,8 +220,13 @@ def _recommend_route(
     by_key = {str(item.get("key") or ""): item for item in benchmarks}
     pipeline = by_key.get("pipeline")
     omni = by_key.get("omni")
+    livekit = by_key.get("livekit")
     current_is_slow = latest_turn_ms is not None and latest_turn_ms > 1200
     current_is_weak = latest_score is not None and latest_score < 70
+    if livekit and livekit.get("status") in {"pass", "warn"} and (current_route in {"omni", "pipeline"} and (current_is_slow or current_is_weak)):
+        return livekit
+    if livekit and current_route == "livekit":
+        return livekit
     if current_route == "pipeline" and (current_is_slow or current_is_weak) and omni and omni.get("status") == "pass":
         return omni
     if pipeline and pipeline.get("status") in {"pass", "warn"}:
@@ -209,7 +244,9 @@ def _recommendation_summary(
     benchmarks: list[dict[str, object]],
 ) -> str:
     if latest_score is None:
-        return "暂无真实通话样本，先保持稳定备用路线，下一步用同一号码做 Pipeline/Omni 单号对照。"
+        return "暂无 LiveKit 真实通话样本，下一步先启动 LiveKit Agent worker，用同一号码做单号试拨。"
+    if recommended_route == "livekit":
+        return "最近 AudioSocket/Omni 真实通话仍不够自然，建议切到 LiveKit Agent 做下一轮单号验收。"
     if recommended_route == "omni" and current_route == "pipeline":
         return "最近 Pipeline 真实通话延迟或质量偏弱，建议用 Omni 做同号 A/B，对比真人感和首音频延迟。"
     if recommended_route == "pipeline":

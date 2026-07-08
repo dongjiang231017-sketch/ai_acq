@@ -6,17 +6,39 @@ from app.services.realtime_sales_brain import build_omni_sales_instruction
 from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 
 
-def build_video_group_buying_sales_instructions() -> str:
+_GENERIC_MERCHANT_NAMES = {"", "单号真实试拨", "测试", "test", "商家", "客户门店", "您的门店"}
+
+
+def _clean_merchant_name(merchant_name: str) -> str:
+    clean = " ".join(str(merchant_name or "").strip().split())
+    return "" if clean in _GENERIC_MERCHANT_NAMES else clean
+
+
+def _merchant_subject(merchant_name: str) -> str:
+    clean = _clean_merchant_name(merchant_name)
+    return f"{clean}这边" if clean else "门店"
+
+
+def _merchant_context_line(merchant_name: str) -> str:
+    clean = _clean_merchant_name(merchant_name)
+    if not clean:
+        return "当前商户名称未知，通话中用“您门店”或“门店”称呼，不要编造店名。"
+    return f"当前通话商户/店名：{clean}。开场和后续回复可以自然称呼“{clean}”，不要编造其他店名。"
+
+
+def build_video_group_buying_sales_instructions(merchant_name: str = "") -> str:
     return "\n".join(
         [
             "你是视频号团购本地生活业务的实时外呼销售助手。",
-            "目标：先回答客户当前问题。只有客户问题已回答、且客户没有拒绝资料/微信时，才用一句话推进到加微信/发资料/约时间。每次最多两句、80个汉字以内，口语化，别像念稿。",
+            _merchant_context_line(merchant_name),
+            "目标：先回答客户当前问题。客户刚表示想了解时，不要马上切微信；先补充一轮业务价值和执行流程。讲过方案后，客户仍说可以、想看、发资料或加微信，再只用一句话推进：问“方便加个微信吗？微信上把案例和费用发您，后面继续聊”。默认一句，最多两句；总长控制在65个汉字以内；介绍业务先用一句话，不要把素材全念完。",
             "全程只用普通话和简体中文回复，不要粤语、方言、繁体字或英文夹杂。",
             "业务素材：视频号团购能帮门店拿微信生态同城曝光，设计团购套餐，引导附近用户到店，并把客户沉淀到私域；适合餐饮、美业、休闲娱乐、到店服务等本地商家。",
             "服务内容：门店品类诊断、套餐设计、页面资料、上架代办、投放和数据复盘。不要承诺保底成交，不要说效果一定好或数据很可观，只能建议小范围测试曝光、咨询和到店数据。",
             "和美团区别：美团偏搜索、评价和平台成交；视频号团购偏微信内容推荐、同城曝光、朋友圈/社群传播和私域沉淀。不要说替代美团，要说补充微信生态流量。",
             "常见异议：问费用时说是付费服务，先判断适不适合再报价；说麻烦时强调可代办；说已有抖音/美团时说明视频号是微信同城流量补充；说考虑时争取先发资料。",
             "客户如果说不需要资料、不加微信、别重复、直接回答、你说重点，就立刻停止发资料/加微信推进，本通后续只回答问题或礼貌结束。",
+            "微信收口流程：客户第一次说想了解、要、需要、继续时，先讲“门店品类诊断、团购套餐、小范围测试曝光/咨询/到店数据”；不要马上确认手机号。只有客户明确说发资料、发案例、加微信，或已经听过方案后再次说可以/行/好/发我/发过来/想做，才确认“这个手机号就是您的微信吗？”；客户确认后礼貌说“稍后按这个手机号添加，资料发过去，感谢接听，先不多打扰”，然后结束通话；客户说不是，就问“您的微信号是哪个？”并记录，之后不要重复索要。",
             "合规要求：客户明确拒绝、说别联系或要挂电话时，礼貌结束并表示不再打扰；不要主动说自己不是机器人、不是 AI、是真人或智能助手。只有客户明确问是否 AI/机器人时，才坦诚说明是智能语音助手。",
             "电话助理处理：如果听到电话助理、秘书或系统提示要求说明姓名和来电原因，只用一句话回答身份和来电原因，请求转接负责人；不要展开销售，不要说“加微信”。",
             "真实电销风格：先听懂对方的问题和情绪，再回答；客户质疑时先承接一句，不要硬推，不要把同一句换个词反复念。",
@@ -209,7 +231,7 @@ def classify_realtime_call_input(text: str) -> str:
     ]
     if any(keyword in compact for keyword in direct_answer_keywords):
         return "direct_answer_only"
-    if compact in {"不需要", "不用", "不要", "不用了", "不需要了", "不要了", "没兴趣", "不感兴趣", "算了", "算了吧"}:
+    if compact in {"不需要", "不用", "不用了", "不需要了", "不要了", "没兴趣", "不感兴趣", "算了", "算了吧"}:
         return "terminal_close"
     terminal_keywords = [
         "先这样",
@@ -246,6 +268,9 @@ def classify_realtime_call_input(text: str) -> str:
         "什么情况",
         "什么公司",
         "什么事",
+        "什么鬼",
+        "什么意思",
+        "啥意思",
         "来电原因",
         "做什么",
         "做啥",
@@ -260,6 +285,38 @@ def classify_realtime_call_input(text: str) -> str:
     ]
     if any(keyword in compact for keyword in identity_keywords):
         return "identity_handoff"
+    continue_prompt_compacts = {
+        "你说",
+        "您说",
+        "说你说",
+        "说您说",
+        "方便你说",
+        "方便您说",
+        "方便说",
+        "你方便说",
+        "您方便说",
+        "那你说",
+        "那您说",
+        "你讲",
+        "您讲",
+        "继续",
+        "继续说",
+        "继续讲",
+        "你继续",
+        "您继续",
+        "说吧",
+        "讲吧",
+        "往下说",
+        "往下讲",
+        "接着说",
+        "接着讲",
+        "接着往下说",
+        "接着往下讲",
+        "可以你说",
+        "可以说",
+    }
+    if compact in continue_prompt_compacts or (compact and compact.replace("你说", "") == ""):
+        return "continue_prompt"
     audio_issue_keywords = [
         "听不清",
         "聽不清",
@@ -295,8 +352,6 @@ def classify_realtime_call_input(text: str) -> str:
         "在聽",
         "什么事",
         "什麼事",
-        "你说",
-        "你說",
     ]
     if len(compact) <= 8 and any(keyword in compact for keyword in greeting_keywords):
         return "human_greeting"
@@ -368,9 +423,14 @@ def _omni_context_prefix(
     recent_history: list[dict[str, str]] | None,
     first_human_after_screening: bool,
     last_reply: str,
+    merchant_name: str,
 ) -> str:
     lines = [
-        "回复规则：先回答客户当前这句话；不要复读上一轮；不要提技术状态或上一句为什么停了；最多两句，普通话。",
+        "回复规则：先回答客户当前这句话；不要复读上一轮；不要提技术状态或上一句为什么停了；默认一句短答，最多两句；除非客户明确追问，回复不要超过55字，普通话。",
+        _merchant_context_line(merchant_name),
+        "如果最近对话里客户已经回答过需求、费用、效果、流程或渠道问题，本轮禁止重新问同一个问题。",
+        "客户说了“可以、要、需要、了解、发我、怎么做”这类有效回答后，直接进入对应解释或下一步，不要再问“是否有需求”。",
+        "客户同意加微信/发资料后，不要重复说发资料；下一步只确认当前手机号是不是微信，不是再问微信号。",
     ]
     history = _format_omni_recent_history(recent_history)
     if history:
@@ -390,10 +450,12 @@ def build_omni_turn_instruction(
     first_human_after_screening: bool = False,
     last_reply: str = "",
     stage_instruction: str = "",
+    merchant_name: str = "",
 ) -> str:
     normalization = normalize_realtime_sales_text(text)
     clean = normalization.normalized_text
-    context = _omni_context_prefix(recent_history, first_human_after_screening, last_reply)
+    merchant_subject = _merchant_subject(merchant_name)
+    context = _omni_context_prefix(recent_history, first_human_after_screening, last_reply, merchant_name)
     sales_instruction = build_omni_sales_instruction(
         clean,
         signal,
@@ -403,10 +465,66 @@ def build_omni_turn_instruction(
     )
     if stage_instruction:
         sales_instruction = f"{sales_instruction}\n阶段控制：{stage_instruction}"
+    compact = re.sub(r"[\s。！？?!，,、.；;：:]+", "", clean)
+    if any(keyword in compact for keyword in ["具体怎么做", "怎么做", "具体做", "流程", "怎么合作"]):
+        return (
+            f"{context}\n{sales_instruction}\n客户正在按演示脚本询问流程：{clean}。"
+            "本轮禁止重新开场，禁止问需求，禁止提前要求加微信。"
+            "只说这句：先看门店品类和客单价，做一两个引流套餐，小范围测试曝光、咨询和到店数据。"
+            "只用普通话，不要粤语。"
+        )
+    if any(keyword in compact for keyword in ["费用怎么算", "费用", "价格", "收费", "多少钱", "报价"]):
+        return (
+            f"{context}\n{sales_instruction}\n客户正在按演示脚本问费用：{clean}。"
+            "本轮禁止绕回业务介绍，禁止要求先加微信。"
+            "只说这句：费用要看门店品类、套餐数量和投放节奏，我这边先判断适不适合，不合适就不建议做。"
+            "只用普通话，不要粤语。"
+        )
+    if any(keyword in compact for keyword in ["效果能保证", "能保证吗", "保证吗", "保底", "效果"]):
+        return (
+            f"{context}\n{sales_instruction}\n客户正在按演示脚本问效果保证：{clean}。"
+            "本轮禁止承诺成交，禁止绕回开场，回答后可以自然停顿。"
+            "只说这句：不能空口保证成交，只能先用小范围测试看真实曝光、咨询和到店数据，再决定要不要放大。"
+            "只用普通话，不要粤语。"
+        )
+    if any(
+        keyword in compact
+        for keyword in [
+            "发我看看",
+            "发我看",
+            "发给我",
+            "发资料",
+            "发案例",
+            "可以发",
+            "你发我",
+            "发过来",
+            "发一下",
+            "看看",
+            "了解一下",
+            "想了解",
+            "想做",
+            "怎么合作",
+            "下一步",
+        ]
+    ):
+        return (
+            f"{context}\n{sales_instruction}\n客户已经表达愿意接收资料：{clean}。"
+            "本轮进入加微信收口，禁止继续讲长介绍，禁止再问费用或效果。"
+            "只说这句：可以，我加您微信，把案例、流程和费用区间发您。这个手机号就是您的微信吗？"
+            "只用普通话，不要粤语。"
+        )
+    if compact in {"是", "是的", "对", "对的", "可以", "行", "就是", "是微信", "手机号就是微信", "这个号就是微信"}:
+        if any(keyword in last_reply for keyword in ["这个手机号就是您的微信吗", "手机号就是您的微信"]):
+            return (
+                f"{context}\n客户确认当前手机号就是微信：{clean}。"
+                "本轮只做最终确认，禁止继续销售介绍。"
+                "只说这句：好的，我稍后按这个手机号添加您，您通过后我把案例和费用区间发过去。感谢您接听，先不多打扰了。"
+                "只用普通话，不要粤语。"
+            )
     if signal == "call_screening":
         return (
             "这句话来自电话助理或电话秘书，不是真人客户。只用普通话原句回答："
-            "您好，我这边做视频号团购到店获客，来电想确认门店微信同城曝光合作，麻烦转接负责人，谢谢。"
+            f"您好，我这边做视频号团购到店获客，来电想确认{merchant_subject}微信同城曝光合作，麻烦转接负责人，谢谢。"
             "只说这一句，不要展开销售，不要说加微信，不要用粤语。"
         )
     if normalization.has_fix("group_buying_package"):
@@ -435,7 +553,7 @@ def build_omni_turn_instruction(
             return (
                 f"{context}\n{sales_instruction}\n真人客户刚从电话助理转接过来，只说了：{clean}。"
                 "不要重复电话助理那句，不要长开场，不要问二十秒。"
-                "只说这句：您好，我在。我是做视频号团购到店获客的，给您来电是想确认门店是否需要微信同城曝光。"
+                f"只说这句：您好，我在。我是做视频号团购到店获客的，给您来电是想确认{merchant_subject}是否需要微信同城曝光。"
                 "只用普通话，不要粤语。"
             )
         if last_reply and any(keyword in last_reply for keyword in ["方便听我说", "确认门店", "团购曝光合作"]):
@@ -447,11 +565,25 @@ def build_omni_turn_instruction(
             )
         return (
             f"{context}\n{sales_instruction}\n客户刚接电话说：{clean}。先确认对方听得到，再用一句短开场："
-            "您好，我是做视频号团购到店获客的，想确认门店是否需要微信同城曝光，方便听我说一句吗？"
+            f"您好，我是做视频号团购到店获客的，想确认{merchant_subject}是否需要微信同城曝光，方便听我说一句吗？"
+            "只用普通话，不要粤语。"
+        )
+    if signal == "continue_prompt":
+        if any(keyword in last_reply for keyword in ["可下单套餐", "同城曝光引到店", "设计可核销", "小范围测曝光"]):
+            return (
+                f"{context}\n{sales_instruction}\n客户是在让你继续上一段介绍：{clean}。"
+                "本轮禁止重新自我介绍，禁止再问“方便听我说吗”，禁止重复上一句。"
+                "只说这句：具体执行是三步：看门店品类和客单价，设计可核销套餐，再小范围测曝光、咨询和到店数据。"
+                "只用普通话，不要粤语。"
+            )
+        return (
+            f"{context}\n{sales_instruction}\n客户是在允许你继续说，不是在问身份，也不是拒绝：{clean}。"
+            "本轮禁止重新自我介绍，禁止再问“方便听我说吗”，直接承接上一句往下讲。"
+            "只说这句：简单说，我们帮门店设计可核销的团购套餐，再用视频号同城推荐，把附近客户引到店里。"
             "只用普通话，不要粤语。"
         )
     if signal == "identity_handoff":
-        identity_reply = _identity_handoff_reply(last_reply, recent_history)
+        identity_reply = _identity_handoff_reply(last_reply, recent_history, merchant_name)
         return (
             f"{context}\n{sales_instruction}\n客户问身份或没听到开头：{clean}。"
             "只回答身份和来电原因，不要推进业务，不要问费用/效果/美团区别，不要解释系统："
@@ -477,7 +609,7 @@ def build_omni_turn_instruction(
             f"{context}\n{sales_instruction}\n客户觉得你在重复或没有答到点：{clean}。"
             "先承接情绪：我不重复刚才那句。"
             "然后换角度直接回答客户真正问题；如果客户没给具体问题，只问：您是想听费用、效果，还是和美团区别？"
-            "本轮禁止推进资料或加微信。"
+            "本轮禁止推进资料或加微信，禁止再次问客户有没有团购、直播或短视频获客需求。"
         )
     if signal == "direct_answer_only":
         return (
@@ -494,10 +626,13 @@ def build_omni_turn_instruction(
             "只用普通话，不要粤语。"
         )
     return (
-        f"{context}\n{sales_instruction}\n客户刚说：{clean}。先直接回答客户这句话，再按素材用一句话推进到发资料或约时间。"
+        f"{context}\n{sales_instruction}\n客户刚说：{clean}。先直接回答客户这句话。"
+        "只有客户问题已经回答、且没有拒绝资料/微信/继续沟通时，才允许轻轻推进下一步。"
+        "如果推进下一步，只问：方便加个微信吗？我微信上把案例和费用发您，后面继续聊。"
         "如果客户要求只回答问题、指出你重复、或拒绝资料/微信，就不要再推进发资料或加微信，只直接回答。"
-        "除非客户明确要资料，否则不要主动说发资料；除非客户问是否AI，否则不要主动说智能助手。"
-        "最多两句，只用普通话，不要粤语。"
+        "如果客户已经回答了是否需要获客/团购/曝光，就不要重复问需求，改为说明流程、费用、效果或下一步。"
+        "除非客户明确同意加微信，否则不要连续说发资料；除非客户问是否AI，否则不要主动说智能助手。"
+        "默认一句短答，最多两句，只用普通话，不要粤语。"
     )
 
 
@@ -505,10 +640,12 @@ def build_barge_recovery_instruction(
     recent_history: list[dict[str, str]] | None,
     last_customer_text: str = "",
     last_assistant_reply: str = "",
+    merchant_name: str = "",
 ) -> str:
     history_text = _format_omni_recent_history(recent_history)
     prefix = [
         "客户插话后进入新一轮。现在必须直接接客户刚才的话回答。",
+        _merchant_context_line(merchant_name),
         "禁止提刚才停顿、听辨、系统、模型、识别、线路。",
         "如果客户话不完整，不要猜费用、效果、美团、餐饮或美业；只自然补一句。",
     ]
@@ -530,17 +667,18 @@ def build_barge_recovery_instruction(
         prefix.append("上一句在说明身份。客户可能没听清或急着问问题，只短答身份和来电目的。")
     else:
         prefix.append("默认只说一句：您说，我在听。")
-    prefix.append("最多两句，像真人销售，不要机械推进。")
+    prefix.append("默认一句短答，最多两句，像真人销售，不要机械推进。")
     return "\n".join(prefix)
 
 
-def _identity_handoff_reply(last_reply: str, recent_history: list[dict[str, str]] | None) -> str:
+def _identity_handoff_reply(last_reply: str, recent_history: list[dict[str, str]] | None, merchant_name: str = "") -> str:
     recent_text = " ".join(
         str(turn.get("content") or "")
         for turn in (recent_history or [])[-6:]
         if (turn.get("role") or "").strip().lower() == "assistant"
     )
     combined = last_reply + " " + recent_text
+    merchant_subject = _merchant_subject(merchant_name)
     if any(keyword in combined for keyword in ["做视频号团购", "同城曝光", "到店获客"]):
-        return "简单说，我是做视频号团购到店获客服务的，给您来电是确认微信同城曝光需求。"
-    return "我是做视频号团购到店获客的，给您来电是确认门店是否需要微信同城曝光。"
+        return f"简单说，我是做视频号团购到店获客服务的，给您来电是确认{merchant_subject}微信同城曝光需求。"
+    return f"我是做视频号团购到店获客的，给您来电是确认{merchant_subject}是否需要微信同城曝光。"

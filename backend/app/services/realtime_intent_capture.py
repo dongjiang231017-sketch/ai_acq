@@ -31,15 +31,23 @@ def register_realtime_test_call_context(
     caller_id: str | None,
     requested_route: str,
     effective_route: str,
+    merchant_name: str | None = None,
+    source: str = "realtime_test_call",
+    task_id: str | None = None,
+    lead_id: str | None = None,
 ) -> None:
     _append_context_record(
         {
             "type": "submit",
             "createdAt": _now_iso(),
             "phone": phone.strip(),
-            "merchantName": (caller_id or "单号真实试拨").strip() or "单号真实试拨",
+            "merchantName": (merchant_name or caller_id or "单号真实试拨").strip() or "单号真实试拨",
+            "callerId": (caller_id or "").strip(),
             "requestedRoute": requested_route,
             "effectiveRoute": effective_route,
+            "source": source,
+            "taskId": task_id or "",
+            "leadId": lead_id or "",
         }
     )
 
@@ -77,8 +85,17 @@ def record_realtime_intent_signal(
     intent: str,
     signal: str,
     source: str,
+    force: bool = False,
+    evidence: str | None = None,
+    latest_signal: str | None = None,
+    wechat_id: str | None = None,
+    wechat_is_phone: bool = False,
+    intent_level: str = "A",
+    intent_score: int = 92,
+    need_handoff: bool = True,
+    follow_status: str = "待分配",
 ) -> dict[str, Any] | None:
-    if not _is_strong_realtime_intent(text, intent):
+    if not force and not _is_strong_realtime_intent(text, intent):
         return None
     source_record_id = _call_key(call_id)
     if not source_record_id:
@@ -86,10 +103,16 @@ def record_realtime_intent_signal(
     context = context or {}
     phone = str(context.get("phone") or "").strip() or None
     merchant_name = str(context.get("merchantName") or "").strip() or "单号真实试拨"
-    evidence = "客户明确要求加微信/发资料"
+    evidence = evidence or "客户明确要求加微信/发资料"
+    latest_signal = latest_signal or text
+    level = intent_level if intent_level in {"A", "B", "C"} else "A"
+    score = max(0, min(100, int(intent_score or 0)))
+    clean_wechat_id = (wechat_id or "").strip()[:80] or None
     with SessionLocal() as db:
         try:
             lead = _find_lead(db, phone)
+            if lead and clean_wechat_id:
+                lead.wechat_id = clean_wechat_id
             customer = _find_customer(db, lead.id if lead else None, phone, merchant_name)
             if not customer:
                 customer = IntentCustomer(
@@ -100,24 +123,26 @@ def record_realtime_intent_signal(
                     category=lead.category if lead else "",
                     contact_name=lead.contact_name if lead else None,
                     phone=lead.phone if lead else phone,
-                    intent_level="A",
-                    intent_score=92,
+                    intent_level=level,
+                    intent_score=score,
                     source_channels="实时电话",
-                    latest_signal=text,
+                    latest_signal=latest_signal,
                     evidence_summary=evidence,
-                    follow_status="待分配",
-                    need_handoff=True,
+                    follow_status=follow_status,
+                    need_handoff=need_handoff,
                 )
                 db.add(customer)
                 db.flush()
             else:
-                customer.intent_level = "A"
-                customer.intent_score = max(int(customer.intent_score or 0), 92)
+                current_score = int(customer.intent_score or 0)
+                if score >= current_score:
+                    customer.intent_level = level
+                customer.intent_score = max(current_score, score)
                 customer.source_channels = _merge_channels(customer.source_channels, "实时电话")
-                customer.latest_signal = text
+                customer.latest_signal = latest_signal
                 customer.evidence_summary = evidence
-                customer.need_handoff = True
-                customer.follow_status = "待分配"
+                customer.need_handoff = customer.need_handoff or need_handoff
+                customer.follow_status = follow_status
                 if phone and not customer.phone:
                     customer.phone = phone
 
@@ -135,12 +160,19 @@ def record_realtime_intent_signal(
                         source_type="realtime_call",
                         source_record_id=source_record_id,
                         channel="实时电话",
-                        intent_level="A",
-                        summary=evidence,
-                        evidence_text=text,
-                        need_handoff=True,
+                        intent_level=level,
+                        summary=_short(evidence, 240),
+                        evidence_text=latest_signal,
+                        need_handoff=need_handoff,
                     )
                 )
+            else:
+                event.customer_id = customer.id
+                event.lead_id = customer.lead_id
+                event.intent_level = level
+                event.summary = _short(evidence, 240)
+                event.evidence_text = latest_signal
+                event.need_handoff = event.need_handoff or need_handoff
             _ensure_work_order(db, customer)
             db.commit()
             return {
@@ -150,10 +182,47 @@ def record_realtime_intent_signal(
                 "summary": evidence,
                 "signal": signal,
                 "source": source,
+                "wechatId": clean_wechat_id or "",
+                "wechatIsPhone": wechat_is_phone,
             }
         except SQLAlchemyError:
             db.rollback()
             raise
+
+
+def record_realtime_wechat_signal(
+    *,
+    call_id: str,
+    context: dict[str, Any] | None,
+    text: str,
+    signal: str,
+    source: str,
+    wechat_id: str,
+    wechat_is_phone: bool,
+    summary: str = "",
+) -> dict[str, Any] | None:
+    clean_wechat_id = (wechat_id or "").strip()
+    if not clean_wechat_id:
+        return None
+    evidence = summary or (
+        f"客户同意加微信，确认当前手机号就是微信：{clean_wechat_id}"
+        if wechat_is_phone
+        else f"客户同意加微信，提供微信号：{clean_wechat_id}"
+    )
+    latest_signal = f"{evidence}；客户原话：{text}"
+    return record_realtime_intent_signal(
+        call_id=call_id,
+        context=context,
+        text=text,
+        intent="加微信/发资料",
+        signal=signal,
+        source=source,
+        force=True,
+        evidence=evidence,
+        latest_signal=latest_signal,
+        wechat_id=clean_wechat_id,
+        wechat_is_phone=wechat_is_phone,
+    )
 
 
 def _is_strong_realtime_intent(text: str, intent: str) -> bool:
@@ -216,6 +285,8 @@ def _find_customer(db: Any, lead_id: str | None, phone: str | None, merchant_nam
 
 
 def _ensure_work_order(db: Any, customer: IntentCustomer) -> None:
+    priority = "P0" if customer.intent_level == "A" else "P1"
+    due_hours = 4 if customer.intent_level == "A" else 24
     exists = db.scalar(
         select(FollowUpWorkOrder).where(
             FollowUpWorkOrder.customer_id == customer.id,
@@ -223,17 +294,17 @@ def _ensure_work_order(db: Any, customer: IntentCustomer) -> None:
         )
     )
     if exists:
-        exists.priority = "P0"
+        exists.priority = priority
         exists.last_note = customer.latest_signal
         return
     db.add(
         FollowUpWorkOrder(
             customer_id=customer.id,
-            title=f"{customer.merchant_name} A级意向跟进",
+            title=f"{customer.merchant_name} {customer.intent_level}级意向跟进",
             owner_name=customer.owner_name,
             status="待分配",
-            priority="P0",
-            sla_due_at=datetime.utcnow() + timedelta(hours=4),
+            priority=priority,
+            sla_due_at=datetime.utcnow() + timedelta(hours=due_hours),
             last_note=customer.latest_signal,
         )
     )
@@ -244,6 +315,11 @@ def _merge_channels(existing: str, channel: str) -> str:
     if channel not in channels:
         channels.append(channel)
     return ",".join(channels)
+
+
+def _short(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def _call_key(call_id: str) -> str:

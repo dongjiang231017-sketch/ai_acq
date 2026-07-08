@@ -42,6 +42,11 @@ from app.services.asterisk_ami import (
 from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
+from app.services.livekit_outbound import (
+    LiveKitOutboundError,
+    build_livekit_test_call_response,
+    dispatch_livekit_outbound_call,
+)
 from app.services.realtime_intent_capture import register_realtime_test_call_context
 from app.services.realtime_outbound import (
     RealtimeSessionNotFound,
@@ -157,8 +162,14 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
     pipeline = build_realtime_pipeline()
     actual_bridge_route = str(pipeline.get("actualBridgeRoute") or active_bridge_conversation_route() or "pipeline")
     requested_route = (payload.conversation_route or actual_bridge_route or "pipeline").strip().lower()
-    if requested_route not in {"pipeline", "omni"}:
+    if requested_route not in {"pipeline", "omni", "livekit"}:
         requested_route = "pipeline"
+    if requested_route == "livekit":
+        try:
+            livekit_result = dispatch_livekit_outbound_call(payload.phone, caller_id=payload.caller_id)
+        except LiveKitOutboundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return build_livekit_test_call_response(livekit_result)
     route_probe = prepare_realtime_route_for_call(requested_route)
     effective_route = route_probe.effective_route
     route_fallback_reason = route_probe.route_fallback_reason
@@ -174,6 +185,7 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
     register_realtime_test_call_context(
         phone=payload.phone,
         caller_id=payload.caller_id,
+        merchant_name=payload.merchant_name,
         requested_route=requested_route,
         effective_route=effective_route,
     )

@@ -16,7 +16,11 @@ from app.services.realtime_sales_playbook import (
 )
 from app.services.realtime_sales_state import SalesStateMachine
 from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
-from app.tools.realtime_audio_bridge import _adds_significant_business_question, should_commit_stable_asr_partial
+from app.tools.realtime_audio_bridge import (
+    _adds_significant_business_question,
+    _stable_asr_partial_turn_text,
+    should_commit_stable_asr_partial,
+)
 from app.tools.realtime_call_replay_eval import evaluate_replay_cases
 
 
@@ -89,7 +93,7 @@ SCENARIOS = [
     Scenario("不需要。", "rejection", ("再见", "不打扰"), ("标记", "不再跟进", "生意顺利")),
     Scenario("不需要了，别联系。", "rejection", ("再见", "不打扰"), ("标记", "不再跟进", "生意顺利")),
     Scenario("现在就这样吧，挂了。", "rejection", ("再见", "不打扰"), ("视频号", "团购", "自我介绍", "方便", "资料", "加微信")),
-    Scenario("那你发我看看。", "materials", ("发", "案例", "流程")),
+    Scenario("那你发我看看。", "materials", ("微信", "方便"), ("稍后", "看完再沟通")),
     Scenario("可以，你说一下。", "process", ("套餐", "测试", "品类", "团购")),
     Scenario("这个靠谱吗？", "guarantee", ("测试", "数据", "不能", "保底")),
     Scenario("是不是官方的？", "identity", ("顾问", "服务", "视频号")),
@@ -556,6 +560,74 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
                 "issues": [] if should_commit_stable_asr_partial(partial_text) else [f"waited:{partial_text}"],
             }
         )
+    exposure_cumulative = "接电话你详细讲讲你的业务，多一个曝光入口，你们怎么给我曝光？"
+    exposure_selected = _stable_asr_partial_turn_text(exposure_cumulative)
+    gates.append(
+        {
+            "text": "long_exposure_partial_selects_latest_question",
+            "reply": exposure_selected,
+            "score": 100
+            if "怎么给我曝光" in exposure_selected and should_commit_stable_asr_partial(exposure_selected)
+            else 35,
+            "issues": []
+            if "怎么给我曝光" in exposure_selected and should_commit_stable_asr_partial(exposure_selected)
+            else [f"selected:{exposure_selected}"],
+        }
+    )
+    price_category_cumulative = "那你怎么收费的呢？餐饮"
+    price_category_selected = _stable_asr_partial_turn_text(price_category_cumulative)
+    gates.append(
+        {
+            "text": "price_with_category_partial_keeps_price_question",
+            "reply": price_category_selected,
+            "score": 100
+            if "怎么收费" in price_category_selected
+            and price_category_selected != "餐饮"
+            and should_commit_stable_asr_partial(price_category_selected)
+            else 35,
+            "issues": []
+            if "怎么收费" in price_category_selected
+            and price_category_selected != "餐饮"
+            and should_commit_stable_asr_partial(price_category_selected)
+            else [f"selected:{price_category_selected}"],
+        }
+    )
+    repeated_tail_cumulative = "免费还是收费，你是做投流的吗？我刚才都已"
+    repeated_tail_selected = _stable_asr_partial_turn_text(repeated_tail_cumulative)
+    gates.append(
+        {
+            "text": "incomplete_repetition_tail_not_committed",
+            "reply": repeated_tail_selected,
+            "score": 100
+            if "投流" in repeated_tail_selected
+            and "我刚才" not in repeated_tail_selected
+            and should_commit_stable_asr_partial(repeated_tail_selected)
+            else 35,
+            "issues": []
+            if "投流" in repeated_tail_selected
+            and "我刚才" not in repeated_tail_selected
+            and should_commit_stable_asr_partial(repeated_tail_selected)
+            else [f"selected:{repeated_tail_selected}"],
+        }
+    )
+    incomplete_phone_partial = "可以加我微信，这手机号就"
+    incomplete_phone_selected = _stable_asr_partial_turn_text(incomplete_phone_partial)
+    gates.append(
+        {
+            "text": "incomplete_phone_confirmation_tail_waits_for_final",
+            "reply": incomplete_phone_selected,
+            "score": 100
+            if "手机号就" in incomplete_phone_selected
+            and "加我微信" not in incomplete_phone_selected
+            and not should_commit_stable_asr_partial(incomplete_phone_selected)
+            else 35,
+            "issues": []
+            if "手机号就" in incomplete_phone_selected
+            and "加我微信" not in incomplete_phone_selected
+            and not should_commit_stable_asr_partial(incomplete_phone_selected)
+            else [f"selected:{incomplete_phone_selected}"],
+        }
+    )
     unanswered_score = score_realtime_events(
         [
             {"type": "call_connected", "callId": "unanswered", "at": "2026-07-06T02:04:05.000Z"},
@@ -628,6 +700,112 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
             "text": "sales_state_suppresses_push_after_refusal",
             "score": 100 if stage.value == "objection" and "资料" not in constrained and "加微信" not in constrained else 45,
             "issues": [] if stage.value == "objection" and "资料" not in constrained and "加微信" not in constrained else ["push_not_suppressed"],
+        }
+    )
+    wechat_fsm = SalesStateMachine()
+    wechat_fsm.record_assistant_reply("方便加个微信吗？我微信上把案例和费用发您。")
+    phone_confirm = wechat_fsm.handle_wechat_closing_turn("可以。", "低信息确认", phone="18107090349")
+    gates.append(
+        {
+            "text": "wechat_accept_asks_phone_confirmation",
+            "score": 100 if phone_confirm and "手机号" in phone_confirm.reply and "微信" in phone_confirm.reply else 35,
+            "issues": [] if phone_confirm and "手机号" in phone_confirm.reply and "微信" in phone_confirm.reply else ["phone_confirm_not_asked"],
+        }
+    )
+    phone_record = wechat_fsm.handle_wechat_closing_turn("是的。", "低信息确认", phone="18107090349")
+    gates.append(
+        {
+            "text": "wechat_phone_confirmation_records_phone",
+            "score": 100
+            if phone_record and phone_record.record and phone_record.wechat_is_phone and phone_record.wechat_id == "18107090349"
+            else 35,
+            "issues": []
+            if phone_record and phone_record.record and phone_record.wechat_is_phone and phone_record.wechat_id == "18107090349"
+            else ["phone_wechat_not_recorded"],
+        }
+    )
+    spoken_phone_fsm = SalesStateMachine()
+    spoken_phone_fsm.record_assistant_reply("我确认一下，这个手机号就是您的微信吗？")
+    spoken_phone_record = spoken_phone_fsm.handle_wechat_closing_turn("对，这手机号是我微信的。", "低信息确认", phone="18107090349")
+    gates.append(
+        {
+            "text": "wechat_spoken_phone_is_wechat_records_phone",
+            "score": 100
+            if spoken_phone_record
+            and spoken_phone_record.record
+            and spoken_phone_record.wechat_is_phone
+            and spoken_phone_record.wechat_id == "18107090349"
+            else 35,
+            "issues": []
+            if spoken_phone_record
+            and spoken_phone_record.record
+            and spoken_phone_record.wechat_is_phone
+            and spoken_phone_record.wechat_id == "18107090349"
+            else ["spoken_phone_wechat_not_recorded"],
+        }
+    )
+    incomplete_phone_fsm = SalesStateMachine()
+    incomplete_phone_fsm.record_assistant_reply("我确认一下，这个手机号就是您的微信吗？")
+    incomplete_phone_wait = incomplete_phone_fsm.handle_wechat_closing_turn("可以加我微信，这手机号就", "低信息确认", phone="18107090349")
+    incomplete_phone_record = incomplete_phone_fsm.handle_wechat_closing_turn(
+        "这手机号就是我的微信。",
+        "低信息确认",
+        phone="18107090349",
+    )
+    gates.append(
+        {
+            "text": "wechat_incomplete_phone_confirmation_waits_for_full_sentence",
+            "score": 100
+            if incomplete_phone_wait
+            and incomplete_phone_wait.action == "wait_phone_confirmation"
+            and not incomplete_phone_wait.reply
+            and incomplete_phone_record
+            and incomplete_phone_record.record
+            and incomplete_phone_record.wechat_is_phone
+            and incomplete_phone_record.wechat_id == "18107090349"
+            else 35,
+            "issues": []
+            if incomplete_phone_wait
+            and incomplete_phone_wait.action == "wait_phone_confirmation"
+            and not incomplete_phone_wait.reply
+            and incomplete_phone_record
+            and incomplete_phone_record.record
+            and incomplete_phone_record.wechat_is_phone
+            and incomplete_phone_record.wechat_id == "18107090349"
+            else [f"wait:{incomplete_phone_wait}", f"record:{incomplete_phone_record}"],
+        }
+    )
+    custom_wechat_fsm = SalesStateMachine()
+    custom_wechat_fsm.record_assistant_reply("可以，那我确认一下，这个手机号就是您的微信吗？")
+    ask_wechat_id = custom_wechat_fsm.handle_wechat_closing_turn("不是。", "低信息确认", phone="18107090349")
+    custom_wechat = custom_wechat_fsm.handle_wechat_closing_turn("我的微信是 wx_test123。", "加微信/发资料", phone="18107090349")
+    gates.append(
+        {
+            "text": "wechat_non_phone_captures_custom_id",
+            "score": 100
+            if ask_wechat_id
+            and "微信号" in ask_wechat_id.reply
+            and custom_wechat
+            and custom_wechat.record
+            and custom_wechat.wechat_id == "wx_test123"
+            else 35,
+            "issues": []
+            if ask_wechat_id
+            and "微信号" in ask_wechat_id.reply
+            and custom_wechat
+            and custom_wechat.record
+            and custom_wechat.wechat_id == "wx_test123"
+            else ["custom_wechat_not_captured"],
+        }
+    )
+    repeat_pitch_fsm = SalesStateMachine()
+    repeat_pitch_fsm.record_assistant_reply("可以，稍后微信发案例和流程给您。")
+    deduped_pitch = repeat_pitch_fsm.constrain_reply("好的，我按微信发资料，电话里不多占您时间。")
+    gates.append(
+        {
+            "text": "wechat_material_pitch_dedupes_to_phone_confirm",
+            "score": 100 if "手机号" in deduped_pitch and "微信" in deduped_pitch else 35,
+            "issues": [] if "手机号" in deduped_pitch and "微信" in deduped_pitch else ["wechat_pitch_repeated"],
         }
     )
     quality_chain = RealtimeAudioQualityChain(enabled=True)

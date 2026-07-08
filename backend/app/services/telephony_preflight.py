@@ -81,7 +81,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 (
                     "在服务器 Asterisk 的 manager.conf 创建 AMI 用户，并写入后端环境。"
                     if deployment_mode == "server"
-                    else "优先使用桌面客户端内置 Asterisk 生成的 backend-asterisk.env；开发调试才手工配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。"
+                    else "优先使用桌面客户端或后台一键匹配生成的 backend-asterisk.env；开发调试才手工配置 ASTERISK_AMI_USERNAME 和 ASTERISK_AMI_PASSWORD。"
                 ),
             )
         )
@@ -100,7 +100,7 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
                 (
                     "检查服务器 Asterisk 是否运行、manager.conf bindaddr/permit、本机防火墙，以及 ASTERISK_HOST/AMI 端口。"
                     if deployment_mode == "server"
-                    else "检查客户端 sidecar 是否已启动、ASTERISK_HOST、ASTERISK_AMI_PORT、manager.conf bindaddr/permit、防火墙。"
+                    else "检查客户端 sidecar 或本机 Asterisk 是否已启动、ASTERISK_HOST、ASTERISK_AMI_PORT、manager.conf bindaddr/permit、防火墙。"
                 ),
             )
         )

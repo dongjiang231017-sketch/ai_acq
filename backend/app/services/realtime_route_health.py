@@ -98,6 +98,8 @@ def probe_omni_realtime_connect() -> tuple[bool, str]:
 
 
 def prepare_realtime_route_for_call(requested_route: str) -> RealtimeRouteProbe:
+    if requested_route == "livekit":
+        return RealtimeRouteProbe(requested_route=requested_route, effective_route="livekit")
     route = "omni" if requested_route == "omni" else "pipeline"
     if route != "omni":
         return RealtimeRouteProbe(requested_route=requested_route, effective_route=route)

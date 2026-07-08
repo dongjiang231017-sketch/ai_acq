@@ -100,7 +100,7 @@ class AsteriskSidecar {
 
     this.managedProcess = spawn(runtime.path, ["-f", "-C", layout.asteriskConfPath], {
       cwd: layout.baseDir,
-      detached: false,
+      detached: true,
       env: { ...process.env, ...(runtime.env || {}), ASTERISK_CONSOLE: "no" },
       stdio: "ignore",
     });
@@ -201,6 +201,7 @@ class AsteriskSidecar {
       createdAt: new Date().toISOString(),
       ...(existing || {}),
     };
+    const preferredAdvertisedHost = process.env.AI_ACQ_ASTERISK_ADVERTISED_HOST || state.asteriskAdvertisedHost || detectPrimaryLocalIpv4();
     if (!state.voiceGatewayHost && state.uc100Host) state.voiceGatewayHost = state.uc100Host;
     if (!state.voiceGatewaySipPort && state.uc100SipPort) state.voiceGatewaySipPort = state.uc100SipPort;
     if (!state.voiceGatewaySipUsername && state.uc100SipUsername) state.voiceGatewaySipUsername = state.uc100SipUsername;
@@ -234,7 +235,11 @@ class AsteriskSidecar {
     if (Object.prototype.hasOwnProperty.call(process.env, "AI_ACQ_ASTERISK_ADVERTISED_HOST")) {
       state.asteriskAdvertisedHost = process.env.AI_ACQ_ASTERISK_ADVERTISED_HOST || "";
     }
+    if (!state.asteriskAdvertisedHost && preferredAdvertisedHost) {
+      state.asteriskAdvertisedHost = preferredAdvertisedHost;
+    }
     if (process.env.AI_ACQ_ASTERISK_LOCAL_NET) state.asteriskLocalNet = process.env.AI_ACQ_ASTERISK_LOCAL_NET;
+    state.asteriskLocalNet = normalizeLocalNet(state.asteriskLocalNet, state.asteriskAdvertisedHost);
     if (process.env.AI_ACQ_VOICE_GATEWAY_MAX_CHANNELS || process.env.AI_ACQ_ASTERISK_MAX_CHANNELS) {
       state.maxChannels = Number(process.env.AI_ACQ_VOICE_GATEWAY_MAX_CHANNELS || process.env.AI_ACQ_ASTERISK_MAX_CHANNELS);
     }
@@ -388,11 +393,23 @@ class AsteriskSidecar {
 
   writeConfigs(paths) {
     const { state } = paths;
+    const runtimeDataDir = paths.runtime?.dataDir || paths.dataDir;
     const moduleDir = paths.runtime?.modulesDir
       ? `astmoddir => ${paths.runtime.modulesDir}
 `
       : "";
+    const gatewayServerRegistered = state.voiceGatewayProfile === "dinstar_8t_server";
     const gatewayRegisterEnabled = Boolean(state.voiceGatewaySipUsername && state.voiceGatewaySipPassword);
+    const endpointNames = Array.from(
+      new Set(
+        [state.voiceGatewaySipUsername, state.trunkName]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      ),
+    );
+    const primaryEndpointName = endpointNames[0] || state.trunkName;
+    const authName = gatewayServerRegistered ? `${primaryEndpointName}-auth` : `${state.trunkName}-auth`;
+    const aorName = gatewayServerRegistered ? primaryEndpointName : `${state.trunkName}-aor`;
     const advertisedTransport = state.asteriskAdvertisedHost
       ? `external_signaling_address = ${state.asteriskAdvertisedHost}
 external_media_address = ${state.asteriskAdvertisedHost}
@@ -408,20 +425,39 @@ username = ${state.voiceGatewaySipUsername}
 password = ${state.voiceGatewaySipPassword}
 `
       : "";
+    const gatewayAuthBlock = gatewayAuth ? gatewayAuth.replaceAll(`${state.trunkName}-auth`, authName) : "";
     const gatewayEndpointAuth = gatewayRegisterEnabled
-      ? `outbound_auth = ${state.trunkName}-auth
+      ? gatewayServerRegistered
+        ? `auth = ${authName}
+identify_by = auth_username,username,ip
+from_user = ${state.voiceGatewaySipUsername}
+callerid = AI获客 <${state.voiceGatewaySipUsername}>
+`
+        : `outbound_auth = ${authName}
 from_user = ${state.voiceGatewaySipUsername}
 from_domain = ${state.voiceGatewayHost}
 callerid = ${state.voiceGatewaySipUsername}
 contact_user = ${state.voiceGatewaySipUsername}
 `
       : "";
-    const gatewayRegistration = gatewayRegisterEnabled
+    const gatewayAor = gatewayServerRegistered
+      ? `[${aorName}]
+type = aor
+max_contacts = ${state.maxChannels}
+remove_existing = no
+qualify_frequency = 30
+`
+      : `[${aorName}]
+type = aor
+contact = sip:${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
+qualify_frequency = 30
+`;
+    const gatewayRegistration = gatewayRegisterEnabled && !gatewayServerRegistered
       ? `
 [${state.trunkName}-registration]
 type = registration
 transport = transport-udp
-outbound_auth = ${state.trunkName}-auth
+outbound_auth = ${authName}
 server_uri = sip:${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
 client_uri = sip:${state.voiceGatewaySipUsername}@${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
 contact_user = ${state.voiceGatewaySipUsername}
@@ -430,15 +466,39 @@ forbidden_retry_interval = 30
 expiration = 300
 `
       : "";
+    const gatewayIdentify = gatewayServerRegistered
+      ? ""
+      : `[${state.trunkName}-identify]
+type = identify
+endpoint = ${state.trunkName}
+match = ${state.voiceGatewayHost}
+`;
+    const gatewayEndpoints = endpointNames
+      .map(
+        (endpointName) => `[${endpointName}]
+type = endpoint
+transport = transport-udp
+context = from-voice-gateway
+disallow = all
+allow = alaw,ulaw
+aors = ${aorName}
+${gatewayEndpointAuth}direct_media = no
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+timers = no
+`,
+      )
+      .join("\n");
     writeFileIfChanged(
       paths.asteriskConfPath,
       `[directories]
 astetcdir => ${paths.configDir}
-astvarlibdir => ${paths.dataDir}
+astvarlibdir => ${runtimeDataDir}
 astdbdir => ${paths.stateDir}
 astkeydir => ${paths.keyDir}
-astdatadir => ${paths.dataDir}
-astagidir => ${path.join(paths.dataDir, "agi-bin")}
+astdatadir => ${runtimeDataDir}
+astagidir => ${path.join(runtimeDataDir, "agi-bin")}
 astspooldir => ${paths.spoolDir}
 astrundir => ${paths.runDir}
 astlogdir => ${paths.logDir}
@@ -482,36 +542,18 @@ permit = 127.0.0.1/255.255.255.255
       `[global]
 type = global
 user_agent = AI_ACQ_Client_Asterisk
+endpoint_identifier_order = auth_username,username,ip,anonymous
 
 [transport-udp]
 type = transport
 protocol = udp
 bind = 0.0.0.0:${state.sipPort}
-${advertisedTransport}${gatewayAuth}
+${advertisedTransport}${gatewayAuthBlock}
 
-[${state.trunkName}]
-type = endpoint
-transport = transport-udp
-context = from-voice-gateway
-disallow = all
-allow = alaw,ulaw
-aors = ${state.trunkName}-aor
-${gatewayEndpointAuth}direct_media = no
-rtp_symmetric = yes
-force_rport = yes
-rewrite_contact = yes
-timers = no
-
-[${state.trunkName}-aor]
-type = aor
-contact = sip:${state.voiceGatewayHost}:${state.voiceGatewaySipPort}
-qualify_frequency = 30
+${gatewayEndpoints}
+${gatewayAor}
 ${gatewayRegistration}
-
-[${state.trunkName}-identify]
-type = identify
-endpoint = ${state.trunkName}
-match = ${state.voiceGatewayHost}
+${gatewayIdentify}
 `,
     );
     writeFileIfChanged(
@@ -539,6 +581,7 @@ rtpend = ${state.rtpEnd}
       paths.backendEnvPath,
       `# Generated by the AI ACQ desktop client. Do not commit this file.
 TELEPHONY_GATEWAY_MODE=asterisk
+ASTERISK_DEPLOYMENT_MODE=desktop
 VOICE_GATEWAY_PROFILE=${state.voiceGatewayProfile}
 VOICE_GATEWAY_LABEL=${state.voiceGatewayLabel}
 VOICE_GATEWAY_HOST=${state.voiceGatewayHost}
@@ -559,6 +602,8 @@ ASTERISK_BULK_CALL_ENABLED=false
 ASTERISK_AUDIO_SOCKET_BIND_HOST=${state.audioSocketHost}
 ASTERISK_AUDIO_SOCKET_HOST=${state.audioSocketHost}
 ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
+AI_ACQ_ASTERISK_ADVERTISED_HOST=${state.asteriskAdvertisedHost}
+AI_ACQ_ASTERISK_LOCAL_NET=${state.asteriskLocalNet}
 `,
       0o600,
     );
@@ -569,6 +614,18 @@ ASTERISK_AUDIO_SOCKET_PORT=${state.audioSocketPort}
     if (explicit && fileExists(explicit)) {
       return runtimeFromPath("explicit", explicit);
     }
+
+    const userManaged = [
+      path.join(process.env.AI_ACQ_ASTERISK_RUNTIME_ROOT || "", "bin", "asterisk"),
+      path.join(process.env.AI_ACQ_ASTERISK_RUNTIME_ROOT || "", "sbin", "asterisk"),
+      path.join(process.env.AI_ACQ_ASTERISK_RUNTIME_ROOT || "", os.platform(), "bin", "asterisk"),
+      path.join(process.env.AI_ACQ_ASTERISK_RUNTIME_ROOT || "", os.platform(), "sbin", "asterisk"),
+      path.join(os.homedir(), ".ai-acq-client", "asterisk-runtime", "bin", "asterisk"),
+      path.join(os.homedir(), ".ai-acq-client", "asterisk-runtime", "sbin", "asterisk"),
+      path.join(os.homedir(), ".ai-acq-client", "asterisk-runtime", os.platform(), "bin", "asterisk"),
+      path.join(os.homedir(), ".ai-acq-client", "asterisk-runtime", os.platform(), "sbin", "asterisk"),
+    ].find(fileExists);
+    if (userManaged) return runtimeFromPath("user-managed", userManaged);
 
     const bundled = [
       path.join(process.resourcesPath || "", "asterisk", os.platform(), "bin", "asterisk"),
@@ -772,6 +829,17 @@ function runtimeFromPath(mode, binaryPath) {
     "/usr/lib/asterisk/modules",
     "/usr/lib64/asterisk/modules",
   ]);
+  const dataDir = findFirstDir([
+    path.join(root, "var", "lib", "asterisk"),
+    path.join(root, "share", "asterisk"),
+    path.join(path.dirname(path.dirname(binaryPath)), "var", "lib", "asterisk"),
+    path.join(path.dirname(path.dirname(binaryPath)), "share", "asterisk"),
+    "/opt/homebrew/var/lib/asterisk",
+    "/opt/homebrew/share/asterisk",
+    "/usr/local/var/lib/asterisk",
+    "/usr/local/share/asterisk",
+    "/usr/share/asterisk",
+  ]);
   const libDir = findFirstDir([path.join(root, "lib"), path.join(root, "lib64")]);
   const env = {};
   if (libDir) {
@@ -785,6 +853,7 @@ function runtimeFromPath(mode, binaryPath) {
     safePath: binaryPath,
     root,
     modulesDir,
+    dataDir,
     modulesFound: dirExists(modulesDir),
     ready: dirExists(modulesDir),
     env,
@@ -804,6 +873,36 @@ function commandPath(command) {
   const result = spawnSync("sh", ["-lc", `command -v ${command}`], { encoding: "utf8" });
   if (result.status !== 0) return "";
   return String(result.stdout || "").trim().split("\n")[0] || "";
+}
+
+function detectPrimaryLocalIpv4() {
+  const interfaces = os.networkInterfaces();
+  for (const addresses of Object.values(interfaces)) {
+    for (const address of addresses || []) {
+      if (address && address.family === "IPv4" && !address.internal && address.address) {
+        return address.address;
+      }
+    }
+  }
+  return "";
+}
+
+function normalizeLocalNet(localNet, host) {
+  const normalized = String(localNet || "").trim();
+  const derived = defaultLocalNetForHost(host);
+  if (!normalized) return derived;
+  if (normalized === DEFAULTS.asteriskLocalNet && derived && derived !== normalized) return derived;
+  return normalized;
+}
+
+function defaultLocalNetForHost(host) {
+  const parts = String(host || "").trim().split(".");
+  if (parts.length !== 4) return DEFAULTS.asteriskLocalNet;
+  const octets = parts.map((value) => Number(value));
+  if (octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+    return DEFAULTS.asteriskLocalNet;
+  }
+  return `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
 }
 
 function isTcpOpen(host, port, timeoutMs) {

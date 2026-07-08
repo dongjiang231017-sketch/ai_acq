@@ -35,7 +35,7 @@ class SystemSetting(Base):
     item_key: Mapped[str] = mapped_column(String(80), index=True)
     label: Mapped[str] = mapped_column(String(120), index=True)
     value: Mapped[str] = mapped_column(Text, default="")
-    value_type: Mapped[str] = mapped_column(String(80), default="text")
+    value_type: Mapped[str] = mapped_column(String(240), default="text")
     status: Mapped[str] = mapped_column(String(40), default="已启用", index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     sensitive: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
