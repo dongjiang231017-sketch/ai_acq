@@ -1,0 +1,23 @@
+# livekit-server 配置
+# 部署前必改：keys 里的 API key/secret（自己生成，别用示例值）
+port: 7880
+bind_addresses:
+  - 0.0.0.0
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50200
+  # 阿里云 ECS 是内网网卡 + 公网EIP，必须开启外部IP探测
+  use_external_ip: true
+
+redis:
+  address: 127.0.0.1:6379
+
+keys:
+  # 格式  APIKey: secret —— 与 sip.yaml、agent/.env 三处保持一致
+  # 生成方式：openssl rand -hex 16
+  APIxxxxxxxx: "REPLACE_WITH_RANDOM_SECRET"
+
+logging:
+  level: info

@@ -1,0 +1,10 @@
+{
+  "trunk": {
+    "name": "dinstar-gsm-gateway",
+    "address": "REPLACE_网关IP:5060",
+    "transport": "udp",
+    "numbers": ["REPLACE_主叫号码"],
+    "auth_username": "",
+    "auth_password": ""
+  }
+}

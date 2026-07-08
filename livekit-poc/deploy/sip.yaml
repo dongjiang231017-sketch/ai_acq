@@ -1,0 +1,21 @@
+# livekit-sip 配置（对接鼎信 8 口 GSM 网关）
+# api_key / api_secret 必须与 livekit.yaml 的 keys 一致
+api_key: APIxxxxxxxx
+api_secret: "REPLACE_WITH_RANDOM_SECRET"
+ws_url: ws://127.0.0.1:7880
+
+redis:
+  address: 127.0.0.1:6379
+
+# SIP 信令端口（网关的 SIP 服务器地址填 <服务器公网IP或内网IP>:5060）
+sip_port: 5060
+# RTP 媒体端口段，安全组需放行 UDP
+rtp_port:
+  start: 10000
+  end: 12000
+
+# 阿里云同 VPC 内网直连网关时可关；走公网时必须开
+use_external_ip: true
+
+logging:
+  level: info

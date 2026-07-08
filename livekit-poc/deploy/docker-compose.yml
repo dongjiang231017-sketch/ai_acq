@@ -1,0 +1,31 @@
+# LiveKit 自部署（阿里云国内节点）
+# 三个组件：livekit-server（媒体核心）、livekit-sip（SIP网关，对接鼎信网关）、redis（两者共享状态）
+# 注意：使用 host 网络模式，SIP/RTP 需要直接暴露端口；安全组放行见 README。
+services:
+  redis:
+    image: redis:7-alpine
+    network_mode: host
+    command: redis-server --port 6379 --bind 127.0.0.1
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:latest
+    network_mode: host
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    command: --config /etc/livekit.yaml
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  sip:
+    image: livekit/sip:latest
+    network_mode: host
+    volumes:
+      - ./sip.yaml:/etc/sip.yaml:ro
+    environment:
+      SIP_CONFIG_FILE: /etc/sip.yaml
+    depends_on:
+      - redis
+      - livekit
+    restart: unless-stopped
