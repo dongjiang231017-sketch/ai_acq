@@ -19,6 +19,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from concurrent.futures import ThreadPoolExecutor
+
 import dashscope
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 from dashscope.audio.tts_v2 import SpeechSynthesizer
@@ -33,7 +35,11 @@ from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswer
 from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
 from app.services.realtime_call_learning import record_realtime_call_learning
 from app.services.realtime_flight_recorder import RealtimeFlightRecorder
-from app.services.realtime_intent_capture import claim_realtime_call_context, record_realtime_intent_signal
+from app.services.realtime_intent_capture import (
+    _is_strong_realtime_intent,
+    claim_realtime_call_context,
+    record_realtime_intent_signal,
+)
 from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_route_health import mark_omni_route_unavailable, omni_route_unavailable_reason
@@ -69,10 +75,25 @@ OMNI_BARGE_RECOVERY_MIN_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_SILENCE_SECONDS = 0.35
 OMNI_BARGE_RECOVERY_MAX_SECONDS = 1.0
 OMNI_BARGE_RECOVERY_WATCHDOG_SECONDS = OMNI_BARGE_RECOVERY_MAX_SECONDS + 0.05
+# 【审计A8】打断双阈值：进入打断维持 RMS>=2200/6帧；"客户仍在说话"的维持判定降到 800，
+# 使打断后客户的正常音量也能持续刷新说话时间，不被过早恢复打断。
+OMNI_BARGE_SUSTAIN_RMS_THRESHOLD = 800
+# 【审计A8】barge 恢复 watchdog 期间客户仍在说话时的最长顺延时间。
+OMNI_BARGE_RECOVERY_EXTEND_MAX_SECONDS = 6.0
 OMNI_BARGE_FORCED_RESPONSE_SKIP_SECONDS = 4.0
-OMNI_FIRST_AUDIO_DEADLINE_SECONDS = 1.15
+# 【审计A5】首音频预算从 1.15s 放宽到 2.0s，避免固定兜底句反复打断正常回复。
+OMNI_FIRST_AUDIO_DEADLINE_SECONDS = 2.0
+# 【审计A5】打断恢复时旧客户句的最大可复用时效：超过即改用通用接话短句，不再重答旧题。
+OMNI_BARGE_STALE_TEXT_MAX_SECONDS = 5.0
+# 【审计A3】speech job 最大存活时间：超过即判定状态卡死，强制回到 LISTENING。
+SPEECH_JOB_MAX_LIFETIME_SECONDS = 30.0
+# 评审修复3：speech job 看门狗周期性检查间隔。
+SPEECH_JOB_WATCHDOG_INTERVAL_SECONDS = 5.0
 OMNI_NO_AUDIO_FALLBACK_TEXT = "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
-REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS = 7.0
+# 【审计A4】TTS 降级链最后一级的固定兜底句。
+TTS_FALLBACK_HOLD_TEXT = "稍等一下啊"
+# 【审计A6】开场接听分类等待上限从 7 秒降到 2.5 秒，避免客户喊多次"喂"AI 才说话。
+REMOTE_AUDIO_CLASSIFY_WAIT_SECONDS = 2.5
 REMOTE_AUDIO_SILENCE_SECONDS = 1.3
 BARGE_AUDIO_FORWARD_SECONDS = 2.8
 ASR_PARTIAL_STABLE_SECONDS = 0.45
@@ -184,6 +205,8 @@ ASR_SIGNIFICANT_BUSINESS_KEYWORDS = (
     "入口",
 )
 OPENING_RAW_BARGE_PROTECT_SECONDS = 1.8
+# 【审计A7】意向旁路捕获线程池：强意向 DB 写异步执行，绝不在 websocket 回调线程里同步落库。
+_INTENT_CAPTURE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai-acq-intent-capture")
 _DOWNSAMPLE_FACTOR = 3
 _DOWNSAMPLE_FIR_TAPS = 31
 _DOWNSAMPLE_CUTOFF = 3600 / 24000
@@ -297,7 +320,8 @@ class BridgeConfig:
     flight_audio_capture_enabled: bool = False
     turn_manager_enabled: bool = True
     audio_quality_enabled: bool = True
-    answer_classification_seconds: float = 7.0
+    # 【审计A6】默认接听分类等待从 7.0 降到 2.5 秒。
+    answer_classification_seconds: float = 2.5
     call_screening_hangup_seconds: float = 12.0
     no_response_hangup_seconds: float = 20.0
 
@@ -378,9 +402,24 @@ class AudioSocketProtocolError(RuntimeError):
 
 
 class CallRecognitionCallback(RecognitionCallback):
-    def __init__(self, call: "AudioSocketCallSession") -> None:
+    def __init__(self, call: "AudioSocketCallSession", generation: int = 0) -> None:
         self.call = call
+        # 评审修复6：记录构造时的 ASR 会话代数，用于忽略旧会话迟到回调。
+        self.generation = generation
         self.last_text = ""
+
+    def _is_stale(self, source: str) -> bool:
+        # 评审修复6：代数不等于当前 ASR 会话代数，说明回调来自已被替换的旧会话。
+        if self.generation == self.call._asr_generation:
+            return False
+        self.call.logger.emit(
+            "asr_stale_callback_ignored",
+            callId=self.call.call_id,
+            source=source,
+            generation=self.generation,
+            currentGeneration=self.call._asr_generation,
+        )
+        return True
 
     def on_open(self) -> None:
         self.call.logger.emit("asr_open", callId=self.call.call_id, model=self.call.config.asr_model)
@@ -415,13 +454,23 @@ class CallRecognitionCallback(RecognitionCallback):
             self.last_text = text
 
     def on_error(self, message: object) -> None:
+        # 评审修复6：旧会话迟到的错误回调直接忽略，防止误触发重建。
+        if self._is_stale("on_error"):
+            return
         self.call.logger.emit("asr_error", callId=self.call.call_id, error=_safe_error_text(message))
+        # 【审计A2】ASR 报错后自动重建会话，避免"失聪"后无人恢复。
+        self.call.handle_asr_failure("on_error")
 
     def on_complete(self) -> None:
         self.call.logger.emit("asr_complete", callId=self.call.call_id)
 
     def on_close(self) -> None:
+        # 评审修复6：旧会话迟到的关闭回调直接忽略，防止误触发重建。
+        if self._is_stale("on_close"):
+            return
         self.call.logger.emit("asr_close", callId=self.call.call_id)
+        # 【审计A2】通话未结束时 ASR 连接被服务端关闭，同样触发自动重建。
+        self.call.handle_asr_failure("on_close")
 
 
 class CallOmniCallback(OmniRealtimeCallback):
@@ -528,13 +577,29 @@ class AudioSocketCallSession:
         self.speech_state_lock = threading.Lock()
         self.speech_generation = 0
         self.speech_jobs = 0
+        # 评审修复3：speech job 最近一次 start/finish 变化时刻 + 周期看门狗只启动一次的标志，
+        # 看门狗按"jobs>0 且距最后变化超过30s"判定卡死，避免卡死 job 被后续活动掩护永不回收。
+        self._speech_job_last_change_at = 0.0
+        self._speech_job_watchdog_started = False
         self._loud_frames = 0
         self._last_barge_at = 0.0
         self._barge_forward_until = 0.0
         self._recognition: Recognition | None = None
+        # 【审计A2】ASR 保活/自动重建状态。
+        self._asr_restart_lock = threading.Lock()
+        self._asr_restarting = False
+        self._asr_stopping = False
+        self._asr_last_fed_at = 0.0
+        # 评审修复1：ASR 重建永久放弃标志 + 放弃后错误日志限流时间戳（每5秒最多1条）。
+        self._asr_gave_up = False
+        self._asr_gave_up_log_at = 0.0
+        # 评审修复6：ASR 会话代数（每次 _start_asr 自增），用于忽略旧会话迟到回调。
+        self._asr_generation = 0
         self._audio_capture: CallAudioCapture | RealtimeFlightRecorder | None = None
         self._flight_recorder: RealtimeFlightRecorder | None = None
         self._intent_counts: dict[str, int] = {}
+        # 【审计A7】意向旁路已提交过的文本（防止同句 final 重复入库刷日志）。
+        self._intent_bypass_captured: set[str] = set()
         self._conversation_history: list[dict[str, str]] = []
         self._call_history: list[dict[str, str]] = []
         self._sales_fsm = SalesStateMachine()
@@ -662,6 +727,34 @@ class AudioSocketCallSession:
                 summary=result.get("summary"),
             )
 
+    def _capture_intent_bypass(self, text: str, source: str) -> None:
+        # 【审计A7】意向旁路：每条客户 final 文本在 drain/轮次去重之前先做强意向标记扫描，
+        # 命中即用线程池异步落库，不依赖轮次去重，不在 websocket 回调线程同步执行 DB 写。
+        clean = " ".join(text.strip().split())
+        if not clean or not self.call_id or self.stop_event.is_set():
+            return
+        try:
+            if not _is_strong_realtime_intent(clean, ""):
+                return
+        except Exception:  # noqa: BLE001
+            return
+        compact = _compact_customer_text(clean)
+        if not compact or compact in self._intent_bypass_captured:
+            return
+        self._intent_bypass_captured.add(compact)
+
+        def _job() -> None:
+            try:
+                intent, _node = _classify_intent(clean)
+                self._record_realtime_intent_signal(clean, intent, "intent_bypass", source)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("intent_capture_error", callId=self.call_id, text=clean, error=str(exc))
+
+        try:
+            _INTENT_CAPTURE_EXECUTOR.submit(_job)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("intent_capture_error", callId=self.call_id, text=clean, error=str(exc))
+
     def _flight_event(self, event_type: str, **fields: Any) -> None:
         if not self._flight_recorder:
             return
@@ -766,7 +859,9 @@ class AudioSocketCallSession:
         if not runtime_config.dashscope_api_key:
             raise AudioSocketProtocolError("缺少 DASHSCOPE_API_KEY，不能启动实时 ASR。")
         dashscope.api_key = runtime_config.dashscope_api_key
-        callback = CallRecognitionCallback(self)
+        # 评审修复6：每次新建 ASR 会话代数 +1，回调携带代数以便忽略旧会话迟到回调。
+        self._asr_generation += 1
+        callback = CallRecognitionCallback(self, self._asr_generation)
         self._recognition = Recognition(
             model=self.config.asr_model,
             callback=callback,
@@ -775,9 +870,16 @@ class AudioSocketCallSession:
             workspace=self.config.workspace,
             disfluency_removal_enabled=True,
         )
-        self._recognition.start()
+        try:
+            self._recognition.start()
+        except Exception:
+            # 评审修复1：start() 失败时清掉半初始化的识别器句柄，避免后续误用未启动的会话。
+            self._recognition = None
+            raise
 
     def _stop_asr(self) -> None:
+        # 【审计A2】标记主动停止，避免 on_close 回调误触发自动重建。
+        self._asr_stopping = True
         if not self._recognition:
             return
         try:
@@ -785,6 +887,102 @@ class AudioSocketCallSession:
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("asr_stop_error", callId=self.call_id, error=str(exc))
         self._recognition = None
+
+    def handle_asr_failure(self, source: str) -> None:
+        # 【审计A2】ASR on_error/on_close/发送失败统一入口：通话存活时调度自动重建。
+        if self.stop_event.is_set() or self._asr_stopping:
+            return
+        # 评审修复1：重建已永久放弃后不再调度重建，错误日志限流为每5秒最多1条。
+        if self._asr_gave_up:
+            now = time.monotonic()
+            if now - self._asr_gave_up_log_at >= 5.0:
+                self._asr_gave_up_log_at = now
+                self.logger.emit(
+                    "asr_failure_after_give_up",
+                    callId=self.call_id,
+                    source=source,
+                    detail="ASR 重建已永久放弃，忽略后续失败（日志每5秒最多1条）。",
+                )
+            return
+        self._schedule_asr_restart(source)
+
+    def _schedule_asr_restart(self, source: str) -> None:
+        with self._asr_restart_lock:
+            if self._asr_restarting:
+                return
+            self._asr_restarting = True
+        threading.Thread(
+            target=self._asr_restart_worker,
+            args=(source,),
+            name="ai-acq-asr-restart",
+            daemon=True,
+        ).start()
+
+    def _asr_restart_worker(self, source: str) -> None:
+        # 【审计A2】ASR 会话自动重建：最多 3 次退避重试（0.5s/1s/2s）。
+        try:
+            for attempt in range(1, 4):
+                time.sleep(0.5 * (2 ** (attempt - 1)))
+                if self.stop_event.is_set() or self._asr_stopping:
+                    return
+                old_recognition = self._recognition
+                self._recognition = None
+                if old_recognition:
+                    try:
+                        old_recognition.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                try:
+                    self._start_asr()
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.emit(
+                        "asr_restart_error",
+                        callId=self.call_id,
+                        source=source,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+                    continue
+                self.logger.emit(
+                    "asr_restarted",
+                    callId=self.call_id,
+                    source=source,
+                    attempt=attempt,
+                    detail="ASR 会话已自动重建，恢复实时识别。",
+                )
+                return
+            # 评审修复1：3 次重试全失败后设置永久放弃标志，后续失败/保活路径不再调度重建。
+            self._asr_gave_up = True
+            self.logger.emit(
+                "asr_restart_failed",
+                callId=self.call_id,
+                source=source,
+                detail="ASR 会话重建 3 次仍失败，本通电话不再重试。",
+            )
+        finally:
+            with self._asr_restart_lock:
+                self._asr_restarting = False
+
+    def _send_asr_audio_frame(self, payload: bytes) -> None:
+        # 【审计A2】所有喂给 ASR 的帧统一经过 try/except，失败触发自动重建。
+        recognition = self._recognition
+        if not recognition or not payload:
+            return
+        try:
+            recognition.send_audio_frame(payload)
+            self._asr_last_fed_at = time.monotonic()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("asr_send_error", callId=self.call_id, error=str(exc))
+            self.handle_asr_failure("send_audio_frame")
+
+    def _feed_asr_keepalive_silence(self, now: float) -> None:
+        # 【审计A2】AI 说话期间每 200ms 喂一帧全零 8k 静音帧，防止流式 ASR 服务端超时关任务。
+        # 评审修复1：ASR 重建已永久放弃时不再喂保活帧。
+        if self._asr_gave_up or not self._recognition:
+            return
+        if now - self._asr_last_fed_at < 0.2:
+            return
+        self._send_asr_audio_frame(b"\x00" * PCM_FRAME_BYTES)
 
     def _read_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -840,13 +1038,11 @@ class AudioSocketCallSession:
             self._note_customer_activity("remote_audio", now=now)
         if self.speaking_event.is_set():
             if now < self._barge_forward_until:
-                if self._recognition:
-                    self._recognition.send_audio_frame(payload)
+                self._send_asr_audio_frame(payload)
                 return
             if self._should_protect_opening_from_raw_barge(now, rms):
                 self._loud_frames = 0
-                if self._recognition:
-                    self._recognition.send_audio_frame(payload)
+                self._send_asr_audio_frame(payload)
                 return
             if rms >= self.config.barge_rms_threshold:
                 self._loud_frames += 1
@@ -858,12 +1054,13 @@ class AudioSocketCallSession:
             ):
                 self._barge_forward_until = now + BARGE_AUDIO_FORWARD_SECONDS
                 self.cancel_pending_speech("客户插话，停止后续 TTS 音频帧并继续听客户说话。", source="rms", rms=rms)
-                if self._recognition:
-                    self._recognition.send_audio_frame(payload)
+                self._send_asr_audio_frame(payload)
+            else:
+                # 【审计A2】AI 说话期间不转发客户音频时，用静音帧给 ASR 保活，防止服务端超时关任务。
+                self._feed_asr_keepalive_silence(now)
             return
         self._loud_frames = 0
-        if self._recognition:
-            self._recognition.send_audio_frame(payload)
+        self._send_asr_audio_frame(payload)
 
     def _should_protect_opening_from_raw_barge(self, now: float, rms: int) -> bool:
         if not self._opening_started or now > self._opening_raw_barge_protect_until:
@@ -966,6 +1163,8 @@ class AudioSocketCallSession:
         ).start()
 
     def commit_asr_final_text(self, text: str) -> None:
+        # 【审计A7】final 文本入口先走意向旁路（在 drain/去重之前），防止强意向被轮次去重吞掉。
+        self._capture_intent_bypass(text, "asr_final_bypass")
         self._cancel_pending_asr_partial_turn("asr_final")
         self.logger.emit(
             "turn_endpoint_final",
@@ -1577,7 +1776,9 @@ class AudioSocketCallSession:
     def _speak(self, text: str, reason: str, generation: int, close_after: bool = False) -> None:
         if self.stop_event.is_set():
             return
-        self._mark_speech_job_started()
+        # 【审计A3】Pipeline 侧先登记 job 但不置位 speaking，等拿到首个 TTS 音频块再置位，
+        # 避免 TTS 连接失败时状态卡在 SPEAKING。
+        self._mark_speech_job_started(set_speaking=False)
         with self.generation_lock:
             if self.speech_generation == generation:
                 self.interrupt_event.clear()
@@ -1612,6 +1813,8 @@ class AudioSocketCallSession:
                     if not playback_started:
                         first_audio_ms = int((time.perf_counter() - start) * 1000)
                         playback_started = True
+                        # 【审计A3】拿到首个 TTS 音频块后才真正进入 SPEAKING。
+                        self.speaking_event.set()
                         self.logger.emit(
                             "tts_start",
                             callId=self.call_id,
@@ -1664,6 +1867,9 @@ class AudioSocketCallSession:
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("tts_error", callId=self.call_id, text=text, error=str(exc))
             self._mark_speech_job_finished()
+            # 【审计A4】TTS 失败不再静默吞掉：走降级链（整段合成→固定兜底句），
+            # 且必须保留 close_after 语义——原分支丢 close_after 导致电话装死不挂。
+            self._speak_tts_fallback(text, reason, generation, close_after, playback_started)
             return
         if not playback_started or self._speech_is_obsolete(generation):
             self.logger.emit(
@@ -1707,6 +1913,100 @@ class AudioSocketCallSession:
             self._close_after_terminal_reply("customer_rejected")
         elif not close_after and not interrupted:
             self._schedule_no_response_hangup(reason)
+
+    def _speak_tts_fallback(
+        self,
+        text: str,
+        reason: str,
+        generation: int,
+        close_after: bool,
+        playback_started: bool,
+    ) -> None:
+        # 【审计A4】TTS 降级链：realtime TTS 失败 → 整段合成原句 → 固定兜底句。
+        # 已播出一部分时不整段重播，只补固定兜底句，避免客户听到重复内容。
+        played = False
+        attempts: list[tuple[str, str]] = []
+        if not playback_started:
+            attempts.append(("full_text", text))
+        attempts.append(("hold_text", TTS_FALLBACK_HOLD_TEXT))
+        for phase, fallback_text in attempts:
+            if self.stop_event.is_set() or self._speech_is_obsolete(generation):
+                break
+            try:
+                pcm = self._synthesize_fallback_pcm(fallback_text)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit(
+                    "tts_fallback_error",
+                    callId=self.call_id,
+                    reason=reason,
+                    phase=phase,
+                    text=fallback_text,
+                    error=str(exc),
+                    generation=generation,
+                )
+                continue
+            if self._play_fallback_pcm(pcm, f"tts_fallback_{phase}", generation):
+                played = True
+                self.logger.emit(
+                    "tts_fallback_used",
+                    callId=self.call_id,
+                    reason=reason,
+                    phase=phase,
+                    text=fallback_text,
+                    generation=generation,
+                    detail="TTS 主链路失败，已用降级链播出回复，避免本轮无声消失。",
+                )
+                break
+        if close_after:
+            # 【审计A4】收尾句无论降级成败都必须挂断，绝不让电话装死不挂。
+            self._close_after_terminal_reply("customer_rejected_tts_fallback" if played else "tts_failed_close")
+        elif played and not self._speech_is_obsolete(generation):
+            self._schedule_no_response_hangup(reason)
+
+    def _synthesize_fallback_pcm(self, text: str) -> bytes:
+        # 【审计A4】优先整段合成；整段合成不可用（如仅配置 realtime 模型）时再试一次流式合成。
+        try:
+            return synthesize_tts_pcm(text, self.config)
+        except Exception:  # noqa: BLE001
+            chunks = bytearray()
+            for chunk in iter_tts_pcm_chunks(text, self.config):
+                if chunk:
+                    chunks.extend(chunk)
+            if not chunks:
+                raise RuntimeError("TTS 降级合成未返回音频。")
+            return bytes(chunks)
+
+    def _play_fallback_pcm(self, pcm: bytes, reason: str, generation: int) -> bool:
+        # 【审计A4】把降级合成好的整段 PCM 按 20ms 节拍播出。
+        if not pcm or self.stop_event.is_set() or self._speech_is_obsolete(generation):
+            return False
+        self._mark_speech_job_started()
+        sent = 0
+        next_frame_at: float | None = None
+        lag_events = 0
+        try:
+            with self.playback_lock:
+                offset = 0
+                while offset < len(pcm):
+                    if self.stop_event.is_set() or self._speech_is_obsolete(generation):
+                        break
+                    frame = pcm[offset : offset + PCM_FRAME_BYTES]
+                    offset += PCM_FRAME_BYTES
+                    if len(frame) < PCM_FRAME_BYTES:
+                        frame = frame.ljust(PCM_FRAME_BYTES, b"\x00")
+                    next_frame_at, lag_events = self._send_audio_frame_at_cadence(
+                        frame,
+                        next_frame_at,
+                        lag_events,
+                        reason,
+                        generation,
+                    )
+                    sent += len(frame)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.emit("tts_fallback_play_error", callId=self.call_id, reason=reason, error=str(exc))
+        finally:
+            self._mark_speech_job_finished()
+        return sent > 0
 
     def _send_audio_frame_at_cadence(
         self,
@@ -1778,16 +2078,54 @@ class AudioSocketCallSession:
         with self.generation_lock:
             return self.stop_event.is_set() or self.interrupt_event.is_set() or self.speech_generation != generation
 
-    def _mark_speech_job_started(self) -> None:
+    def _mark_speech_job_started(self, *, set_speaking: bool = True) -> None:
+        start_watchdog = False
         with self.speech_state_lock:
             self.speech_jobs += 1
-            self.speaking_event.set()
+            self._speech_job_last_change_at = time.monotonic()
+            if set_speaking:
+                self.speaking_event.set()
+            if not self._speech_job_watchdog_started:
+                self._speech_job_watchdog_started = True
+                start_watchdog = True
+        # 评审修复3：全会话只起一个周期性看门狗线程，按"距最后一次 start/finish 变化超过30s"判定卡死，
+        # 避免 job A 卡死后被 job B 的 start/finish 活动掩护而永不回收。
+        if start_watchdog:
+            threading.Thread(
+                target=self._speech_job_watchdog,
+                name="ai-acq-speech-job-watchdog",
+                daemon=True,
+            ).start()
 
     def _mark_speech_job_finished(self) -> None:
         with self.speech_state_lock:
             self.speech_jobs = max(0, self.speech_jobs - 1)
+            self._speech_job_last_change_at = time.monotonic()
             if self.speech_jobs == 0:
                 self.speaking_event.clear()
+
+    def _speech_job_watchdog(self) -> None:
+        # 评审修复3：周期性检查——仅当 speech_jobs>0 且距最后一次 start/finish 变化超过最大存活时间才强制清零。
+        while not self.stop_event.is_set():
+            time.sleep(SPEECH_JOB_WATCHDOG_INTERVAL_SECONDS)
+            if self.stop_event.is_set():
+                return
+            with self.speech_state_lock:
+                if self.speech_jobs <= 0:
+                    continue
+                if time.monotonic() - self._speech_job_last_change_at < SPEECH_JOB_MAX_LIFETIME_SECONDS:
+                    continue
+                stuck_jobs = self.speech_jobs
+                self.speech_jobs = 0
+                self._speech_job_last_change_at = time.monotonic()
+                self.speaking_event.clear()
+            self.logger.emit(
+                "speech_job_watchdog_reset",
+                callId=self.call_id,
+                stuckJobs=stuck_jobs,
+                maxSeconds=SPEECH_JOB_MAX_LIFETIME_SECONDS,
+                detail="speech job 超过最大存活时间无 start/finish 变化，已强制清零并回到 LISTENING。",
+            )
 
     def _close_after_terminal_reply(self, reason: str) -> None:
         self._intentional_close_reason = reason
@@ -1880,6 +2218,18 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         self._omni_barge_server_committed = False
         self._omni_barge_recovery_generation = 0
         self._omni_barge_last_text = ""
+        # 【审计A1】Omni 播放帧有界队列 + 专职播放线程：dashscope websocket 回调线程只解码入队，
+        # 由播放线程按 20ms 节拍写 AudioSocket，避免回调线程被播放节拍阻塞导致心跳超时/打断滞后。
+        self._omni_play_queue: queue.Queue[tuple[str, int, str, Any]] = queue.Queue(maxsize=500)
+        self._omni_playback_thread = threading.Thread(
+            target=self._omni_playback_worker,
+            name="ai-acq-omni-playback",
+            daemon=True,
+        )
+        self._omni_dropped_frames = 0
+        self._omni_drop_log_count = 0
+        # 【审计A5】当前是否有活跃 response：response_id 为空的音频 delta 只在活跃期内接受。
+        self._omni_response_active = False
         self._human_speech_confirmed = False
         self._last_remote_speech_started_at = 0.0
         self._call_screening_seen = False
@@ -1914,6 +2264,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             )
             self._flight_event("call_connected", peer=f"{self.peer[0]}:{self.peer[1]}", mode="omni")
             self._start_startup_keepalive()
+            # 【审计A1】启动专职 Omni 播放线程（pipeline 降级时空转等待，无副作用）。
+            self._omni_playback_thread.start()
             requested_route = self._context_conversation_route()
             if requested_route == "pipeline":
                 self._enable_omni_pipeline_fallback(
@@ -2059,6 +2411,12 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni = None
             already_closing = self._omni_unavailable_closing
             self._omni_unavailable_closing = True
+        # 【审计A3】Omni 断开后 response.done 永远不会到达：强制清零 speech_jobs 并清 speaking_event，
+        # 同时清空播放队列，防止卡死在 SPEAKING 回不到 LISTENING。
+        with self.speech_state_lock:
+            self.speech_jobs = 0
+            self.speaking_event.clear()
+        self._clear_omni_play_queue("omni_closed")
         if self.stop_event.is_set() or already_closing:
             return
         self.logger.emit(
@@ -2271,6 +2629,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if not clean:
             return
         self._note_customer_activity(source, text=clean)
+        # 【审计A7】Omni/旁路 ASR 的 final 文本入口先走意向旁路（去重之前），防止强意向漏记。
+        self._capture_intent_bypass(clean, f"{source}_bypass")
         raw_clean = clean
         signal = classify_realtime_call_input(clean)
         if signal == "system_prompt":
@@ -2417,7 +2777,13 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             if not self._human_speech_confirmed:
                 self._confirm_human_speech(clean, detail="已识别到真人客户语音，可以进入实时对话。")
         if signal != "call_screening":
-            self._record_realtime_intent_signal(routed_clean, intent, signal, source)
+            # 【审计A7】DB 写移出 websocket 回调线程，改为线程池异步执行。
+            try:
+                _INTENT_CAPTURE_EXECUTOR.submit(
+                    self._record_realtime_intent_signal, routed_clean, intent, signal, source
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.emit("intent_capture_error", callId=self.call_id, text=routed_clean, error=str(exc))
         if skip_response_after_forced_barge:
             self.logger.emit(
                 "barge_transcription_after_forced_response",
@@ -2507,11 +2873,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                     self.handle_omni_closed("append_error", exc)
                 else:
                     self.logger.emit("omni_audio_append_error", callId=self.call_id, error=str(exc))
-        if self._recognition and payload:
-            try:
-                self._recognition.send_audio_frame(payload)
-            except Exception as exc:  # noqa: BLE001
-                self.logger.emit("omni_sidecar_asr_audio_error", callId=self.call_id, error=str(exc))
+        # 【审计A2】旁路 ASR 统一走带重建的安全发送。
+        self._send_asr_audio_frame(payload)
         self._maybe_commit_omni_barge_turn(now, rms)
 
     def _omni_local_barge_ready(self) -> bool:
@@ -2531,6 +2894,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 self._omni_response_id = ""
             self._omni_pending_audio = b""
             self._omni_next_frame_at = None
+            # 【审计A5】打断后不再有活跃 response，空 response_id 的残余音频将被严格丢弃。
+            self._omni_response_active = False
             self._omni_barge_collecting = True
             self._omni_barge_started_at = now
             self._omni_barge_last_voice_at = now
@@ -2540,6 +2905,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni_barge_last_text = ""
             self._omni_barge_recovery_generation += 1
             recovery_generation = self._omni_barge_recovery_generation
+            self._omni_drop_log_count = 0
+        # 【审计A1】打断时清空播放队列，旧 generation/response 的剩余帧全部丢弃。
+        self._clear_omni_play_queue(source)
         if self._omni:
             try:
                 self._omni.cancel_response()
@@ -2561,7 +2929,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         ).start()
 
     def _maybe_commit_omni_barge_turn(self, now: float, rms: int) -> None:
-        if rms >= self.config.barge_rms_threshold:
+        # 【审计A8】维持判定用低阈值 800（进入打断仍是 2200/6帧），客户说话声不需要一直很大才算"还在说"。
+        if rms >= OMNI_BARGE_SUSTAIN_RMS_THRESHOLD:
             with self._omni_lock:
                 if self._omni_barge_collecting:
                     self._omni_barge_last_voice_at = now
@@ -2569,6 +2938,18 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
 
     def _omni_barge_recovery_watchdog(self, generation: int) -> None:
         time.sleep(OMNI_BARGE_RECOVERY_WATCHDOG_SECONDS)
+        if self.stop_event.is_set():
+            return
+        # 【审计A8】watchdog 到点时客户仍在说话则顺延恢复，等客户停顿后再接话（有最长顺延上限）。
+        extend_deadline = time.monotonic() + OMNI_BARGE_RECOVERY_EXTEND_MAX_SECONDS
+        while not self.stop_event.is_set() and time.monotonic() < extend_deadline:
+            with self._omni_lock:
+                if not self._omni_barge_collecting or generation != self._omni_barge_recovery_generation:
+                    return
+                last_voice_at = self._omni_barge_last_voice_at
+            if time.monotonic() - last_voice_at >= OMNI_BARGE_RECOVERY_SILENCE_SECONDS:
+                break
+            time.sleep(0.1)
         if self.stop_event.is_set():
             return
         self._commit_omni_barge_recovery(
@@ -2610,7 +2991,13 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             last_customer_text = self._omni_barge_last_text or self._omni_pending_customer_text
         if not last_customer_text:
             with self.asr_partial_lock:
-                last_customer_text = self._last_committed_customer_text
+                # 【审计A5】超过 5 秒的旧句不再重答（否则几十秒前的问题会"复活"），
+                # 留空让 build_barge_recovery_instruction 走通用接话短句。
+                if (
+                    self._last_committed_customer_text
+                    and now - self._last_committed_customer_at <= OMNI_BARGE_STALE_TEXT_MAX_SECONDS
+                ):
+                    last_customer_text = self._last_committed_customer_text
         if not self._omni or self.stop_event.is_set():
             return False
         self.logger.emit(
@@ -2641,6 +3028,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         with self._omni_lock:
             self._omni_generation = generation
             self._omni_response_id = response_id
+            # 【审计A5】标记进入活跃 response 期，允许 response_id 为空的音频 delta 归属当前 response。
+            self._omni_response_active = True
             self._omni_reply_parts = []
             self._omni_pending_audio = b""
             self._omni_next_frame_at = None
@@ -2650,6 +3039,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             self._omni_audio_total = 0
             self._omni_response_started_at = time.perf_counter()
             self._omni_tts_started = False
+            # 【审计A1】新 response 开始，重置播放队列的丢帧/日志限流计数。
+            self._omni_dropped_frames = 0
+            self._omni_drop_log_count = 0
         self.interrupt_event.clear()
         self._mark_speech_job_started()
         self.logger.emit("omni_response_start", callId=self.call_id, responseId=response_id, generation=generation)
@@ -2673,6 +3065,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         if not should_fallback or self.stop_event.is_set() or self._speech_is_obsolete(generation):
             return
         fallback_text = self._local_omni_timeout_reply(pending_text, pending_signal)
+        with self._omni_lock:
+            # 【审计A5】超时取消后该 response 不再活跃，迟到的空 response_id 音频会被丢弃。
+            self._omni_response_active = False
         if self._omni:
             try:
                 self._omni.cancel_response()
@@ -2784,6 +3179,8 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             )
 
     def play_omni_audio_delta(self, delta: str, response_id: str = "") -> None:
+        # 【审计A1】本方法运行在 dashscope websocket 回调线程：只做解码+切帧+入有界队列，
+        # 严禁持锁按节拍 sleep 播放，播放节拍由 _omni_playback_worker 专职线程负责。
         if not delta:
             return
         try:
@@ -2791,9 +3188,12 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
         except Exception as exc:  # noqa: BLE001
             self.logger.emit("omni_audio_decode_error", callId=self.call_id, error=str(exc))
             return
-        with self.playback_lock:
-            with self._omni_lock:
-                if self._omni_barge_collecting or self._is_omni_response_stale_locked(response_id):
+        frames: list[bytes] = []
+        first_audio_fields: dict[str, Any] | None = None
+        with self._omni_lock:
+            if self._omni_barge_collecting or self._is_omni_response_stale_locked(response_id):
+                self._omni_drop_log_count += 1
+                if self._omni_drop_log_count <= 3:
                     self.logger.emit(
                         "omni_audio_delta_dropped",
                         callId=self.call_id,
@@ -2803,66 +3203,163 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                         collecting=self._omni_barge_collecting,
                         detail="打断恢复期间或旧 response 的音频已丢弃，避免串音。",
                     )
-                    return
-                generation = self._omni_generation
-                self._omni_audio_total += len(audio)
-                pcm_8k = _downsample_pcm_24k_to_8k(audio, self._omni_downsample_state)
-                if not pcm_8k or self._speech_is_obsolete(generation):
-                    return
-                if not self._omni_tts_started:
-                    self._omni_first_audio_ms = int((time.perf_counter() - self._omni_response_started_at) * 1000)
-                    self._omni_tts_started = True
-                    if self._omni_barge_forced_response_until > time.monotonic():
-                        self._omni_barge_forced_audio_started = True
+                return
+            # 【审计A5】response_id 为空的音频 delta 按当前 response 严格校验：
+            # 没有活跃 response 时一律视为陈旧音频丢弃，避免旧回复的残帧复活。
+            if not response_id and not self._omni_response_active:
+                self._omni_drop_log_count += 1
+                if self._omni_drop_log_count <= 3:
                     self.logger.emit(
-                        "tts_start",
+                        "omni_audio_delta_dropped",
                         callId=self.call_id,
-                        reason="omni_response",
-                        text="",
-                        bytes=len(pcm_8k),
-                        synthMs=self._omni_first_audio_ms,
-                        firstAudioMs=self._omni_first_audio_ms,
-                        voice=self.config.omni_voice,
-                        voiceType="omni",
-                        model=self.config.omni_model,
-                        streaming=True,
-                        generation=generation,
+                        responseId="",
+                        currentResponseId=self._omni_response_id,
+                        bytes=len(audio),
+                        collecting=False,
+                        detail="response_id 为空且当前没有活跃 response，按陈旧音频丢弃。",
                     )
-                    self._flight_event(
-                        "tts_start",
-                        reason="omni_response",
-                        firstAudioMs=self._omni_first_audio_ms,
-                        voiceType="omni",
-                        model=self.config.omni_model,
-                        generation=generation,
-                    )
-                self._omni_pending_audio += pcm_8k
-                pending = self._omni_pending_audio
-                next_frame_at = self._omni_next_frame_at
-                lag_events = self._omni_playback_lag_events
-            while len(pending) >= PCM_FRAME_BYTES:
-                if self.stop_event.is_set() or self._speech_is_obsolete(generation):
-                    break
-                frame = pending[:PCM_FRAME_BYTES]
-                pending = pending[PCM_FRAME_BYTES:]
-                next_frame_at, lag_events = self._send_audio_frame_at_cadence(
-                    frame,
-                    next_frame_at,
-                    lag_events,
-                    "omni_response",
-                    generation,
-                )
-                with self._omni_lock:
-                    self._omni_audio_sent += len(frame)
+                return
+            generation = self._omni_generation
+            self._omni_audio_total += len(audio)
+            pcm_8k = _downsample_pcm_24k_to_8k(audio, self._omni_downsample_state)
+            if not pcm_8k or self._speech_is_obsolete(generation):
+                return
+            if not self._omni_tts_started:
+                self._omni_first_audio_ms = int((time.perf_counter() - self._omni_response_started_at) * 1000)
+                self._omni_tts_started = True
+                if self._omni_barge_forced_response_until > time.monotonic():
+                    self._omni_barge_forced_audio_started = True
+                first_audio_fields = {
+                    "firstAudioMs": self._omni_first_audio_ms,
+                    "bytes": len(pcm_8k),
+                    "generation": generation,
+                }
+            self._omni_pending_audio += pcm_8k
+            while len(self._omni_pending_audio) >= PCM_FRAME_BYTES:
+                frames.append(self._omni_pending_audio[:PCM_FRAME_BYTES])
+                self._omni_pending_audio = self._omni_pending_audio[PCM_FRAME_BYTES:]
+            effective_response_id = response_id or self._omni_response_id
+        if first_audio_fields is not None:
+            self.logger.emit(
+                "tts_start",
+                callId=self.call_id,
+                reason="omni_response",
+                text="",
+                bytes=first_audio_fields["bytes"],
+                synthMs=first_audio_fields["firstAudioMs"],
+                firstAudioMs=first_audio_fields["firstAudioMs"],
+                voice=self.config.omni_voice,
+                voiceType="omni",
+                model=self.config.omni_model,
+                streaming=True,
+                generation=first_audio_fields["generation"],
+            )
+            self._flight_event(
+                "tts_start",
+                reason="omni_response",
+                firstAudioMs=first_audio_fields["firstAudioMs"],
+                voiceType="omni",
+                model=self.config.omni_model,
+                generation=first_audio_fields["generation"],
+            )
+        for frame in frames:
+            self._enqueue_omni_playback("frame", generation, effective_response_id, frame)
+
+    def _enqueue_omni_playback(self, kind: str, generation: int, response_id: str, payload: Any = b"") -> None:
+        # 【审计A1】有界队列入队：队列满时绝不阻塞 websocket 回调线程。
+        item = (kind, generation, response_id, payload)
+        try:
+            self._omni_play_queue.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+        if kind == "done":
+            # done 收尾信号必须送达（否则 speaking 状态卡死），丢最旧音频帧腾出位置。
+            while not self.stop_event.is_set():
+                try:
+                    self._omni_play_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._omni_play_queue.put_nowait(item)
+                    return
+                except queue.Full:
+                    continue
+            return
+        self._omni_dropped_frames += 1
+        if self._omni_dropped_frames in {1, 50, 250}:
+            self.logger.emit(
+                "omni_play_queue_overflow",
+                callId=self.call_id,
+                droppedFrames=self._omni_dropped_frames,
+                detail="播放队列已满（约10秒积压），丢弃最新音频帧以保护回调线程不被阻塞。",
+            )
+
+    def _clear_omni_play_queue(self, source: str) -> None:
+        # 【审计A1】打断/断开时清空播放队列，丢弃旧 generation/response 的剩余帧。
+        cleared = 0
+        while True:
+            try:
+                self._omni_play_queue.get_nowait()
+                cleared += 1
+            except queue.Empty:
+                break
+        if cleared:
+            self.logger.emit("omni_play_queue_cleared", callId=self.call_id, frames=cleared, source=source)
+
+    def _omni_playback_worker(self) -> None:
+        # 【审计A1】专职播放线程：按 20ms 节拍从有界队列取帧写 AudioSocket，
+        # 打断/换代后的旧帧在此按 generation + response_id 丢弃。
+        next_frame_at: float | None = None
+        lag_events = 0
+        while not self.stop_event.is_set():
+            try:
+                kind, generation, response_id, payload = self._omni_play_queue.get(timeout=0.2)
+            except queue.Empty:
+                next_frame_at = None
+                continue
+            if kind == "done":
+                stats = payload if isinstance(payload, dict) else {}
+                try:
+                    self._finalize_omni_response_playback(generation, response_id, stats)
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.emit("omni_playback_finalize_error", callId=self.call_id, error=str(exc))
+                next_frame_at = None
+                lag_events = 0
+                continue
+            if self.stop_event.is_set() or self._speech_is_obsolete(generation):
+                next_frame_at = None
+                continue
             with self._omni_lock:
-                self._omni_pending_audio = pending
-                self._omni_next_frame_at = next_frame_at
-                self._omni_playback_lag_events = lag_events
+                stale = self._omni_barge_collecting or (
+                    bool(response_id) and response_id in self._omni_cancelled_response_ids
+                )
+            if stale:
+                next_frame_at = None
+                continue
+            try:
+                with self.playback_lock:
+                    next_frame_at, lag_events = self._send_audio_frame_at_cadence(
+                        payload,
+                        next_frame_at,
+                        lag_events,
+                        "omni_response",
+                        generation,
+                    )
+            except Exception:  # noqa: BLE001
+                # _send_audio_frame_at_cadence 内部已触发 socket 断开收尾。
+                next_frame_at = None
+                continue
+            with self._omni_lock:
+                self._omni_audio_sent += len(payload)
 
     def finish_omni_response(self, response_id: str = "") -> None:
         with self._omni_lock:
             current_response_id = self._omni_response_id
-        if response_id and current_response_id and response_id != current_response_id:
+            # 评审修复2：改用 _is_omni_response_stale_locked（含已取消 response 集合判断），
+            # 防止被 cancel 的 response 迟到的 done 穿透，错扣新 response 的 speech job。
+            stale = self._is_omni_response_stale_locked(response_id)
+        if stale:
             self.logger.emit(
                 "omni_stale_response_done",
                 callId=self.call_id,
@@ -2870,32 +3367,44 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
                 currentResponseId=current_response_id,
             )
             return
-        with self.playback_lock:
-            with self._omni_lock:
-                generation = self._omni_generation
-                pending = self._omni_pending_audio
-                next_frame_at = self._omni_next_frame_at
-                lag_events = self._omni_playback_lag_events
-            if pending and not self.stop_event.is_set() and not self._speech_is_obsolete(generation):
-                padded = pending.ljust(PCM_FRAME_BYTES, b"\x00")
-                next_frame_at, lag_events = self._send_audio_frame_at_cadence(
-                    padded,
-                    next_frame_at,
-                    lag_events,
-                    "omni_response",
-                    generation,
-                )
-                with self._omni_lock:
-                    self._omni_audio_sent += len(pending)
-                    self._omni_pending_audio = b""
-                    self._omni_next_frame_at = next_frame_at
-                    self._omni_playback_lag_events = lag_events
+        # 【审计A1】回调线程只把剩余尾帧和 done 收尾信号入队，
+        # 由播放线程按节拍播完队列音频后再执行收尾（_finalize_omni_response_playback）。
         with self._omni_lock:
             generation = self._omni_generation
-            audio_sent = self._omni_audio_sent
-            audio_total = self._omni_audio_total
-            first_audio_ms = self._omni_first_audio_ms
-            reply = "".join(self._omni_reply_parts).strip()
+            pending = self._omni_pending_audio
+            self._omni_pending_audio = b""
+            # 【审计A5】response 已完成，此后 response_id 为空的音频 delta 一律丢弃。
+            self._omni_response_active = False
+            effective_response_id = response_id or current_response_id
+            stats = {
+                "audioSent": self._omni_audio_sent,
+                "audioTotal": self._omni_audio_total,
+                "firstAudioMs": self._omni_first_audio_ms,
+                "reply": "".join(self._omni_reply_parts).strip(),
+            }
+        if pending and not self.stop_event.is_set() and not self._speech_is_obsolete(generation):
+            self._enqueue_omni_playback(
+                "frame",
+                generation,
+                effective_response_id,
+                pending.ljust(PCM_FRAME_BYTES, b"\x00"),
+            )
+        self._enqueue_omni_playback("done", generation, effective_response_id, stats)
+
+    def _finalize_omni_response_playback(self, generation: int, response_id: str, stats: dict[str, Any]) -> None:
+        # 【审计A1】原 finish_omni_response 的收尾逻辑：在播放线程里等队列音频播完后执行，
+        # 保证 speaking 状态与真实播放对齐。若此时已开始新 response，则用 done 时刻的快照统计。
+        with self._omni_lock:
+            if self._omni_generation == generation:
+                audio_sent = self._omni_audio_sent
+                audio_total = self._omni_audio_total
+                first_audio_ms = self._omni_first_audio_ms
+                reply = "".join(self._omni_reply_parts).strip()
+            else:
+                audio_sent = int(stats.get("audioSent") or 0)
+                audio_total = int(stats.get("audioTotal") or 0)
+                first_audio_ms = int(stats.get("firstAudioMs") or 0)
+                reply = str(stats.get("reply") or "")
         interrupted = self._speech_is_obsolete(generation)
         self._mark_speech_job_finished()
         if not interrupted and audio_sent == 0 and audio_total == 0:
@@ -3135,7 +3644,8 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         flight_audio_capture_enabled=settings.realtime_flight_audio_capture_enabled,
         turn_manager_enabled=settings.realtime_turn_manager_enabled,
         audio_quality_enabled=settings.realtime_audio_quality_enabled,
-        answer_classification_seconds=max(0.5, min(10.0, settings.realtime_answer_classification_seconds)),
+        # 【审计A6】接听分类等待硬上限压到 2.5 秒，环境配置更大也不生效。
+        answer_classification_seconds=max(0.5, min(2.5, settings.realtime_answer_classification_seconds)),
         call_screening_hangup_seconds=max(0.0, min(45.0, settings.realtime_call_screening_hangup_seconds)),
         no_response_hangup_seconds=max(0.0, min(90.0, settings.realtime_no_response_hangup_seconds)),
     )

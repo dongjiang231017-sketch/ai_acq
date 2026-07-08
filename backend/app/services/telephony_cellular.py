@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
 from app.services.asterisk_ami import AsteriskAmiClient, AsteriskAmiError, AsteriskOriginateResult, check_asterisk_health
 from app.services.voice_gateway_profiles import current_voice_gateway_profile, voice_gateway_label
+
+logger = logging.getLogger(__name__)
 
 
 def build_cellular_diagnostic(
@@ -177,24 +180,22 @@ def build_cellular_diagnostic(
 
 def recover_telephony_line() -> dict[str, object]:
     profile = current_voice_gateway_profile()
-    registration_name = f"{profile.trunk_name}-registration" if profile.trunk_name else ""
+    # 【审计B1】移除 module reload res_pjsip.so / res_pjsip_outbound_registration.so 与 pjsip send register：
+    # reload 会波及在线通话；且本架构是语音网关注册进服务器 Asterisk（方向相反），
+    # 服务器端"向外注册"类命令无法恢复注册。这里只保留无害的诊断/刷新动作。
     commands = [
         "dialplan reload",
-        "module reload res_pjsip.so",
-        "module reload res_pjsip_outbound_registration.so",
+        "pjsip show registrations",
+        "pjsip show contacts",
+        f"pjsip show endpoint {profile.trunk_name}" if profile.trunk_name else "pjsip show endpoints",
     ]
-    if registration_name:
-        commands.append(f"pjsip send register {registration_name}")
-    commands.extend(
-        [
-            "pjsip show registrations",
-            "pjsip show contacts",
-            f"pjsip show endpoint {profile.trunk_name}" if profile.trunk_name else "pjsip show endpoints",
-        ]
+    logger.warning(
+        "telephony_line_recovery_gateway_side_needed trunk=%s 服务器端只执行无害动作；若注册丢失需在语音网关侧重新发起 SIP 注册。",
+        profile.trunk_name,
     )
     command_results: list[dict[str, object]] = []
     status = "pass"
-    summary = "已执行 Asterisk/PJSIP 安全恢复动作，并重新检测线路状态。"
+    summary = "已执行服务器端无害恢复动作（不含 module reload）并重新检测线路状态；若注册丢失需在语音网关侧重新发起 SIP 注册。"
     try:
         with AsteriskAmiClient() as client:
             for command in commands:
@@ -229,7 +230,8 @@ def recover_telephony_line() -> dict[str, object]:
 
 def _line_recovery_next_step(status: str, trunk_ok: bool) -> str:
     if not trunk_ok:
-        return "Asterisk 到语音网关仍未恢复，请检查网关电源、网络、SIP账号和当前LAN地址。"
+        # 【审计B1】掉注册需在网关侧重新发起注册，服务器端无法代替
+        return "Asterisk 到语音网关仍未恢复，需在语音网关侧重新发起 SIP 注册；请检查网关电源、网络、SIP账号和当前LAN地址。"
     if status == "fail":
         return "Asterisk 可达但恢复动作失败，请查看命令输出或重启客户端内置 Asterisk。"
     return "Asterisk/网关注册已刷新；请马上做一次单号试拨，并同时查看语音网关当前呼叫/话单。"

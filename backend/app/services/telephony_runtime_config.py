@@ -33,6 +33,37 @@ def telephony_runtime_env_path() -> str:
     return values.get("__path__", "")
 
 
+_SENSITIVE_ENV_KEYS = {"ASTERISK_AMI_PASSWORD"}
+
+
+def telephony_config_source_report(names: list[str]) -> dict[str, dict[str, str]]:
+    """【审计B9】返回每个电话参数的最终取值与来源，供启动日志排查配置漂移。
+
+    来源优先级与 _first_env_value 保持一致：进程环境变量 > sidecar env 文件 > settings（.env/代码默认值）。
+    敏感项只输出是否配置，不输出明文。
+    """
+    runtime_values = _runtime_env_values()
+    runtime_path = runtime_values.get("__path__", "")
+    report: dict[str, dict[str, str]] = {}
+    for name in names:
+        value = os.getenv(name)
+        if value not in (None, ""):
+            source = "process_env"
+        else:
+            value = runtime_values.get(name)
+            if value not in (None, ""):
+                source = f"sidecar_env:{runtime_path}"
+            else:
+                value = ""
+                source = "settings(.env或代码默认值)"
+        if name in _SENSITIVE_ENV_KEYS:
+            display = "<configured>" if value else ""
+        else:
+            display = value or ""
+        report[name] = {"value": display, "source": source}
+    return report
+
+
 def _first_env_value(names: tuple[str, ...]) -> str | None:
     for name in names:
         value = os.getenv(name)
@@ -62,6 +93,12 @@ def _runtime_env_candidates() -> list[Path]:
         explicit = os.getenv(name)
         if explicit:
             candidates.append(Path(explicit).expanduser())
+
+    # 【审计B9】服务器托管模式下跳过 sidecar env 文件自动发现：
+    # 残留的桌面客户端 backend-asterisk.env 会静默覆盖服务器 .env，造成"改了不生效"。
+    # 显式指定的 *_ASTERISK_ENV_PATH 仍然生效。
+    if os.getenv("ASTERISK_DEPLOYMENT_MODE", "").strip().lower() == "server":
+        return _dedupe_paths(candidates)
 
     desktop_user_data = os.getenv("AI_ACQ_DESKTOP_USER_DATA_DIR")
     if desktop_user_data:

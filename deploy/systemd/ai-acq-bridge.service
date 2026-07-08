@@ -1,0 +1,19 @@
+# 【审计B2】实时媒体桥（AudioSocket 9019）纳入 systemd 监管：
+# bridge 不在时电话接通即 Hangup，这是"一改就断/接通即挂"的主根源
+[Unit]
+Description=AI ACQ realtime AudioSocket bridge (omni)
+After=network-online.target ai-acq-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai_acq/backend
+ExecStart=/opt/ai_acq/backend/.venv/bin/python -m app.tools.realtime_audio_bridge --conversation-mode omni
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

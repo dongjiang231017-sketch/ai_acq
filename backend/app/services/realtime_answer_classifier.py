@@ -37,7 +37,8 @@ class AnswerClassifier:
     def __init__(
         self,
         *,
-        max_wait_seconds: float = 7.0,
+        # 【审计A6】默认分类等待上限从 7.0 降到 2.5 秒，减少开场沉默。
+        max_wait_seconds: float = 2.5,
         voice_rms_threshold: int = 500,
         long_speech_threshold: float = 2.5,
         short_speech_max: float = 1.5,
@@ -71,8 +72,17 @@ class AnswerClassifier:
             return self.state.detected_type if self.state.done else None
         self.state.asr_texts.append(clean)
         signal = classify_answer_text(clean)
+        # 【审计A6】ASR partial 出现明确真人问候词（喂/哪位，评审修复4：不再含 你好/您好）即视为 HUMAN，
+        # 立即放行开场，不再等待第二个语音段或 final。
+        if signal == CallAnswerType.UNKNOWN and not is_final and _has_strong_human_greeting(clean):
+            signal = CallAnswerType.HUMAN
         if signal != CallAnswerType.UNKNOWN:
-            if signal == CallAnswerType.HUMAN and not is_final and self.state.speech_count <= 0:
+            if (
+                signal == CallAnswerType.HUMAN
+                and not is_final
+                and self.state.speech_count <= 0
+                and not _has_strong_human_greeting(clean)
+            ):
                 return None
             return self._classify(signal, f"asr:{signal.value}")
         return None
@@ -124,6 +134,19 @@ class AnswerClassifier:
         self.state.reason = reason
         self.state.classified_at = time.monotonic()
         return answer_type
+
+
+# 【审计A6】partial 里出现任一强真人问候词就立即判 HUMAN 的标记表。
+# 评审修复4：去掉"你好/您好"（彩铃"您好，您拨打的用户…"的早期 partial 会误判成真人），
+# 只保留"喂/哪位"这两个几乎只有真人会说的标记。
+_STRONG_HUMAN_GREETING_MARKERS = ("喂", "哪位")
+
+
+def _has_strong_human_greeting(text: str) -> bool:
+    compact = re.sub(r"[\s。！？?!，,、.]+", "", text.lower())
+    if not compact:
+        return False
+    return any(marker in compact for marker in _STRONG_HUMAN_GREETING_MARKERS)
 
 
 def classify_answer_text(text: str) -> CallAnswerType:

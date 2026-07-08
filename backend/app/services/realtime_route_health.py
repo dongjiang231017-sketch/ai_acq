@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +13,17 @@ from dashscope.audio.qwen_omni import OmniRealtimeCallback, OmniRealtimeConversa
 
 from app.services.runtime_ai_config import get_runtime_ai_config
 
+try:
+    # 【审计B5】dashscope 底层依赖 websocket-client，用它给探测连接设置 socket 层超时
+    import websocket as _websocket
+except ImportError:  # pragma: no cover
+    _websocket = None  # type: ignore[assignment]
+
 
 DEFAULT_OMNI_CIRCUIT_BREAKER_PATH = "/tmp/ai_acq_omni_circuit_breaker.json"
 DEFAULT_OMNI_CIRCUIT_BREAKER_SECONDS = 90
+# 【审计B5】Omni 连接探测硬超时（秒）：探测阻塞会拖死试拨请求路径
+OMNI_PROBE_CONNECT_TIMEOUT_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -83,17 +92,40 @@ def probe_omni_realtime_connect() -> tuple[bool, str]:
         url=runtime_config.dashscope_omni_realtime_url,
         workspace=runtime_config.dashscope_workspace.strip() or None,
     )
+    # 【审计B5】3秒硬超时：connect 在独立线程执行 + websocket 层默认超时，
+    # 避免 DNS/握手挂起把试拨请求路径阻塞几十秒。
+    outcome: dict[str, str] = {}
+
+    def _connect() -> None:
+        try:
+            conversation.connect()
+            outcome["ok"] = "1"
+        except Exception as exc:  # noqa: BLE001
+            outcome["error"] = str(exc)
+
+    previous_timeout = None
+    if _websocket is not None:
+        previous_timeout = _websocket.getdefaulttimeout()
+        _websocket.setdefaulttimeout(OMNI_PROBE_CONNECT_TIMEOUT_SECONDS)
+    worker = threading.Thread(target=_connect, name="omni-probe-connect", daemon=True)
     try:
-        conversation.connect()
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)
+        worker.start()
+        worker.join(OMNI_PROBE_CONNECT_TIMEOUT_SECONDS)
     finally:
+        if _websocket is not None:
+            _websocket.setdefaulttimeout(previous_timeout)
         try:
             conversation.close()
         except Exception:
             pass
+    if worker.is_alive():
+        return False, f"Omni 连接探测超过 {OMNI_PROBE_CONNECT_TIMEOUT_SECONDS:.0f} 秒未完成，按不可用处理。"
+    if outcome.get("error"):
+        return False, outcome["error"]
     if callback.error:
         return False, callback.error
+    if not outcome.get("ok"):
+        return False, "Omni 连接探测未成功建立连接。"
     return True, ""
 
 

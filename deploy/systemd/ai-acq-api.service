@@ -1,0 +1,19 @@
+# 【审计B2】后端 API 纳入 systemd 监管：崩溃/部署后自动拉起，不再手工启动
+[Unit]
+Description=AI ACQ backend API (uvicorn app.main:app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际部署路径调整；.env 由 pydantic-settings 从 WorkingDirectory 读取
+WorkingDirectory=/opt/ai_acq/backend
+ExecStart=/opt/ai_acq/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

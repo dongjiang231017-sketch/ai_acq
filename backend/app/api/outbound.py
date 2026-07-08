@@ -219,8 +219,11 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         bridge_error=bridge_error,
     )
     auto_recovery = None
+    # 【审计B5】自动恢复动作默认移出试拨请求路径（TELEPHONY_AUTO_RECOVERY_IN_REQUEST 默认 false）：
+    # 内联执行恢复命令会把本次 HTTP 请求再阻塞数秒到数十秒；需要时用 /telephony/recover-line 手动触发。
     if (
-        not result.cellular_confirmed
+        telephony_bool("TELEPHONY_AUTO_RECOVERY_IN_REQUEST", fallback=settings.telephony_auto_recovery_in_request)
+        and not result.cellular_confirmed
         and not media_loop_confirmed
         and cellular_diagnostic.get("canRetry")
         and cellular_diagnostic.get("status") == "fail"

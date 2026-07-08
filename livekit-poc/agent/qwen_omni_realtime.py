@@ -1,14 +1,17 @@
 """
 Qwen-Omni-Realtime LiveKit RealtimeModel 适配器（真机验证版 2026-07-08）
 
-来源：Workbuddy 本地开发 + 当日真实通话/自测验证，含 4 个关键修复：
+来源：Workbuddy 本地开发 + 当日真实通话/自测验证，含 5 个关键修复：
 1. modalities 立即声明（原来等 response.done 才声明，框架把音频整句憋住不播）
 2. 输出音频按 10ms 分帧（框架对大帧静默丢弃 -> AI 无声）
 3. 开场白：DashScope 忽略"空上下文 + 手动 response.create"，
    generate_reply(instructions=...) 自动转为 conversation.item.create + response.create
 4. 输入重采样奇数字节截断（LiveKit 音频帧偶发奇数字节导致 struct.error）
+5. 【竞态·最关键】MessageGeneration 的发送移入 response.created 协程（事件循环线程），
+   不再依赖 output_item.added（ws 线程）时 _current_gen 是否就绪。这是"间歇性不说话"
+   的真正根源：修前自测 10 次仅约 37% 出声，修后 10/10 出声。
 
-验证证据：自测录到 AI 语音 4.7s、客户语音逐字识别、打断正常（见 livekit-poc/README.md）。
+验证证据：自测连续 10/10 录到 AI 语音、客户语音逐字识别、打断正常（见 livekit-poc/README.md）。
 判停延迟 silence_duration_ms 通过环境变量 VAD_SILENCE_MS 配置（默认 400ms，
 实测 800ms 时转向延迟 ~1.3s，400ms 目标 ~0.9s；小于 300 容易抢话）。
 """
@@ -155,16 +158,13 @@ class QwenOmniRealtimeSession(RealtimeSession):
             rid = obj.get("response", {}).get("id", "")
             self._handle_response_created(rid)
         elif t == "response.output_item.added":
+            # 竞态修复：MessageGeneration 的发送已移入 _handle_response_created_async
+            # （与 generation_created 同在事件循环线程一次性完成）。本事件只更新 id，
+            # 不再负责发送——原来在这里发送会因 _current_gen 尚未就绪而丢失，
+            # 导致约 60% 概率框架拿不到音频流、整句无声。
             item = obj.get("item", {})
             if item.get("type") == "message" and self._current_gen:
                 self._current_gen.message_id = item.get("id", "")
-                mg = MessageGeneration(
-                    message_id=item.get("id", ""),
-                    text_stream=self._current_gen.text_ch,
-                    audio_stream=self._current_gen.audio_ch,
-                    modalities=self._current_gen.modalities_fut,
-                )
-                self._current_gen.message_ch.send_nowait(mg)
         elif t == "response.audio.delta":
             self._handle_audio_delta(obj.get("delta", ""))
         elif t == "response.audio_transcript.delta":
@@ -207,6 +207,15 @@ class QwenOmniRealtimeSession(RealtimeSession):
                 self._reply_futures.pop(eid, None)
                 break
         self._emit_generation_created(generation_ev)
+        # 竞态修复：紧接着（同在事件循环线程）把 MessageGeneration 送进 message_ch。
+        # 不依赖 output_item.added 事件到达时机，保证框架一定拿到音频流句柄。
+        mg = MessageGeneration(
+            message_id=response_id,
+            text_stream=gen.text_ch,
+            audio_stream=gen.audio_ch,
+            modalities=gen.modalities_fut,
+        )
+        gen.message_ch.send_nowait(mg)
 
     _OUT_RATE = 24000
     _FRAME_SAMPLES = 240  # 10ms @ 24kHz

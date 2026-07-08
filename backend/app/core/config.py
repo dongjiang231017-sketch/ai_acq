@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     asterisk_max_channels: int = 1
     asterisk_live_call_enabled: bool = False
     asterisk_bulk_call_enabled: bool = False
+    # 【审计B1】电话注册看门狗开关：常驻任务每30秒轮询 pjsip contacts，掉注册告警
+    telephony_registration_watchdog_enabled: bool = True
+    # 【审计B5】试拨请求路径内的自动恢复动作默认关闭，避免请求内做 reload 类阻塞操作
+    telephony_auto_recovery_in_request: bool = False
     asterisk_audio_socket_bind_host: str = "127.0.0.1"
     asterisk_audio_socket_host: str = "127.0.0.1"
     asterisk_audio_socket_port: int = 9019

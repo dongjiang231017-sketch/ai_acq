@@ -524,9 +524,12 @@ def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
             return True, "trunk 已注册或可达"
     if any(marker in lower for marker in ["not found", "unable to find", "not a known", "no such"]):
         return False, "trunk 未找到"
-    if any(marker in lower for marker in ["unreachable", "unavailable", "rejected", "failed"]):
+    # 【审计B4】增加 "unavail"（同时覆盖 Unavail/Unavailable），确保 Unavail contact 优先判为不可达
+    if any(marker in lower for marker in ["unreachable", "unavail", "rejected", "failed"]):
         return False, "trunk 未注册或不可达"
-    if any(marker in lower for marker in ["reachable", "available", "ok", "in use", "not in use", "registered", "contact:"]):
+    # 【审计B4】兜底可达 marker 移除 "contact:" / "not in use"（以及会子串匹配到 "not in use" 的 "in use"）：
+    # stale/Unavail contact 仅凭 "Contact:" 行存在就被误判可达；无法判断时保守返回 None。
+    if any(marker in lower for marker in ["reachable", "available", "ok", "registered"]):
         return True, "trunk 已注册或可达"
     return None, "已连接 AMI，但无法自动判断 trunk 状态"
 
