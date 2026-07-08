@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     realtime_tts_voice_id: str = ""
     realtime_tts_voice_name: str = ""
     realtime_tts_voice_type: str = "system"
-    realtime_conversation_mode: str = "pipeline"
+    realtime_conversation_mode: str = "omni"
     realtime_llm_timeout_seconds: float = 1.2
     realtime_call_opening_text: str = "喂，您好，我在。简单说一句，我这边是做视频号团购到店获客的。"
     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     realtime_opening_grace_seconds: float = 0.35
     realtime_debug_audio_capture_enabled: bool = False
     realtime_debug_audio_capture_dir: str = "/tmp/ai-acq-realtime-audio"
+    realtime_flight_recorder_enabled: bool = True
+    realtime_flight_recorder_dir: str = "/tmp/ai-acq-realtime-flight"
+    realtime_flight_audio_capture_enabled: bool = False
+    realtime_turn_manager_enabled: bool = True
     realtime_audio_quality_enabled: bool = True
     realtime_answer_classification_seconds: float = 1.2
     realtime_call_screening_hangup_seconds: float = 12.0

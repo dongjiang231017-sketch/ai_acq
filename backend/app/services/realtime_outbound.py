@@ -133,7 +133,7 @@ _SESSIONS: dict[str, RealtimeSession] = {}
 
 def _normalize_conversation_route(route: str | None) -> str:
     runtime_config = get_runtime_ai_config()
-    normalized = (route or runtime_config.realtime_conversation_mode or "pipeline").strip().lower()
+    normalized = (route or runtime_config.realtime_conversation_mode or "omni").strip().lower()
     return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
 
 

@@ -120,7 +120,7 @@ REALTIME_ASR_MODEL=paraformer-realtime-v2
 REALTIME_TTS_VOICE_ID=
 REALTIME_TTS_VOICE_NAME=
 REALTIME_TTS_VOICE_TYPE=system
-REALTIME_CONVERSATION_MODE=pipeline
+REALTIME_CONVERSATION_MODE=omni
 REALTIME_LLM_TIMEOUT_SECONDS=0.9
 REALTIME_CALL_OPENING_TEXT=您好，我是本地生活服务顾问，想跟您聊下视频号团购获客，方便吗？
 REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
@@ -277,6 +277,31 @@ python -m app.tools.realtime_audio_bridge
 ```
 
 `--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。前端「实时语音管线」会读取同一份事件，显示 ASR、DeepSeek 回复、TTS 播放和打断结果。
+
+本地审查实时语音飞行记录仪：
+
+```env
+REALTIME_FLIGHT_RECORDER_ENABLED=true
+REALTIME_FLIGHT_RECORDER_DIR=/tmp/ai-acq-realtime-flight
+REALTIME_FLIGHT_AUDIO_CAPTURE_ENABLED=false
+REALTIME_TURN_MANAGER_ENABLED=true
+```
+
+`REALTIME_FLIGHT_RECORDER_ENABLED` 会为每通 AudioSocket 电话生成独立 `trace.jsonl` 和 `manifest.json`。需要真实音频回放证据时再打开 `REALTIME_FLIGHT_AUDIO_CAPTURE_ENABLED=true`，它会额外保存客户侧和 AI 侧 8k WAV。保存 WAV 会占用磁盘，正式生产应配合保留周期和脱敏策略。
+
+离线检查已记录通话的首句、客户说完到 AI 首音、打断清播放耗时：
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.tools.realtime_flight_replay_eval \
+  --root /tmp/ai-acq-realtime-flight \
+  --max-opening-ms 800 \
+  --max-turn-ms 1200 \
+  --max-barge-clear-ms 400
+```
+
+这个命令不拨电话、不访问外部服务，只读取本地飞行记录目录。
 
 测试 Qwen Omni 端到端实时方案：
 

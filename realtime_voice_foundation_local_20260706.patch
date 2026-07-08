@@ -1,0 +1,1257 @@
+diff --git a/backend/.env.example b/backend/.env.example
+index f580a4c..68a905f 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -123,7 +123,11 @@ REALTIME_ASR_MODEL=paraformer-realtime-8k-v2
+ REALTIME_TTS_VOICE_ID=
+ REALTIME_TTS_VOICE_NAME=
+ REALTIME_TTS_VOICE_TYPE=system
+-REALTIME_CONVERSATION_MODE=pipeline
++REALTIME_CONVERSATION_MODE=omni
++REALTIME_FLIGHT_RECORDER_ENABLED=true
++REALTIME_FLIGHT_RECORDER_DIR=/tmp/ai-acq-realtime-flight
++REALTIME_FLIGHT_AUDIO_CAPTURE_ENABLED=false
++REALTIME_TURN_MANAGER_ENABLED=true
+ REALTIME_LLM_TIMEOUT_SECONDS=1.2
+ REALTIME_CALL_OPENING_TEXT=喂，您好，我在。简单说一句，我这边是做视频号团购到店获客的。
+ REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
+diff --git a/backend/app/core/config.py b/backend/app/core/config.py
+index ab95a53..5886bc7 100644
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -88,7 +88,7 @@ class Settings(BaseSettings):
+     realtime_tts_voice_id: str = ""
+     realtime_tts_voice_name: str = ""
+     realtime_tts_voice_type: str = "system"
+-    realtime_conversation_mode: str = "pipeline"
++    realtime_conversation_mode: str = "omni"
+     realtime_llm_timeout_seconds: float = 1.2
+     realtime_call_opening_text: str = "喂，您好，我在。简单说一句，我这边是做视频号团购到店获客的。"
+     realtime_call_event_log_path: str = "/tmp/ai-acq-realtime-call-events.jsonl"
+@@ -100,6 +100,10 @@ class Settings(BaseSettings):
+     realtime_opening_grace_seconds: float = 0.35
+     realtime_debug_audio_capture_enabled: bool = False
+     realtime_debug_audio_capture_dir: str = "/tmp/ai-acq-realtime-audio"
++    realtime_flight_recorder_enabled: bool = True
++    realtime_flight_recorder_dir: str = "/tmp/ai-acq-realtime-flight"
++    realtime_flight_audio_capture_enabled: bool = False
++    realtime_turn_manager_enabled: bool = True
+     realtime_audio_quality_enabled: bool = True
+     realtime_answer_classification_seconds: float = 1.2
+     realtime_call_screening_hangup_seconds: float = 12.0
+diff --git a/backend/app/services/realtime_outbound.py b/backend/app/services/realtime_outbound.py
+index e627eea..0113494 100644
+--- a/backend/app/services/realtime_outbound.py
++++ b/backend/app/services/realtime_outbound.py
+@@ -133,7 +133,7 @@ _SESSIONS: dict[str, RealtimeSession] = {}
+ 
+ def _normalize_conversation_route(route: str | None) -> str:
+     runtime_config = get_runtime_ai_config()
+-    normalized = (route or runtime_config.realtime_conversation_mode or "pipeline").strip().lower()
++    normalized = (route or runtime_config.realtime_conversation_mode or "omni").strip().lower()
+     return "omni" if normalized in {"omni", "qwen_omni", "omni_realtime_interruptible"} else "pipeline"
+ 
+ 
+diff --git a/backend/app/tools/realtime_audio_bridge.py b/backend/app/tools/realtime_audio_bridge.py
+index a527cec..6d4a945 100644
+--- a/backend/app/tools/realtime_audio_bridge.py
++++ b/backend/app/tools/realtime_audio_bridge.py
+@@ -32,6 +32,7 @@ from app.models.growth import VoiceCloneRecord
+ from app.services.realtime_answer_classifier import AnswerClassifier, CallAnswerType, classify_answer_text
+ from app.services.realtime_audio_quality import RealtimeAudioQualityChain, analyze_pcm16
+ from app.services.realtime_call_learning import record_realtime_call_learning
++from app.services.realtime_flight_recorder import RealtimeFlightRecorder
+ from app.services.realtime_intent_capture import claim_realtime_call_context, record_realtime_intent_signal
+ from app.services.realtime_llm import generate_realtime_reply
+ from app.services.realtime_outbound import _build_reply, _classify_intent
+@@ -45,6 +46,12 @@ from app.services.realtime_sales_playbook import (
+ )
+ from app.services.realtime_sales_state import SalesStateMachine
+ from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
++from app.services.realtime_turn_manager import (
++    RealtimeTurnManager,
++    compact_customer_text as turn_compact_customer_text,
++    should_fast_commit_partial,
++    stable_partial_delay_seconds,
++)
+ from app.services.runtime_ai_config import get_runtime_ai_config
+ 
+ 
+@@ -201,11 +208,7 @@ _DOWNSAMPLE_TAPS = _build_downsample_taps()
+ 
+ 
+ def _compact_customer_text(text: str) -> str:
+-    return "".join(
+-        char.lower()
+-        for char in text
+-        if char not in " \t\r\n。！？?!，,、.；;：:\"'“”‘’（）()[]【】"
+-    )
++    return turn_compact_customer_text(text)
+ 
+ 
+ def _has_significant_business_question(text: str) -> bool:
+@@ -259,33 +262,11 @@ def _is_complete_actionable_asr_partial(text: str) -> bool:
+ 
+ 
+ def should_commit_stable_asr_partial(text: str) -> bool:
+-    compact = _compact_customer_text(text)
+-    if compact == "喂":
+-        return True
+-    if len(compact) < 2:
+-        return False
+-    if has_incomplete_realtime_partial(text):
+-        return False
+-    signal = classify_realtime_call_input(text)
+-    if signal in {"empty", "system_prompt"}:
+-        return False
+-    if signal in ASR_PARTIAL_FAST_SIGNALS:
+-        return True
+-    if any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
+-        return True
+-    if _is_complete_actionable_asr_partial(text):
+-        return True
+-    return False
++    return should_fast_commit_partial(text)
+ 
+ 
+ def _asr_partial_stable_delay_seconds(text: str) -> float:
+-    compact = _compact_customer_text(text)
+-    signal = classify_realtime_call_input(text)
+-    if signal in ASR_PARTIAL_FAST_SIGNALS or any(marker in compact for marker in ASR_PARTIAL_FAST_MARKERS):
+-        return ASR_PARTIAL_STABLE_SECONDS
+-    if _is_complete_actionable_asr_partial(text):
+-        return 0.25
+-    return ASR_PARTIAL_STABLE_SECONDS + 0.35
++    return stable_partial_delay_seconds(text, base_seconds=ASR_PARTIAL_STABLE_SECONDS)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -311,6 +292,10 @@ class BridgeConfig:
+     opening_grace_seconds: float = 1.2
+     debug_audio_capture_enabled: bool = False
+     debug_audio_capture_dir: Path = Path("/tmp/ai-acq-realtime-audio")
++    flight_recorder_enabled: bool = True
++    flight_recorder_dir: Path = Path("/tmp/ai-acq-realtime-flight")
++    flight_audio_capture_enabled: bool = False
++    turn_manager_enabled: bool = True
+     audio_quality_enabled: bool = True
+     answer_classification_seconds: float = 7.0
+     call_screening_hangup_seconds: float = 12.0
+@@ -547,7 +532,8 @@ class AudioSocketCallSession:
+         self._last_barge_at = 0.0
+         self._barge_forward_until = 0.0
+         self._recognition: Recognition | None = None
+-        self._audio_capture: CallAudioCapture | None = None
++        self._audio_capture: CallAudioCapture | RealtimeFlightRecorder | None = None
++        self._flight_recorder: RealtimeFlightRecorder | None = None
+         self._intent_counts: dict[str, int] = {}
+         self._conversation_history: list[dict[str, str]] = []
+         self._call_history: list[dict[str, str]] = []
+@@ -580,6 +566,14 @@ class AudioSocketCallSession:
+         self._intentional_close_reason = ""
+         self._learning_recorded = False
+         self._call_context: dict[str, Any] = {}
++        self._turn_manager = (
++            RealtimeTurnManager(
++                rms_threshold=self.config.barge_rms_threshold,
++                barge_frames=self.config.barge_frames,
++            )
++            if self.config.turn_manager_enabled
++            else None
++        )
+         self._turn_thread = threading.Thread(target=self._turn_worker, name="ai-acq-audiosocket-turn", daemon=True)
+ 
+     def run(self) -> None:
+@@ -589,6 +583,7 @@ class AudioSocketCallSession:
+             if not self._await_call_uuid():
+                 return
+             self.logger.emit("call_connected", callId=self.call_id, peer=f"{self.peer[0]}:{self.peer[1]}", voice=self.config.tts_voice_name)
++            self._flight_event("call_connected", peer=f"{self.peer[0]}:{self.peer[1]}", mode="pipeline")
+             self._start_startup_keepalive()
+             self._start_asr()
+             self._turn_thread.start()
+@@ -667,6 +662,31 @@ class AudioSocketCallSession:
+                 summary=result.get("summary"),
+             )
+ 
++    def _flight_event(self, event_type: str, **fields: Any) -> None:
++        if not self._flight_recorder:
++            return
++        try:
++            self._flight_recorder.event(event_type, **fields)
++        except Exception as exc:  # noqa: BLE001
++            self.logger.emit("flight_recorder_error", callId=self.call_id, eventType=event_type, error=str(exc))
++
++    def _turn_audio_decision(self, rms: int, now: float, *, ai_speaking: bool) -> Any | None:
++        if not self._turn_manager:
++            return None
++        decision = self._turn_manager.on_audio_frame(rms, now=now, ai_speaking=ai_speaking)
++        # Flight-recorder-only event: this is the raw VAD timeline used to prove
++        # whether the bridge heard the customer before ASR text arrived.
++        if decision.speech_started or decision.speech_ended or decision.barge_in:
++            self._flight_event(
++                f"vad_{decision.reason}",
++                rms=rms,
++                voiceMs=decision.voice_ms,
++                silenceMs=decision.silence_ms,
++                loudFrames=decision.loud_frames,
++                aiSpeaking=ai_speaking,
++            )
++        return decision
++
+     def _start_startup_keepalive(self) -> None:
+         self._startup_keepalive_active.set()
+         threading.Thread(target=self._startup_keepalive_loop, name="ai-acq-audiosocket-keepalive", daemon=True).start()
+@@ -732,6 +752,7 @@ class AudioSocketCallSession:
+                         effectiveRoute=self._call_context.get("effectiveRoute"),
+                     )
+                 self._start_audio_capture()
++                self._flight_event("call_uuid", hasContext=bool(self._call_context))
+                 return True
+             if frame_type == AUDIO_SOCKET_KIND_HANGUP:
+                 self.logger.emit("hangup_before_uuid")
+@@ -778,6 +799,7 @@ class AudioSocketCallSession:
+                 self.call_id = _decode_call_id(payload)
+                 self.logger.emit("call_uuid", callId=self.call_id)
+                 self._start_audio_capture()
++                self._flight_event("call_uuid", source="read_loop")
+                 continue
+             if frame_type == AUDIO_SOCKET_KIND_DTMF:
+                 self.logger.emit("dtmf", callId=self.call_id, digit=payload.decode("utf-8", errors="replace"))
+@@ -795,9 +817,10 @@ class AudioSocketCallSession:
+             self._audio_capture.write_inbound(payload)
+         rms = _pcm_rms(payload)
+         now = time.monotonic()
++        turn_audio = self._turn_audio_decision(rms, now, ai_speaking=self.speaking_event.is_set())
+         self._emit_remote_audio_sample(rms, now)
+         self._handle_answer_audio(rms, now)
+-        if rms >= self.config.barge_rms_threshold:
++        if (turn_audio and turn_audio.has_voice) or (not turn_audio and rms >= self.config.barge_rms_threshold):
+             if now - self._last_remote_speech_started_at > 1.5:
+                 self._last_remote_speech_started_at = now
+                 self.logger.emit(
+@@ -805,8 +828,15 @@ class AudioSocketCallSession:
+                     callId=self.call_id,
+                     source="rms",
+                     rms=rms,
++                    vadReason=turn_audio.reason if turn_audio else "legacy_threshold",
+                     detail="检测到客户开始说话，进入听完本轮再回复。",
+                 )
++                self._flight_event(
++                    "customer_speech_start",
++                    source="rms",
++                    rms=rms,
++                    vadReason=turn_audio.reason if turn_audio else "legacy_threshold",
++                )
+             self._note_customer_activity("remote_audio", now=now)
+         if self.speaking_event.is_set():
+             if now < self._barge_forward_until:
+@@ -822,7 +852,10 @@ class AudioSocketCallSession:
+                 self._loud_frames += 1
+             else:
+                 self._loud_frames = 0
+-            if self._loud_frames >= self.config.barge_frames and now - self._last_barge_at > 0.8:
++            if (
++                (turn_audio and turn_audio.barge_in)
++                or (not turn_audio and self._loud_frames >= self.config.barge_frames and now - self._last_barge_at > 0.8)
++            ):
+                 self._barge_forward_until = now + BARGE_AUDIO_FORWARD_SECONDS
+                 self.cancel_pending_speech("客户插话，停止后续 TTS 音频帧并继续听客户说话。", source="rms", rms=rms)
+                 if self._recognition:
+@@ -890,7 +923,8 @@ class AudioSocketCallSession:
+         if not clean:
+             return
+         self._note_customer_activity("asr_partial", text=clean)
+-        should_commit = should_commit_stable_asr_partial(clean)
++        endpoint = self._turn_manager.on_partial_text(clean) if self._turn_manager else None
++        should_commit = endpoint.should_commit if endpoint else should_commit_stable_asr_partial(clean)
+         if not should_commit:
+             with self.asr_partial_lock:
+                 if self._asr_partial_text and clean != self._asr_partial_text:
+@@ -900,7 +934,7 @@ class AudioSocketCallSession:
+                 "turn_waiting_final",
+                 callId=self.call_id,
+                 text=clean,
+-                reason="incomplete_or_nonactionable_partial",
++                reason=endpoint.reason if endpoint else "incomplete_or_nonactionable_partial",
+                 detail="客户这句话还没有足够完整，继续听最终转写，避免抢答或重复旧问题。",
+             )
+             return
+@@ -908,14 +942,22 @@ class AudioSocketCallSession:
+             self._asr_partial_generation += 1
+             generation = self._asr_partial_generation
+             self._asr_partial_text = clean
+-        delay = _asr_partial_stable_delay_seconds(clean)
++        delay = endpoint.wait_seconds if endpoint else _asr_partial_stable_delay_seconds(clean)
+         self.logger.emit(
+             "turn_endpoint_candidate",
+             callId=self.call_id,
+             text=clean,
+             waitMs=int(delay * 1000),
++            signal=endpoint.signal if endpoint else classify_realtime_call_input(clean),
+             detail="客户短句或完整问题已足够可答，若 ASR final 未到会先接话。",
+         )
++        self._flight_event(
++            "turn_endpoint_candidate",
++            text=clean,
++            waitMs=int(delay * 1000),
++            signal=endpoint.signal if endpoint else classify_realtime_call_input(clean),
++            source="asr_partial",
++        )
+         threading.Thread(
+             target=self._commit_stable_asr_partial_after_delay,
+             args=(generation, clean, delay),
+@@ -931,6 +973,7 @@ class AudioSocketCallSession:
+             text=text,
+             detail="ASR final 到达，客户本轮说话完成。",
+         )
++        self._flight_event("turn_endpoint_final", text=text, source="asr_final")
+         self._commit_customer_text(text, source="asr_final", detail="客户说话完成，取消旧 TTS 队列。")
+ 
+     def _commit_stable_asr_partial_after_delay(self, generation: int, text: str, delay: float) -> None:
+@@ -972,6 +1015,7 @@ class AudioSocketCallSession:
+             source=source,
+             detail="客户本轮已提交给销售脑，准备生成回复。",
+         )
++        self._flight_event("turn_committed", text=clean, source=source)
+         generation = self.cancel_pending_speech(detail, source=source)
+         self._remember_committed_customer_text(clean)
+         self.customer_texts.put((generation, clean))
+@@ -1492,6 +1536,14 @@ class AudioSocketCallSession:
+                 remainingJobs=remaining_jobs,
+                 waitMs=int((time.monotonic() - now) * 1000),
+             )
++            self._flight_event(
++                "playback_cleared",
++                source=source,
++                generation=generation,
++                drained=drained,
++                remainingJobs=remaining_jobs,
++                waitMs=int((time.monotonic() - now) * 1000),
++            )
+         if was_speaking and now - self._last_barge_at > 0.8:
+             self._last_barge_at = now
+             fields: dict[str, Any] = {
+@@ -1503,6 +1555,7 @@ class AudioSocketCallSession:
+             if rms is not None:
+                 fields["rms"] = rms
+             self.logger.emit("barge_in", **fields)
++            self._flight_event("barge_in", source=source, generation=generation, rms=rms)
+             self.logger.emit(
+                 "barge_recovery_ready",
+                 callId=self.call_id,
+@@ -1573,6 +1626,15 @@ class AudioSocketCallSession:
+                             streaming=_is_qwen_realtime_model(self.config.tts_model),
+                             generation=generation,
+                         )
++                        self._flight_event(
++                            "tts_start",
++                            reason=reason,
++                            text=text,
++                            firstAudioMs=first_audio_ms,
++                            voiceType=self.config.tts_voice_type,
++                            model=self.config.tts_model,
++                            generation=generation,
++                        )
+                     pending += audio_chunk
+                     while len(pending) >= PCM_FRAME_BYTES:
+                         if self.stop_event.is_set() or self._speech_is_obsolete(generation):
+@@ -1633,6 +1695,14 @@ class AudioSocketCallSession:
+             firstAudioMs=first_audio_ms,
+             generation=generation,
+         )
++        self._flight_event(
++            "tts_interrupted" if interrupted else "tts_done",
++            reason=reason,
++            sentBytes=sent,
++            totalBytes=total_bytes,
++            firstAudioMs=first_audio_ms,
++            generation=generation,
++        )
+         if close_after and not interrupted:
+             self._close_after_terminal_reply("customer_rejected")
+         elif not close_after and not interrupted:
+@@ -1729,19 +1799,40 @@ class AudioSocketCallSession:
+             pass
+ 
+     def _start_audio_capture(self) -> None:
+-        if not self.config.debug_audio_capture_enabled or not self.call_id or self._audio_capture:
++        if not self.call_id or self._audio_capture:
+             return
+         try:
+-            self._audio_capture = CallAudioCapture(self.call_id, self.config.debug_audio_capture_dir)
++            if self.config.flight_recorder_enabled:
++                capture_audio = self.config.flight_audio_capture_enabled or self.config.debug_audio_capture_enabled
++                self._flight_recorder = RealtimeFlightRecorder(
++                    self.call_id,
++                    self.config.flight_recorder_dir,
++                    capture_audio=capture_audio,
++                )
++                self._audio_capture = self._flight_recorder
++            elif self.config.debug_audio_capture_enabled:
++                self._audio_capture = CallAudioCapture(self.call_id, self.config.debug_audio_capture_dir)
++            else:
++                return
+         except Exception as exc:  # noqa: BLE001
+             self.logger.emit("audio_capture_error", callId=self.call_id, error=str(exc))
+             return
+-        self.logger.emit(
+-            "audio_capture_started",
+-            callId=self.call_id,
+-            inboundPath=str(self._audio_capture.inbound_path),
+-            outboundPath=str(self._audio_capture.outbound_path),
+-        )
++        if self._flight_recorder:
++            self.logger.emit(
++                "flight_recorder_started",
++                callId=self.call_id,
++                flightRoot=str(self._flight_recorder.call_root),
++                tracePath=str(self._flight_recorder.trace_path),
++                captureAudio=self._flight_recorder.capture_audio,
++                detail="本通电话已开启飞行记录仪，用于对齐真实音频、VAD、ASR、回复和播放耗时。",
++            )
++        else:
++            self.logger.emit(
++                "audio_capture_started",
++                callId=self.call_id,
++                inboundPath=str(self._audio_capture.inbound_path),
++                outboundPath=str(self._audio_capture.outbound_path),
++            )
+ 
+     def _stop_audio_capture(self) -> None:
+         if not self._audio_capture:
+@@ -1754,6 +1845,7 @@ class AudioSocketCallSession:
+             return
+         self.logger.emit("audio_capture_saved", callId=self.call_id, **paths)
+         self._audio_capture = None
++        self._flight_recorder = None
+ 
+ 
+ class OmniAudioSocketCallSession(AudioSocketCallSession):
+@@ -1820,6 +1912,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+                 voice=self.config.omni_voice,
+                 mode="omni",
+             )
++            self._flight_event("call_connected", peer=f"{self.peer[0]}:{self.peer[1]}", mode="omni")
+             self._start_startup_keepalive()
+             requested_route = self._context_conversation_route()
+             if requested_route == "pipeline":
+@@ -1912,6 +2005,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+                 else "Omni 实时连接启动失败，本通电话自动降级到本地 ASR+LLM+TTS pipeline，避免接通后直接挂断。"
+             ),
+         )
++        self._flight_event("route_fallback", source=source, effectiveRoute="pipeline", error=str(exc))
+         try:
+             if not self._turn_thread.is_alive():
+                 self._turn_thread.start()
+@@ -2059,7 +2153,9 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+         with self._omni_lock:
+             if self._omni_barge_collecting:
+                 self._omni_barge_last_text = clean
+-        if not should_commit_stable_asr_partial(clean):
++        endpoint = self._turn_manager.on_partial_text(clean) if self._turn_manager else None
++        should_commit = endpoint.should_commit if endpoint else should_commit_stable_asr_partial(clean)
++        if not should_commit:
+             with self.asr_partial_lock:
+                 if self._asr_partial_text and clean != self._asr_partial_text:
+                     self._asr_partial_generation += 1
+@@ -2069,7 +2165,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+                 callId=self.call_id,
+                 text=clean,
+                 provider="qwen_asr_sidecar",
+-                reason="incomplete_or_nonactionable_partial",
++                reason=endpoint.reason if endpoint else "incomplete_or_nonactionable_partial",
+                 detail="旁路 ASR partial 还不够完整，继续等 final 或更稳定的短句。",
+             )
+             return
+@@ -2077,15 +2173,23 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+             self._asr_partial_generation += 1
+             generation = self._asr_partial_generation
+             self._asr_partial_text = clean
+-        delay = _asr_partial_stable_delay_seconds(clean)
++        delay = endpoint.wait_seconds if endpoint else _asr_partial_stable_delay_seconds(clean)
+         self.logger.emit(
+             "turn_endpoint_candidate",
+             callId=self.call_id,
+             text=clean,
+             provider="qwen_asr_sidecar",
+             waitMs=int(delay * 1000),
++            signal=endpoint.signal if endpoint else classify_realtime_call_input(clean),
+             detail="旁路 ASR 已拿到可回答短句；若 Omni final 未到，将先触发回复。",
+         )
++        self._flight_event(
++            "turn_endpoint_candidate",
++            text=clean,
++            waitMs=int(delay * 1000),
++            signal=endpoint.signal if endpoint else classify_realtime_call_input(clean),
++            source="omni_sidecar_asr_partial",
++        )
+         threading.Thread(
+             target=self._commit_omni_sidecar_asr_partial_after_delay,
+             args=(generation, clean, delay),
+@@ -2105,6 +2209,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+             provider="qwen_asr_sidecar",
+             detail="旁路 ASR final 已到达，先触发 Omni 回复，避免等待 Omni 自身 final。",
+         )
++        self._flight_event("turn_endpoint_final", text=text, source="omni_sidecar_asr_final", provider="qwen_asr_sidecar")
+         self.handle_omni_transcription(text, provider="qwen_asr_sidecar", source="omni_sidecar_asr_final")
+ 
+     def _commit_omni_sidecar_asr_partial_after_delay(self, generation: int, text: str, delay: float) -> None:
+@@ -2234,6 +2339,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+             source=source,
+             detail="客户本轮说话已由实时 ASR 端点提交，可以触发回复。",
+         )
++        self._flight_event("turn_endpoint_final", text=clean, source=source, provider=provider)
+         if signal == "system_prompt":
+             if classify_answer_text(clean) == CallAnswerType.VOICEMAIL:
+                 self.logger.emit(
+@@ -2340,6 +2446,7 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+             source=source,
+             detail="客户本轮已提交给实时语音模型，准备生成回复。",
+         )
++        self._flight_event("turn_committed", text=routed_clean, source=source, provider=provider)
+         self.logger.emit(
+             "turn_llm_start",
+             callId=self.call_id,
+@@ -2374,16 +2481,20 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+             self._audio_capture.write_inbound(payload)
+         rms = _pcm_rms(payload)
+         now = time.monotonic()
++        turn_audio = self._turn_audio_decision(rms, now, ai_speaking=self.speaking_event.is_set())
+         self._emit_remote_audio_sample(rms, now)
+         self._handle_answer_audio(rms, now)
+-        if rms >= self.config.barge_rms_threshold:
++        if (turn_audio and turn_audio.has_voice) or (not turn_audio and rms >= self.config.barge_rms_threshold):
+             self._note_customer_activity("omni_remote_audio", now=now)
+         if self.speaking_event.is_set() and self._omni_local_barge_ready():
+             if rms >= self.config.barge_rms_threshold:
+                 self._loud_frames += 1
+             else:
+                 self._loud_frames = 0
+-            if self._loud_frames >= self.config.barge_frames and now - self._last_barge_at > 0.8:
++            if (
++                (turn_audio and turn_audio.barge_in)
++                or (not turn_audio and self._loud_frames >= self.config.barge_frames and now - self._last_barge_at > 0.8)
++            ):
+                 self.cancel_pending_speech("客户插话，停止 Omni 语音回复。", source="omni_rms", rms=rms)
+                 self._release_omni_playback_after_barge("omni_rms", now=now)
+         else:
+@@ -2717,6 +2828,14 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+                         streaming=True,
+                         generation=generation,
+                     )
++                    self._flight_event(
++                        "tts_start",
++                        reason="omni_response",
++                        firstAudioMs=self._omni_first_audio_ms,
++                        voiceType="omni",
++                        model=self.config.omni_model,
++                        generation=generation,
++                    )
+                 self._omni_pending_audio += pcm_8k
+                 pending = self._omni_pending_audio
+                 next_frame_at = self._omni_next_frame_at
+@@ -2812,6 +2931,14 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
+             firstAudioMs=first_audio_ms,
+             generation=generation,
+         )
++        self._flight_event(
++            "tts_interrupted" if interrupted else "tts_done",
++            reason="omni_response",
++            sentBytes=audio_sent,
++            totalBytes=audio_total,
++            firstAudioMs=first_audio_ms,
++            generation=generation,
++        )
+         if not interrupted:
+             self._schedule_no_response_hangup("omni_response")
+ 
+@@ -2987,7 +3114,7 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
+         tts_voice_id=voice.voice_id,
+         tts_voice_name=voice.voice_name,
+         tts_voice_type=voice.voice_type,
+-        conversation_mode=(args.conversation_mode or runtime_config.realtime_conversation_mode or "pipeline").strip().lower(),
++        conversation_mode=(args.conversation_mode or runtime_config.realtime_conversation_mode or "omni").strip().lower(),
+         omni_model=(args.omni_model or runtime_config.dashscope_omni_realtime_model).strip(),
+         omni_url=(args.omni_url or runtime_config.dashscope_omni_realtime_url).strip(),
+         omni_voice=(args.omni_voice or runtime_config.dashscope_omni_realtime_voice or voice.voice_id or "Serena").strip(),
+@@ -3003,6 +3130,10 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
+         opening_grace_seconds=max(0.0, min(5.0, settings.realtime_opening_grace_seconds)),
+         debug_audio_capture_enabled=settings.realtime_debug_audio_capture_enabled,
+         debug_audio_capture_dir=Path(settings.realtime_debug_audio_capture_dir).expanduser(),
++        flight_recorder_enabled=settings.realtime_flight_recorder_enabled,
++        flight_recorder_dir=Path(settings.realtime_flight_recorder_dir).expanduser(),
++        flight_audio_capture_enabled=settings.realtime_flight_audio_capture_enabled,
++        turn_manager_enabled=settings.realtime_turn_manager_enabled,
+         audio_quality_enabled=settings.realtime_audio_quality_enabled,
+         answer_classification_seconds=max(0.5, min(10.0, settings.realtime_answer_classification_seconds)),
+         call_screening_hangup_seconds=max(0.0, min(45.0, settings.realtime_call_screening_hangup_seconds)),
+diff --git a/docs/UC100_OUTBOUND_SETUP.md b/docs/UC100_OUTBOUND_SETUP.md
+index 9e1cb1d..de24ee1 100644
+--- a/docs/UC100_OUTBOUND_SETUP.md
++++ b/docs/UC100_OUTBOUND_SETUP.md
+@@ -120,7 +120,7 @@ REALTIME_ASR_MODEL=paraformer-realtime-v2
+ REALTIME_TTS_VOICE_ID=
+ REALTIME_TTS_VOICE_NAME=
+ REALTIME_TTS_VOICE_TYPE=system
+-REALTIME_CONVERSATION_MODE=pipeline
++REALTIME_CONVERSATION_MODE=omni
+ REALTIME_LLM_TIMEOUT_SECONDS=0.9
+ REALTIME_CALL_OPENING_TEXT=您好，我是本地生活服务顾问，想跟您聊下视频号团购获客，方便吗？
+ REALTIME_CALL_EVENT_LOG_PATH=/tmp/ai-acq-realtime-call-events.jsonl
+@@ -278,6 +278,31 @@ python -m app.tools.realtime_audio_bridge
+ 
+ `--check` 只验证非密钥配置并输出 voice、ASR/TTS 模型、日志路径，不拨号。正式启动后，Asterisk 在电话接通时连接 `ASTERISK_AUDIO_SOCKET_HOST:ASTERISK_AUDIO_SOCKET_PORT`，把 8k PCM 电话音频送入实时 ASR/TTS 回路，桥会把事件写入 `REALTIME_CALL_EVENT_LOG_PATH`。前端「实时语音管线」会读取同一份事件，显示 ASR、DeepSeek 回复、TTS 播放和打断结果。
+ 
++本地审查实时语音飞行记录仪：
++
++```env
++REALTIME_FLIGHT_RECORDER_ENABLED=true
++REALTIME_FLIGHT_RECORDER_DIR=/tmp/ai-acq-realtime-flight
++REALTIME_FLIGHT_AUDIO_CAPTURE_ENABLED=false
++REALTIME_TURN_MANAGER_ENABLED=true
++```
++
++`REALTIME_FLIGHT_RECORDER_ENABLED` 会为每通 AudioSocket 电话生成独立 `trace.jsonl` 和 `manifest.json`。需要真实音频回放证据时再打开 `REALTIME_FLIGHT_AUDIO_CAPTURE_ENABLED=true`，它会额外保存客户侧和 AI 侧 8k WAV。保存 WAV 会占用磁盘，正式生产应配合保留周期和脱敏策略。
++
++离线检查已记录通话的首句、客户说完到 AI 首音、打断清播放耗时：
++
++```bash
++cd backend
++source .venv/bin/activate
++python -m app.tools.realtime_flight_replay_eval \
++  --root /tmp/ai-acq-realtime-flight \
++  --max-opening-ms 800 \
++  --max-turn-ms 1200 \
++  --max-barge-clear-ms 400
++```
++
++这个命令不拨电话、不访问外部服务，只读取本地飞行记录目录。
++
+ 测试 Qwen Omni 端到端实时方案：
+ 
+ ```bash
+diff --git a/backend/app/services/realtime_flight_recorder.py b/backend/app/services/realtime_flight_recorder.py
+new file mode 100644
+index 0000000..1ec5041
+--- /dev/null
++++ b/backend/app/services/realtime_flight_recorder.py
+@@ -0,0 +1,191 @@
++from __future__ import annotations
++
++import json
++import threading
++import time
++import wave
++from dataclasses import dataclass, field
++from datetime import datetime
++from pathlib import Path
++from typing import Any
++
++
++def _safe_call_id(call_id: str) -> str:
++    return "".join(char for char in call_id if char.isalnum() or char in {"-", "_"}) or "unknown"
++
++
++def _utc_now() -> str:
++    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
++
++
++@dataclass
++class FlightRecorderManifest:
++    call_id: str
++    root: str
++    trace_path: str
++    inbound_path: str | None = None
++    outbound_path: str | None = None
++    outbound_raw_path: str | None = None
++    event_count: int = 0
++    inbound_bytes: int = 0
++    outbound_bytes: int = 0
++    outbound_raw_bytes: int = 0
++    first_inbound_audio_at: str | None = None
++    first_outbound_audio_at: str | None = None
++    opened_at: str = field(default_factory=_utc_now)
++    closed_at: str | None = None
++
++    def as_dict(self) -> dict[str, Any]:
++        return {
++            "callId": self.call_id,
++            "root": self.root,
++            "tracePath": self.trace_path,
++            "inboundPath": self.inbound_path,
++            "outboundPath": self.outbound_path,
++            "outboundRawPath": self.outbound_raw_path,
++            "eventCount": self.event_count,
++            "inboundBytes": self.inbound_bytes,
++            "outboundBytes": self.outbound_bytes,
++            "outboundRawBytes": self.outbound_raw_bytes,
++            "firstInboundAudioAt": self.first_inbound_audio_at,
++            "firstOutboundAudioAt": self.first_outbound_audio_at,
++            "openedAt": self.opened_at,
++            "closedAt": self.closed_at,
++        }
++
++
++class RealtimeFlightRecorder:
++    """Single-call evidence recorder for phone naturalness debugging.
++
++    The global realtime event log shows what the bridge thought happened. This
++    recorder stores one call's trace plus optional inbound/outbound audio so a
++    reviewer can line up actual phone sound with turn decisions and playback.
++    """
++
++    def __init__(
++        self,
++        call_id: str,
++        root: Path,
++        *,
++        capture_audio: bool,
++        sample_rate: int = 8000,
++    ) -> None:
++        self.call_id = call_id
++        self.safe_call_id = _safe_call_id(call_id)
++        self.call_root = root.expanduser() / self.safe_call_id
++        self.call_root.mkdir(parents=True, exist_ok=True)
++        self.trace_path = self.call_root / "trace.jsonl"
++        self.manifest_path = self.call_root / "manifest.json"
++        self.capture_audio = capture_audio
++        self.sample_rate = sample_rate
++        self._lock = threading.Lock()
++        self._closed = False
++        self._inbound: wave.Wave_write | None = None
++        self._outbound: wave.Wave_write | None = None
++        self._outbound_raw: wave.Wave_write | None = None
++
++        self.manifest = FlightRecorderManifest(
++            call_id=call_id,
++            root=str(self.call_root),
++            trace_path=str(self.trace_path),
++        )
++        if capture_audio:
++            self.manifest.inbound_path = str(self.call_root / "customer.in.wav")
++            self.manifest.outbound_path = str(self.call_root / "ai.out.wav")
++            self.manifest.outbound_raw_path = str(self.call_root / "ai.raw.wav")
++            self._inbound = self._open_wave(Path(self.manifest.inbound_path))
++            self._outbound = self._open_wave(Path(self.manifest.outbound_path))
++            self._outbound_raw = self._open_wave(Path(self.manifest.outbound_raw_path))
++        self.event("flight_recorder_opened", captureAudio=capture_audio, sampleRate=sample_rate)
++
++    def _open_wave(self, path: Path) -> wave.Wave_write:
++        handle = wave.open(str(path), "wb")
++        handle.setnchannels(1)
++        handle.setsampwidth(2)
++        handle.setframerate(self.sample_rate)
++        return handle
++
++    def event(self, event_type: str, **fields: Any) -> None:
++        if self._closed:
++            return
++        payload = {
++            "at": _utc_now(),
++            "monotonicMs": int(time.monotonic() * 1000),
++            "callId": self.call_id,
++            "type": event_type,
++            **fields,
++        }
++        line = json.dumps(payload, ensure_ascii=False)
++        with self._lock:
++            if self._closed:
++                return
++            with self.trace_path.open("a", encoding="utf-8") as handle:
++                handle.write(line + "\n")
++            self.manifest.event_count += 1
++
++    def write_inbound(self, payload: bytes) -> None:
++        self._write_audio("inbound", self._inbound, payload)
++
++    def write_outbound(self, payload: bytes) -> None:
++        self._write_audio("outbound", self._outbound, payload)
++
++    def write_outbound_raw(self, payload: bytes) -> None:
++        self._write_audio("outbound_raw", self._outbound_raw, payload)
++
++    def _write_audio(self, direction: str, handle: wave.Wave_write | None, payload: bytes) -> None:
++        if not payload:
++            return
++        with self._lock:
++            if self._closed:
++                return
++            if direction == "inbound":
++                self.manifest.inbound_bytes += len(payload)
++                if not self.manifest.first_inbound_audio_at:
++                    self.manifest.first_inbound_audio_at = _utc_now()
++                    self._write_event_locked("audio_in_first_frame", bytes=len(payload))
++            elif direction == "outbound":
++                self.manifest.outbound_bytes += len(payload)
++                if not self.manifest.first_outbound_audio_at:
++                    self.manifest.first_outbound_audio_at = _utc_now()
++                    self._write_event_locked("audio_out_first_frame", bytes=len(payload))
++            elif direction == "outbound_raw":
++                self.manifest.outbound_raw_bytes += len(payload)
++            if handle is not None:
++                handle.writeframesraw(payload)
++
++    def _write_event_locked(self, event_type: str, **fields: Any) -> None:
++        payload = {
++            "at": _utc_now(),
++            "monotonicMs": int(time.monotonic() * 1000),
++            "callId": self.call_id,
++            "type": event_type,
++            **fields,
++        }
++        with self.trace_path.open("a", encoding="utf-8") as handle:
++            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
++        self.manifest.event_count += 1
++
++    def close(self) -> dict[str, str | None]:
++        with self._lock:
++            if self._closed:
++                return self._close_payload()
++            self._closed = True
++            for handle in (self._inbound, self._outbound, self._outbound_raw):
++                if handle is not None:
++                    handle.close()
++            self.manifest.closed_at = _utc_now()
++            self.manifest_path.write_text(
++                json.dumps(self.manifest.as_dict(), ensure_ascii=False, indent=2) + "\n",
++                encoding="utf-8",
++            )
++        return self._close_payload()
++
++    def _close_payload(self) -> dict[str, str | None]:
++        return {
++            "flightRoot": str(self.call_root),
++            "flightTracePath": str(self.trace_path),
++            "flightManifestPath": str(self.manifest_path),
++            "inboundPath": self.manifest.inbound_path,
++            "outboundRawPath": self.manifest.outbound_raw_path,
++            "outboundPath": self.manifest.outbound_path,
++        }
+diff --git a/backend/app/services/realtime_turn_manager.py b/backend/app/services/realtime_turn_manager.py
+new file mode 100644
+index 0000000..304d750
+--- /dev/null
++++ b/backend/app/services/realtime_turn_manager.py
+@@ -0,0 +1,261 @@
++from __future__ import annotations
++
++import time
++from dataclasses import dataclass
++
++from app.services.realtime_sales_playbook import classify_realtime_call_input
++from app.services.realtime_text_normalizer import has_incomplete_realtime_partial, normalize_realtime_sales_text
++
++
++FAST_PARTIAL_SIGNALS = {
++    "identity_handoff",
++    "audio_issue",
++    "repetition_complaint",
++    "direct_answer_only",
++    "terminal_close",
++    "rejection",
++    "call_screening",
++}
++
++FAST_PARTIAL_MARKERS = (
++    "喂",
++    "你谁",
++    "谁啊",
++    "谁呀",
++    "你是谁",
++    "哪位",
++    "干嘛",
++    "做什么",
++    "什么事",
++    "听不清",
++    "没听清",
++    "不说话",
++    "不会说话",
++    "直接说",
++    "别绕",
++    "收费",
++    "怎么收费",
++    "价格",
++    "报价",
++    "多少钱",
++    "费用",
++    "不需要",
++    "不需",
++    "不用",
++    "不要",
++    "不行",
++    "加微信",
++    "加我微信",
++    "发资料",
++    "发案例",
++    "发给我",
++    "给我发",
++)
++
++COMPLETE_QUESTION_MARKERS = (
++    "详细说一下",
++    "详细讲一下",
++    "具体说一下",
++    "介绍一下",
++    "说一下吗",
++    "讲一下吗",
++    "怎么做",
++    "怎么合作",
++    "流程",
++    "有什么优势",
++    "有什么用",
++    "有啥用",
++    "多少钱",
++    "费用",
++    "收费",
++    "价格",
++    "报价",
++    "成本",
++    "手机号",
++    "手机号码",
++    "电话号码",
++    "号码",
++    "加微信",
++    "加我微信",
++    "发资料",
++    "发案例",
++    "达不到",
++    "保证",
++    "多少客户",
++    "多少单",
++    "到店客流",
++)
++
++
++def compact_customer_text(text: str) -> str:
++    return "".join(
++        char.lower()
++        for char in text
++        if char not in " \t\r\n。！？?!，,、.；;：:\"'“”‘’（）()[]【】"
++    )
++
++
++def is_complete_actionable_partial(text: str, *, min_compact_chars: int = 5) -> bool:
++    normalized = normalize_realtime_sales_text(text).normalized_text or text
++    compact = compact_customer_text(normalized)
++    if len(compact) < min_compact_chars:
++        return False
++    if compact.startswith("你需求什么"):
++        return False
++    has_question_shape = any(marker in text for marker in ("？", "?")) or compact.endswith(("吗", "呢", "嘛"))
++    has_actionable_marker = any(marker in compact for marker in COMPLETE_QUESTION_MARKERS)
++    return has_question_shape and has_actionable_marker
++
++
++def should_fast_commit_partial(text: str) -> bool:
++    compact = compact_customer_text(text)
++    if compact == "喂":
++        return True
++    if len(compact) < 2:
++        return False
++    if has_incomplete_realtime_partial(text):
++        return False
++    signal = classify_realtime_call_input(text)
++    if signal in {"empty", "system_prompt"}:
++        return False
++    if signal in FAST_PARTIAL_SIGNALS:
++        return True
++    if any(marker in compact for marker in FAST_PARTIAL_MARKERS):
++        return True
++    return is_complete_actionable_partial(text)
++
++
++def stable_partial_delay_seconds(text: str, *, base_seconds: float = 0.45) -> float:
++    compact = compact_customer_text(text)
++    signal = classify_realtime_call_input(text)
++    if signal in FAST_PARTIAL_SIGNALS or any(marker in compact for marker in FAST_PARTIAL_MARKERS):
++        return base_seconds
++    if is_complete_actionable_partial(text):
++        return 0.25
++    return base_seconds + 0.35
++
++
++@dataclass(frozen=True)
++class TurnAudioDecision:
++    has_voice: bool
++    speech_started: bool
++    speech_ended: bool
++    barge_in: bool
++    voice_ms: int
++    silence_ms: int
++    loud_frames: int
++    reason: str
++
++
++@dataclass(frozen=True)
++class TurnEndpointDecision:
++    should_commit: bool
++    wait_seconds: float
++    signal: str
++    reason: str
++
++
++class RealtimeTurnManager:
++    """Central turn-taking state for VAD, endpointing, and barge-in.
++
++    This class deliberately owns the timing state that used to be scattered
++    through ASR callbacks and playback loops. It makes "when should AI reply"
++    testable without placing a real call.
++    """
++
++    def __init__(
++        self,
++        *,
++        rms_threshold: int,
++        barge_frames: int,
++        speech_start_frames: int = 2,
++        speech_end_silence_ms: int = 520,
++        min_barge_gap_seconds: float = 0.8,
++    ) -> None:
++        self.rms_threshold = max(1, int(rms_threshold))
++        self.barge_frames = max(1, int(barge_frames))
++        self.speech_start_frames = max(1, int(speech_start_frames))
++        self.speech_end_silence_seconds = max(0.08, speech_end_silence_ms / 1000)
++        self.min_barge_gap_seconds = max(0.0, min_barge_gap_seconds)
++        self._voice_frames = 0
++        self._barge_loud_frames = 0
++        self._speech_active = False
++        self._speech_started_at = 0.0
++        self._last_voice_at = 0.0
++        self._last_barge_at = 0.0
++
++    def on_audio_frame(
++        self,
++        rms: int,
++        *,
++        now: float | None = None,
++        ai_speaking: bool = False,
++    ) -> TurnAudioDecision:
++        now = now or time.monotonic()
++        has_voice = rms >= self.rms_threshold
++        speech_started = False
++        speech_ended = False
++        barge_in = False
++
++        if has_voice:
++            self._voice_frames += 1
++            self._barge_loud_frames = self._barge_loud_frames + 1 if ai_speaking else 0
++            self._last_voice_at = now
++            if not self._speech_active and self._voice_frames >= self.speech_start_frames:
++                self._speech_active = True
++                self._speech_started_at = now
++                speech_started = True
++        else:
++            self._voice_frames = 0
++            self._barge_loud_frames = 0
++            if self._speech_active and self._last_voice_at and now - self._last_voice_at >= self.speech_end_silence_seconds:
++                self._speech_active = False
++                speech_ended = True
++
++        if (
++            ai_speaking
++            and has_voice
++            and self._barge_loud_frames >= self.barge_frames
++            and now - self._last_barge_at >= self.min_barge_gap_seconds
++        ):
++            self._last_barge_at = now
++            barge_in = True
++
++        voice_ms = int(max(0.0, now - self._speech_started_at) * 1000) if self._speech_started_at else 0
++        silence_ms = int(max(0.0, now - self._last_voice_at) * 1000) if self._last_voice_at else 0
++        if barge_in:
++            reason = "barge_in"
++        elif speech_started:
++            reason = "speech_started"
++        elif speech_ended:
++            reason = "speech_ended"
++        elif has_voice:
++            reason = "voice_continues"
++        else:
++            reason = "silence"
++        return TurnAudioDecision(
++            has_voice=has_voice,
++            speech_started=speech_started,
++            speech_ended=speech_ended,
++            barge_in=barge_in,
++            voice_ms=voice_ms,
++            silence_ms=silence_ms,
++            loud_frames=self._barge_loud_frames,
++            reason=reason,
++        )
++
++    def on_partial_text(self, text: str) -> TurnEndpointDecision:
++        signal = classify_realtime_call_input(text)
++        if should_fast_commit_partial(text):
++            return TurnEndpointDecision(
++                should_commit=True,
++                wait_seconds=stable_partial_delay_seconds(text),
++                signal=signal,
++                reason="fast_partial_or_complete_question",
++            )
++        return TurnEndpointDecision(
++            should_commit=False,
++            wait_seconds=0.0,
++            signal=signal,
++            reason="incomplete_or_nonactionable_partial",
++        )
+diff --git a/backend/app/tools/realtime_flight_replay_eval.py b/backend/app/tools/realtime_flight_replay_eval.py
+new file mode 100644
+index 0000000..d0c5005
+--- /dev/null
++++ b/backend/app/tools/realtime_flight_replay_eval.py
+@@ -0,0 +1,154 @@
++from __future__ import annotations
++
++import argparse
++import json
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++from app.core.config import settings
++
++
++@dataclass(frozen=True)
++class FlightEvalResult:
++    call_id: str
++    trace_path: str
++    passed: bool
++    issues: list[str]
++    metrics: dict[str, int | None]
++
++    def as_dict(self) -> dict[str, Any]:
++        return {
++            "callId": self.call_id,
++            "tracePath": self.trace_path,
++            "passed": self.passed,
++            "issues": self.issues,
++            "metrics": self.metrics,
++        }
++
++
++def _read_jsonl(path: Path) -> list[dict[str, Any]]:
++    events: list[dict[str, Any]] = []
++    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
++        if not line.strip():
++            continue
++        try:
++            payload = json.loads(line)
++        except json.JSONDecodeError:
++            continue
++        if isinstance(payload, dict):
++            events.append(payload)
++    return events
++
++
++def _event_ms(event: dict[str, Any]) -> int | None:
++    value = event.get("monotonicMs")
++    return value if isinstance(value, int) else None
++
++
++def _first_ms(events: list[dict[str, Any]], *event_types: str) -> int | None:
++    wanted = set(event_types)
++    for event in events:
++        if event.get("type") in wanted:
++            return _event_ms(event)
++    return None
++
++
++def _latency_after(events: list[dict[str, Any]], start_type: str, end_type: str) -> int | None:
++    start_ms: int | None = None
++    for event in events:
++        event_type = str(event.get("type") or "")
++        event_ms = _event_ms(event)
++        if event_ms is None:
++            continue
++        if event_type == start_type:
++            start_ms = event_ms
++        elif event_type == end_type and start_ms is not None:
++            return max(0, event_ms - start_ms)
++    return None
++
++
++def evaluate_trace(
++    trace_path: Path,
++    *,
++    max_opening_ms: int,
++    max_turn_ms: int,
++    max_barge_clear_ms: int,
++) -> FlightEvalResult:
++    events = _read_jsonl(trace_path)
++    call_id = str(events[-1].get("callId") if events else trace_path.parent.name)
++    opening_ms = _latency_after(events, "call_connected", "tts_start")
++    turn_ms = _latency_after(events, "turn_committed", "tts_start")
++    barge_clear_ms = _latency_after(events, "barge_in", "playback_cleared")
++    first_in_ms = _first_ms(events, "audio_in_first_frame")
++    first_out_ms = _first_ms(events, "audio_out_first_frame")
++    issues: list[str] = []
++    if opening_ms is None:
++        issues.append("missing_opening_tts_start")
++    elif opening_ms > max_opening_ms:
++        issues.append(f"opening_latency:{opening_ms}ms>{max_opening_ms}ms")
++    if turn_ms is None:
++        issues.append("missing_turn_to_tts")
++    elif turn_ms > max_turn_ms:
++        issues.append(f"turn_latency:{turn_ms}ms>{max_turn_ms}ms")
++    if any(event.get("type") == "barge_in" for event in events):
++        if barge_clear_ms is None:
++            issues.append("missing_barge_playback_clear")
++        elif barge_clear_ms > max_barge_clear_ms:
++            issues.append(f"barge_clear:{barge_clear_ms}ms>{max_barge_clear_ms}ms")
++    if first_in_ms is None:
++        issues.append("missing_inbound_audio")
++    if first_out_ms is None:
++        issues.append("missing_outbound_audio")
++    return FlightEvalResult(
++        call_id=call_id,
++        trace_path=str(trace_path),
++        passed=not issues,
++        issues=issues,
++        metrics={
++            "openingMs": opening_ms,
++            "turnToTtsMs": turn_ms,
++            "bargeClearMs": barge_clear_ms,
++            "firstInboundAudioMs": first_in_ms,
++            "firstOutboundAudioMs": first_out_ms,
++        },
++    )
++
++
++def find_trace_files(root: Path, call_id: str | None = None) -> list[Path]:
++    if call_id:
++        return [root / call_id / "trace.jsonl"]
++    return sorted(path for path in root.glob("*/trace.jsonl") if path.is_file())
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Evaluate recorded realtime phone-call flight traces.")
++    parser.add_argument("--root", default=settings.realtime_flight_recorder_dir)
++    parser.add_argument("--call-id", default="")
++    parser.add_argument("--max-opening-ms", type=int, default=800)
++    parser.add_argument("--max-turn-ms", type=int, default=1200)
++    parser.add_argument("--max-barge-clear-ms", type=int, default=400)
++    args = parser.parse_args()
++
++    root = Path(args.root).expanduser()
++    results: list[FlightEvalResult] = []
++    for trace_path in find_trace_files(root, args.call_id or None):
++        if trace_path.exists():
++            results.append(
++                evaluate_trace(
++                    trace_path,
++                    max_opening_ms=args.max_opening_ms,
++                    max_turn_ms=args.max_turn_ms,
++                    max_barge_clear_ms=args.max_barge_clear_ms,
++                )
++            )
++    payload = {
++        "ok": bool(results) and all(result.passed for result in results),
++        "traceCount": len(results),
++        "results": [result.as_dict() for result in results],
++    }
++    print(json.dumps(payload, ensure_ascii=False, indent=2))
++
++
++if __name__ == "__main__":
++    main()
