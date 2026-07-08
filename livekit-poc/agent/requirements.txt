@@ -1,7 +1,9 @@
-# Python 3.10 - 3.12（不要用 3.13+，部分依赖未跟上）
-livekit-agents[openai,silero,turn-detector]~=1.2
+# Python 3.10 - 3.12（3.14 不行，部分依赖未跟上）
+livekit-agents~=1.2
 livekit-api~=1.0
 python-dotenv~=1.0
+# 自定义 Qwen Omni 适配器的 websocket 依赖
+websocket-client~=1.8
 # 外呼 HTTP 接口
 fastapi~=0.115
 uvicorn~=0.32

@@ -36,9 +36,9 @@ from livekit.agents import (
     WorkerOptions,
     cli,
 )
-from livekit.plugins import openai
 
 from metrics_recorder import MetricsRecorder
+from qwen_omni_realtime import QwenOmniRealtimeModel
 from sales_prompt import OPENING_LINE, build_instructions
 
 load_dotenv()
@@ -49,25 +49,16 @@ AGENT_NAME = "outbound-caller"
 MAX_CALL_SECONDS = 300  # 单通电话硬上限，防止对着语音信箱烧钱
 
 
-def _build_realtime_model() -> openai.realtime.RealtimeModel:
-    """Qwen Omni Realtime，走 DashScope 的 OpenAI 兼容 Realtime 端点。
-
-    如 DashScope 协议与 OpenAI Realtime 有出入（字段名/事件名），在这里适配，
-    不要改 main 流程。
-    """
-    silence_ms = int(os.getenv("VAD_SILENCE_MS", "400"))
-    return openai.realtime.RealtimeModel(
+def _build_realtime_model(instructions: str) -> QwenOmniRealtimeModel:
+    """真机验证过的自定义适配器直连 DashScope（不要换回 openai 插件——
+    DashScope 与 OpenAI Realtime 协议有暗坑，2026-07-08 已实测踩过，
+    修复都在 qwen_omni_realtime.py 里，判停毫秒用环境变量 VAD_SILENCE_MS 调）。"""
+    return QwenOmniRealtimeModel(
         base_url=os.getenv("QWEN_REALTIME_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"),
         model=os.getenv("QWEN_REALTIME_MODEL", "qwen3-omni-flash-realtime"),
         api_key=os.getenv("DASHSCOPE_API_KEY", ""),
         voice=os.getenv("QWEN_VOICE", "Cherry"),
-        temperature=0.7,
-        turn_detection=openai.realtime.TurnDetection(
-            type="server_vad",
-            threshold=0.5,
-            prefix_padding_ms=300,
-            silence_duration_ms=silence_ms,
-        ),
+        instructions=instructions,
     )
 
 
@@ -153,8 +144,9 @@ async def entrypoint(ctx: JobContext) -> None:
         return
 
     # ---- 会话（先建好，接通即用，不浪费接通后的时间）----
-    session = AgentSession(llm=_build_realtime_model())
-    agent = Agent(instructions=build_instructions(merchant))
+    instructions = build_instructions(merchant)
+    session = AgentSession(llm=_build_realtime_model(instructions))
+    agent = Agent(instructions=instructions)
 
     filler: FillerPlayer | None = None
     if os.getenv("ENABLE_FILLER", "true").lower() == "true":
@@ -196,6 +188,12 @@ async def entrypoint(ctx: JobContext) -> None:
         if text:
             recorder.emit("transcript", role=role, text=text[:200])
 
+    # ---- 先启动会话（Qwen 连接预热），再拨号：接通瞬间即可开口 ----
+    await session.start(agent=agent, room=ctx.room)
+    if filler is not None:
+        await filler.start()
+    recorder.emit("session_prewarmed")
+
     # ---- 拨号：通过 trunk 让网关呼出，等待接通 ----
     recorder.emit("dial_start", trunk=trunk_id)
     dial_started = time.perf_counter()
@@ -216,15 +214,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     recorder.emit("call_connected", dial_seconds=round(time.perf_counter() - dial_started, 2))
 
-    # ---- 接通：启动会话 + 垫词轨 + 开场白 ----
-    await session.start(agent=agent, room=ctx.room)
-    if filler is not None:
-        await filler.start()
-
-    # 接通立刻主动开口，不等客户先喂（旧系统最大的痛点之一）
+    # 接通立刻主动开口，不等客户先喂（旧系统最大的痛点之一）。
+    # 注意：不能用 session.say()——realtime-only 会话没有 TTS，say 会报错（已实测）。
+    # generate_reply 由适配器转成 conversation.item.create + response.create（DashScope 认这个）。
     opening_at = time.perf_counter()
-    await session.say(OPENING_LINE, allow_interruptions=True)
-    recorder.emit("opening_spoken", elapsed_ms=int((time.perf_counter() - opening_at) * 1000))
+    session.generate_reply(instructions=OPENING_LINE)
+    recorder.emit("opening_requested", elapsed_ms=int((time.perf_counter() - opening_at) * 1000))
 
     # ---- 客户挂断 -> 收尾；到时硬上限 -> 主动挂 ----
     hangup_event = asyncio.Event()
