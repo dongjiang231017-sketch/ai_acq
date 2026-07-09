@@ -1,0 +1,89 @@
+# 会话交接文档（2026-07-08）
+
+> 给下一个接手的人/模型（新对话、Fable 5、或协作同事）。
+> 目的：不用重讲，读完这份 + `git pull` 就能接着干。
+> 配套文档：`STABILITY_AUDIT_20260708.md`（问题清单）、`TEST_REPORT_20260708.md`（测试记录）、
+> `livekit-poc/README.md`（主线路部署）、`livekit-poc/integration/WORKER_MIGRATION.md`（同事 worker 改法）。
+
+## 一句话背景
+
+AI 电销外呼系统（视频号团购到店获客话术）。核心痛点：延迟高（客户说完等 2-5 秒）、
+"间歇性不说话"、一改代码就断、网关掉注册要人工恢复。目标：延迟压进 1 秒、稳定可用。
+
+## 现在的架构（两条线路）
+
+```
+客户手机 ↔ GSM ↔ 8口鼎信网关(生产) / UC100单卡(本地测试)
+                      ↓ SIP
+   ┌── 主线路 LiveKit（转正）: 网关SIP → LiveKit → Qwen Omni Realtime 直连
+   └── 旧线路 Asterisk（降级兜底）: 网关 → 云Asterisk → AudioSocket → Python bridge
+                      ↓
+              ai_acq 业务层（销售状态机/意向池/CRM，两条线路共用）
+```
+
+生产服务器：101.132.63.159（阿里云上海，与 DashScope 同区，内网延迟低）。
+DashScope 模型：`qwen3-omni-flash-realtime`。
+
+## 两条线路的状态
+
+### 主线路 LiveKit —— 已验证，转正为主
+- 代码在 `livekit-poc/`。适配器 `agent/qwen_omni_realtime.py` 是**真机验证过**的（自测 15/15 出声）。
+- 延迟：判停 800ms 时约 1.3s，默认已调 400ms 目标约 0.9s（`VAD_SILENCE_MS` 环境变量）。
+- **本地实测环境在 Workbuddy 文件夹**：`~/Workbuddy/2026-07-07-15-55-19/livekit-local/`
+  （docker compose 起 LiveKit+SIP+Redis，`.venv` 已装依赖，`run_agent.py` 起 agent，
+  `outbound_call.py <号码>` 拨号，`test_agent_audio.py` 不打电话的出声自测）。
+- 同事在 `feature/auth-and-leads` 分支也做了 LiveKit 对接（worker `livekit_outbound_agent.py`），
+  但用的是**未验证**的 OpenAI 插件直连 + 会失败的 `say()` 开场白 —— 必须按
+  `integration/WORKER_MIGRATION.md` 换成本仓库验证版适配器。
+
+### 旧线路 Asterisk —— 只修了稳定，没修延迟，当兜底
+- 审计 18 问题里的 A 类（媒体桥）+ B 类（电话层）已全部修复并静态/单元/复审验证。
+- **但没在真实 Asterisk 环境端到端跑过**（本地无该环境）。部署要用新加的 `deploy/deploy.sh` 冒烟。
+- 定位就是兜底/降级，别再投精力优化它的延迟——那等于重写，而 LiveKit 已经给了。
+
+## 已知的坑（血泪，别重踩）
+
+1. **"间歇性不说话"的真凶是适配器线程竞态**（已修）：MessageGeneration 的发送不能依赖
+   `output_item.added`（ws 线程）时 `_current_gen` 是否就绪，必须移进 `response.created`
+   协程里同步发。修前自测仅 37% 出声。**这类 bug 单次测试看不出来，必须测 10 次以上。**
+2. 改这个适配器时，两次"优化"（同步创建+延迟emit / 按response_id管理生命周期）都把通过率
+   干到 0%，已回退。**不要用 call_soon_threadsafe 延迟 emit；emit 必须与 gen 创建同协程。**
+3. **拨号编排顺序**：必须先 dispatch agent 进房预热，再发起 SIP 呼叫；反了客户会听 30 秒静音。
+4. **号码必须带 +86 前缀**，否则 UC100/GSM 直接拒接（SIP 480）。
+5. **macOS 跑 agent 要有 `if __name__=="__main__"` 保护**，否则 spawn 子进程重复起 worker 崩溃。
+6. **SIM 卡风控**：同一号码一小时内十几通短呼会被移动停机（运营商未知/信号空白）。这是今天
+   真机终验没做成的唯一原因，代码无关。上量前外呼队列必须加：单卡日呼上限、同号间隔、
+   多卡轮换、间隔随机化。
+7. **本地网络拓扑**：Mac 和 UC100 必须同网段（UC100 在 192.168.1.4）。Mac 连到别的路由器
+   （如中国移动 cmcc.wifi 192.168.10.x）时，SIP 去程通但回程被 NAT 挡，表现为"电话响了但 AI 不说话"。
+8. git push 在某些环境要走本机代理：`export https_proxy=http://127.0.0.1:7890` 再 push。
+
+## 待办（按优先级）
+
+1. **主线路真机终验**：SIM 恢复后，Workbuddy 环境 `outbound_call.py 18107090349` 打一通，
+   确认接通即出声、可打断、延迟达标。达标后主线路即"拿下来能用"。
+2. 同事按 `WORKER_MIGRATION.md` 把他 worker 的适配器换成验证版，部署到 101.132.63.159。
+3. 8 口鼎信网关的 trunk 对接（本地只验证了 UC100 单卡链路，非 8 路并发）。
+4. 外呼队列加防封卡策略（见坑 6）。
+5. 旧线路用 `deploy/deploy.sh` 部署冒烟 + 真实拨打回归。
+6. 两条线路同批号码各打 50 通 A/B，比 P50/P95/接通率/意向率，定最终主链路。
+
+## 验收标准
+
+转向延迟 P50 ≤ 800ms、P95 ≤ 1500ms；打断后停嘴 ≤ 300ms；接通即出声（不用客户先喂）；
+真实电话连续 10 通达标。测延迟用 `livekit-poc/scripts/measure_report.py`。
+
+## git 状态
+
+分支 `dev`，最新 `25b1caa`。本次相关提交：
+`5c4ee84`/`03745d3`/`b7933c4`/`25b1caa`（主线路+对接+竞态修复）、
+`2a4ad1e`（旧线路底座+审计）。同事的 LiveKit 对接在 `feature/auth-and-leads`。
+
+## 关键路径速查
+
+- 主线路适配器：`livekit-poc/agent/qwen_omni_realtime.py`
+- 主线路 agent 主流程：`livekit-poc/agent/main.py`
+- 话术：`livekit-poc/agent/sales_prompt.py`
+- 后台对接：`livekit-poc/integration/livekit_route.py` + `INTEGRATION.md`
+- 旧线路媒体桥：`backend/app/tools/realtime_audio_bridge.py`
+- 本地测试环境：`~/Workbuddy/2026-07-07-15-55-19/livekit-local/`（不在 git，是本地实测台）
