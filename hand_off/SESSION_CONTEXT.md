@@ -62,7 +62,20 @@ DashScope 模型：`qwen3-omni-flash-realtime`。
    单测 13 项含事故回放（一小时 15 通只放行 6 通）：`backend/tests/test_dial_policy.py`。
 7. **本地网络拓扑**：Mac 和 UC100 必须同网段（UC100 在 192.168.1.4）。Mac 连到别的路由器
    （如中国移动 cmcc.wifi 192.168.10.x）时，SIP 去程通但回程被 NAT 挡，表现为"电话响了但 AI 不说话"。
+   另：UC100 在 WAN 侧（192.168.1.4）的 SIP 监听端口是 **5080**（5060 在它 LAN 口 192.168.11.1），
+   outbound trunk 必须指 5080；网关中继注册状态显示"重试"失败不影响呼出（IP 直连按来源匹配）。
 8. git push 在某些环境要走本机代理：`export https_proxy=http://127.0.0.1:7890` 再 push。
+9. **"只说开场白，之后不说话"的真凶是 user_initiated 误标**（2026-07-09 已修，真机复现）：
+   适配器原来把所有 response 的 GenerationCreatedEvent 都标 `user_initiated=True`，而框架
+   `agent_activity._on_generation_created` 对 True 直接 return（只有 pending 的 generate_reply
+   会消费），VAD 触发的轮次回复全被丢弃——模型明明生成了音频（日志 audio.delta 一堆）却永远
+   不播。修法：仅当存在未完成的 reply future 时才标 True。**旧自测只测开场白，测不出这个**，
+   多轮自测用 `livekit-poc/scripts/test_multiturn.py`（模拟客户说话两轮，5/5 通过）。
+10. **DashScope 暗坑3**（2026-07-09 发现并修复）：server_vad 模式下、输入音频流活跃时，
+    手动 `conversation.item.create`+`response.create` 被**静默忽略**（不回事件不回 error）——
+    开场白因此间歇性不响（电话里能响是靠 RTP 音频晚到几百毫秒的运气）。修法：适配器加输入
+    门控，首个 response.done 之前不向 DashScope 喂音频（12s 失效保护）。代价：开场那几秒
+    检测不到客户插话。最小复现脚本在 Workbuddy 测试台 probe_v2.py。
 
 ## 待办（按优先级）
 
