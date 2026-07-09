@@ -11,13 +11,8 @@
     "desktop": "electron electron/main.cjs",
     "desktop:preview": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:4178 electron electron/main.cjs",
     "desktop:dev": "AI_ACQ_FRONTEND_URL=http://127.0.0.1:5173 electron electron/main.cjs",
-    "desktop:runtime:prepare": "node scripts/prepare-asterisk-runtime.cjs --copy",
-    "desktop:runtime:check": "node scripts/prepare-asterisk-runtime.cjs --check",
-    "desktop:runtime:check:optional": "node scripts/prepare-asterisk-runtime.cjs --check --optional",
-    "desktop:package": "npm run build && npm run desktop:runtime:check:optional && electron-builder --dir",
-    "desktop:dist": "npm run build && npm run desktop:runtime:check:optional && electron-builder",
-    "desktop:package:local-asterisk": "npm run build && npm run desktop:runtime:check && electron-builder --dir",
-    "desktop:dist:local-asterisk": "npm run build && npm run desktop:runtime:check && electron-builder",
+    "desktop:package": "npm run build && electron-builder --dir",
+    "desktop:dist": "npm run build && electron-builder",
     "qa:v16": "node scripts/outbound-client-v16-qa.mjs",
     "qa:v15": "node scripts/v15-human-like-qa-explore.mjs",
     "quality:v16": "npm run build && npm run qa:v16 -- --json",
@@ -153,15 +148,6 @@
       "dist/**/*",
       "electron/**/*",
       "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "electron/asterisk",
-        "to": "asterisk",
-        "filter": [
-          "**/*"
-        ]
-      }
     ],
     "mac": {
       "category": "public.app-category.business",
