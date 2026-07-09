@@ -166,7 +166,11 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
         requested_route = "pipeline"
     if requested_route == "livekit":
         try:
-            livekit_result = dispatch_livekit_outbound_call(payload.phone, caller_id=payload.caller_id)
+            livekit_result = dispatch_livekit_outbound_call(
+                payload.phone,
+                caller_id=payload.caller_id,
+                merchant_name=payload.merchant_name or "单号真实试拨",
+            )
         except LiveKitOutboundError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return build_livekit_test_call_response(livekit_result)

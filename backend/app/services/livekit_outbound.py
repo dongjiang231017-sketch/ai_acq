@@ -96,6 +96,8 @@ def normalize_livekit_phone(phone: str) -> str:
         raise LiveKitOutboundError("电话号码不能为空")
     if len(digits) == 11 and digits.startswith("1"):
         prefix = settings.livekit_default_country_code.strip() or "+86"
+        if prefix.lower() in {"raw", "none", "local"}:
+            return digits
         return prefix.rstrip() + digits
     if digits.startswith("00") and len(digits) > 4:
         return "+" + digits[2:]
@@ -140,8 +142,14 @@ def dispatch_livekit_outbound_call(
         agentMode=metadata["agentMode"],
     )
     result = asyncio.run(_create_livekit_dispatch(room_name=room_name, metadata=metadata))
-    dispatch_id = str(result.get("id") or result.get("agent_dispatch_id") or result.get("dispatchId") or "")
-    raw_payload = json.dumps({"dispatch": result, "metadata": _safe_metadata(metadata)}, ensure_ascii=False, default=str)
+    dispatch_id = str(
+        result.get("agent_dispatch_id")
+        or result.get("dispatchId")
+        or result.get("sid")
+        or result.get("id")
+        or ""
+    )
+    raw_payload = json.dumps({"room": result, "metadata": _safe_metadata(metadata)}, ensure_ascii=False, default=str)
     _emit_livekit_event(
         "livekit_dispatch_submitted",
         callId=action_id,
@@ -149,7 +157,7 @@ def dispatch_livekit_outbound_call(
         participantIdentity=participant_identity,
         dispatchId=dispatch_id,
         agentName=settings.livekit_agent_name.strip(),
-        detail="LiveKit agent dispatch 已创建，等待 worker 接管 room 并通过 SIP trunk 拨号。",
+        detail="LiveKit room 已创建并绑定 agent，等待 worker 接管 room 并通过 SIP trunk 拨号。",
     )
     return LiveKitOutboundResult(
         accepted=True,
@@ -157,8 +165,8 @@ def dispatch_livekit_outbound_call(
         room_name=room_name,
         participant_identity=participant_identity,
         dispatch_id=dispatch_id,
-        status="livekit_dispatch_queued",
-        message="LiveKit Agent dispatch 已提交；Agent worker 会创建 SIP outbound call。",
+        status="livekit_room_agent_queued",
+        message="LiveKit room + Agent dispatch 已提交；Agent worker 会创建 SIP outbound call。",
         raw_payload=raw_payload,
     )
 
@@ -173,14 +181,21 @@ async def _create_livekit_dispatch(*, room_name: str, metadata: dict[str, object
         api_secret=settings.livekit_api_secret.strip(),
     )
     try:
-        dispatch = await lkapi.agent_dispatch.create_dispatch(
-            api.CreateAgentDispatchRequest(
-                agent_name=settings.livekit_agent_name.strip(),
-                room=room_name,
-                metadata=json.dumps(metadata, ensure_ascii=False),
+        room = await lkapi.room.create_room(
+            api.CreateRoomRequest(
+                name=room_name,
+                empty_timeout=120,
+                max_participants=4,
+                metadata=json.dumps({"route": "livekit", "actionId": metadata.get("actionId", "")}, ensure_ascii=False),
+                agents=[
+                    api.RoomAgentDispatch(
+                        agent_name=settings.livekit_agent_name.strip(),
+                        metadata=json.dumps(metadata, ensure_ascii=False),
+                    )
+                ],
             )
         )
-        return MessageToDict(dispatch, preserving_proto_field_name=True)
+        return MessageToDict(room, preserving_proto_field_name=True)
     finally:
         await lkapi.aclose()
 
@@ -198,7 +213,7 @@ def build_livekit_test_call_response(result: LiveKitOutboundResult) -> dict[str,
         "gatewayStatus": result.status,
         "message": result.message,
         "rawPayload": result.raw_payload,
-        "verificationStage": "livekit_dispatch_submitted",
+        "verificationStage": "livekit_room_agent_submitted",
         "cellularConfirmed": False,
         "mediaLoopConfirmed": False,
         "humanSpeechConfirmed": False,
@@ -207,10 +222,10 @@ def build_livekit_test_call_response(result: LiveKitOutboundResult) -> dict[str,
         "bridgeError": "",
         "conversationConfirmed": False,
         "acceptanceReady": False,
-        "acceptanceNote": "LiveKit dispatch 已提交。真实接通、真人语音和 AI 首句会由 LiveKit Agent worker 写入实时事件日志。",
+        "acceptanceNote": "LiveKit room + Agent dispatch 已提交。真实接通、真人语音和 AI 首句会由 LiveKit Agent worker 写入实时事件日志。",
         "cellularDiagnostic": {
             "status": "warn",
-            "stage": "livekit_dispatch_submitted",
+            "stage": "livekit_room_agent_submitted",
             "title": "LiveKit Agent 已接管外呼请求",
             "summary": "后端已经把外呼交给 LiveKit Agent；等待 SIP trunk 建呼和 Agent 实时对话事件。",
             "detail": "请确认 livekit outbound worker 正在运行，并在 LiveKit 控制台确认 SIP outbound trunk 可用。",

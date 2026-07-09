@@ -112,8 +112,8 @@ LiveKit worker 和 8T SIP 服务本身没卡住，问题在公网端口转发/NA
 
 ## 当前架构
 
-1. 后端创建 LiveKit Agent dispatch，并把手机号、room、SIP trunk 等写入 metadata。
-2. `livekit_outbound_agent` worker 收到 dispatch，先进入 room 并启动 `AgentSession`。
+1. 后端创建 LiveKit room，并通过 `room.agents` 绑定 `ai-acq-outbound-agent`，把手机号、SIP trunk 等写入 agent metadata。
+2. `livekit_outbound_agent` worker 收到 room job，先进入 room 并启动 `AgentSession`。
 3. worker 通过 LiveKit SIP outbound trunk 创建电话 participant。
 4. 客户接通后，LiveKit 在同一个 room 内处理 VAD、打断、端点检测、转写、LLM/TTS 或 OpenAI Realtime。
 5. 实时事件继续写入 `REALTIME_CALL_EVENT_LOG_PATH`，前端仍读同一份 live-events。
