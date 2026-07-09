@@ -35,9 +35,11 @@ class Settings(BaseSettings):
     dashscope_system_tts_model: str = "qwen3-tts-flash"
     dashscope_realtime_tts_model: str = "qwen3-tts-flash-realtime"
     dashscope_realtime_tts_voice: str = "Serena"
-    dashscope_omni_realtime_model: str = "qwen3.5-omni-flash-realtime-2026-03-15"
+    # 2026-07-08 真机验证过的组合是 qwen3-omni-flash-realtime + Cherry（15/15 出声）。
+    # 换模型串/音色前必须先跑 livekit-poc 的 test_agent_audio.py 自测 ≥10 次。
+    dashscope_omni_realtime_model: str = "qwen3-omni-flash-realtime"
     dashscope_omni_realtime_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    dashscope_omni_realtime_voice: str = "Serena"
+    dashscope_omni_realtime_voice: str = "Cherry"
     dashscope_omni_input_transcription_model: str = "qwen3-asr-flash-realtime"
     dashscope_system_tts_language_type: str = "Chinese"
     dashscope_voice_prefix: str = "aiacq"

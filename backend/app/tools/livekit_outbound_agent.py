@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from typing import Any
 
 from dotenv import load_dotenv
@@ -14,6 +15,9 @@ from app.services.realtime_sales_playbook import build_video_group_buying_sales_
 
 
 load_dotenv()
+
+# 单通电话硬上限秒数：防止对语音信箱/静默线路无限烧钱（对齐 livekit-poc/agent/main.py）。
+_MAX_CALL_SECONDS = int(os.getenv("LIVEKIT_MAX_CALL_SECONDS", "300"))
 
 
 async def entrypoint(ctx: Any) -> None:
@@ -44,8 +48,28 @@ async def entrypoint(ctx: Any) -> None:
     await ctx.connect()
 
     instructions = _build_agent_instructions(merchant_name=merchant_name)
-    session = _build_agent_session(inference=inference, agent_mode=agent_mode)
+    session = _build_agent_session(inference=inference, agent_mode=agent_mode, instructions=instructions)
     agent = Agent(instructions=instructions)
+
+    # 转向延迟打点（对齐 livekit-poc/agent/main.py）：客户停→AI出声的真实延迟，
+    # 待办6 两线路 A/B 对比就看这个事件的 P50/P95，没有它对比无数据可用。
+    last_user_stop = {"t": 0.0}
+
+    @session.on("user_state_changed")
+    def _on_user_state(ev: Any) -> None:
+        if str(getattr(ev, "new_state", "")) == "listening":
+            last_user_stop["t"] = time.perf_counter()
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(ev: Any) -> None:
+        if str(getattr(ev, "new_state", "")) == "speaking" and last_user_stop["t"]:
+            _emit_livekit_event(
+                "turn_latency",
+                callId=action_id,
+                roomName=room_name,
+                latencyMs=int((time.perf_counter() - last_user_stop["t"]) * 1000),
+            )
+            last_user_stop["t"] = 0.0
     room_input_kwargs: dict[str, Any] = {
         "pre_connect_audio": True,
         "pre_connect_audio_timeout": 5.0,
@@ -102,7 +126,9 @@ async def entrypoint(ctx: Any) -> None:
                         },
                         ensure_ascii=False,
                     ),
-                    wait_until_answered=bool(settings.livekit_sip_wait_until_answered),
+                    # 外呼必须等接通再返回：若为 false，开场白会在接通前播进空房间，
+                    # 客户接起只听到半截或沉默（livekit-poc main.py 同样写死 True）。
+                    wait_until_answered=True,
                     krisp_enabled=bool(settings.livekit_sip_krisp_enabled),
                 )
             )
@@ -146,15 +172,18 @@ async def entrypoint(ctx: Any) -> None:
             error=str(exc),
         )
 
-    speech = session.say(opening_text, allow_interruptions=True)
+    # 【WORKER_MIGRATION 必改1】不能用 session.say()——realtime-only 会话没配 TTS，
+    # say() 直接抛错，开场白永远不响（2026-07-08 真机复现：客户接通只听到沉默）。
+    # generate_reply 由验证版适配器转成 conversation.item.create + response.create，
+    # DashScope 认这个（空上下文的裸 response.create 会被静默忽略）。
+    session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
     _emit_livekit_event(
         "tts_start",
         callId=action_id,
         roomName=room_name,
         provider="livekit_agent",
         text=opening_text,
-        raw={"speechId": getattr(speech, "id", "")},
-        detail="LiveKit Agent 已向客户播放开场白，允许客户插话打断。",
+        detail="LiveKit Agent 已请求生成开场白（generate_reply），允许客户插话打断。",
     )
 
     done = asyncio.Event()
@@ -169,20 +198,33 @@ async def entrypoint(ctx: Any) -> None:
         done.set()
 
     ctx.add_shutdown_callback(_on_shutdown)
-    await done.wait()
+    try:
+        await asyncio.wait_for(done.wait(), timeout=_MAX_CALL_SECONDS)
+    except asyncio.TimeoutError:
+        _emit_livekit_event(
+            "livekit_call_timeout",
+            callId=action_id,
+            roomName=room_name,
+            limitSeconds=_MAX_CALL_SECONDS,
+            detail="到达单通电话硬上限，主动收尾（防语音信箱/静默线路空耗计费）。",
+        )
+        ctx.shutdown("max_call_seconds_reached")
+        await done.wait()
 
 
-def _build_agent_session(*, inference: Any, agent_mode: str) -> Any:
+def _build_agent_session(*, inference: Any, agent_mode: str, instructions: str = "") -> Any:
     from livekit.agents import APIConnectOptions
 
     if agent_mode == "inference":
         return _build_inference_agent_session(inference)
-    return _build_openai_realtime_agent_session(connect_options=APIConnectOptions(max_retry=2, retry_interval=0.8, timeout=8.0))
+    return _build_openai_realtime_agent_session(
+        connect_options=APIConnectOptions(max_retry=2, retry_interval=0.8, timeout=8.0),
+        instructions=instructions,
+    )
 
 
-def _build_openai_realtime_agent_session(*, connect_options: Any) -> Any:
+def _build_openai_realtime_agent_session(*, connect_options: Any, instructions: str = "") -> Any:
     from livekit.agents import AgentSession
-    from livekit.plugins import openai
 
     runtime_config = get_runtime_ai_config()
     base_url = (
@@ -191,6 +233,14 @@ def _build_openai_realtime_agent_session(*, connect_options: Any) -> Any:
         or runtime_config.dashscope_omni_realtime_url.strip()
     )
     if _looks_like_dashscope_realtime_url(base_url):
+        # 【WORKER_MIGRATION 必改2】DashScope 分支不走 openai 插件——协议有三个暗坑
+        # 插件不处理（空上下文 response.create 被静默忽略、大音频帧被丢、modalities
+        # 声明时序），2026-07-08 真机验证版适配器 app/tools/qwen_omni_realtime.py
+        # 已内置全部修复。AgentSession 保持裸构造，与验证形态（livekit-poc/agent/
+        # main.py）完全一致，不叠加未经真机测试的 pipeline 参数组合。
+        # 判停毫秒用环境变量 VAD_SILENCE_MS 调（适配器内部读取，默认 400）。
+        from app.tools.qwen_omni_realtime import QwenOmniRealtimeModel
+
         api_key = (
             settings.livekit_openai_realtime_api_key.strip()
             or os.getenv("LIVEKIT_OPENAI_REALTIME_API_KEY", "").strip()
@@ -198,17 +248,31 @@ def _build_openai_realtime_agent_session(*, connect_options: Any) -> Any:
             or os.getenv("DASHSCOPE_API_KEY", "").strip()
             or settings.dashscope_api_key.strip()
         )
-        model = runtime_config.dashscope_omni_realtime_model.strip() or settings.livekit_openai_realtime_model.strip() or "qwen3.5-omni-plus-realtime"
-        voice = runtime_config.dashscope_omni_realtime_voice.strip() or settings.livekit_openai_realtime_voice.strip() or "Serena"
-    else:
-        api_key = (
-            settings.livekit_openai_realtime_api_key.strip()
-            or os.getenv("LIVEKIT_OPENAI_REALTIME_API_KEY", "").strip()
-            or settings.openai_api_key.strip()
-            or os.getenv("OPENAI_API_KEY", "").strip()
+        # 默认值必须是真机验证过的组合 qwen3-omni-flash-realtime + Cherry，
+        # 不要换成未验证的模型串/音色（原 qwen3.5-omni-plus-realtime/Serena 未经真机验证）。
+        model = runtime_config.dashscope_omni_realtime_model.strip() or settings.livekit_openai_realtime_model.strip() or "qwen3-omni-flash-realtime"
+        voice = runtime_config.dashscope_omni_realtime_voice.strip() or settings.livekit_openai_realtime_voice.strip() or "Cherry"
+        return AgentSession(
+            llm=QwenOmniRealtimeModel(
+                model=model,
+                api_key=api_key,
+                voice=voice,
+                base_url=base_url or "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+                instructions=instructions,
+            )
         )
-        model = settings.livekit_openai_realtime_model.strip() or "gpt-realtime"
-        voice = settings.livekit_openai_realtime_voice.strip() or "marin"
+
+    # OpenAI 官方端点：插件对自家协议没问题，保留原实现。
+    from livekit.plugins import openai
+
+    api_key = (
+        settings.livekit_openai_realtime_api_key.strip()
+        or os.getenv("LIVEKIT_OPENAI_REALTIME_API_KEY", "").strip()
+        or settings.openai_api_key.strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
+    model = settings.livekit_openai_realtime_model.strip() or "gpt-realtime"
+    voice = settings.livekit_openai_realtime_voice.strip() or "marin"
     model_kwargs = {
         "model": model,
         "voice": voice,
