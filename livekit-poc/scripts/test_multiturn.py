@@ -131,13 +131,13 @@ async def main() -> int:
         # 第 1 轮
         base = len(segments)
         cur["start"] = 0.0
-        await speak(3.0, 4.5)  # wav 前4秒是静音，必须用有声段
+        await speak(1.5, 4.8)  # wav 前4秒静音;用短而连续的有声段,避免内部停顿被 VAD 拆成两次发言(会触发正当打断)
         results["turn1"] = await wait_ai_speech(base, 12)
         await wait_ai_quiet()
         # 第 2 轮
         base = len(segments)
         cur["start"] = 0.0
-        await speak(3.0, 7.5)
+        await speak(1.5, 8.0)
         results["turn2"] = await wait_ai_speech(base, 12)
         await wait_ai_quiet(8)
     except asyncio.TimeoutError:
