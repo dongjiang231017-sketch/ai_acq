@@ -6,7 +6,7 @@ from app.services.realtime_sales_brain import build_omni_sales_instruction
 from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 
 
-_GENERIC_MERCHANT_NAMES = {"", "单号真实试拨", "测试", "test", "商家", "客户门店", "您的门店"}
+_GENERIC_MERCHANT_NAMES = {"", "单号真实试拨", "测试", "test", "商家", "客户门店", "您的门店", "真机测试", "拨测", "试拨"}
 
 
 def _clean_merchant_name(merchant_name: str) -> str:
