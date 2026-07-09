@@ -53,11 +53,14 @@ def _build_realtime_model(instructions: str) -> QwenOmniRealtimeModel:
     """真机验证过的自定义适配器直连 DashScope（不要换回 openai 插件——
     DashScope 与 OpenAI Realtime 协议有暗坑，2026-07-08 已实测踩过，
     修复都在 qwen_omni_realtime.py 里，判停毫秒用环境变量 VAD_SILENCE_MS 调）。"""
+    # 2026-07-09 升级到 plus 大模型：flash 小模型"听不懂/答非所问/不会临场发挥"，
+    # plus 明显更聪明（真机+探针实测），首音频延迟仍 ~0.65s，端到端不牺牲多少延迟。
+    # plus 不支持 Cherry 音色，默认改 Serena。纯付费(80元/百万token，一通几分钱)。
     return QwenOmniRealtimeModel(
         base_url=os.getenv("QWEN_REALTIME_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"),
-        model=os.getenv("QWEN_REALTIME_MODEL", "qwen3-omni-flash-realtime"),
+        model=os.getenv("QWEN_REALTIME_MODEL", "qwen3.5-omni-plus-realtime"),
         api_key=os.getenv("DASHSCOPE_API_KEY", ""),
-        voice=os.getenv("QWEN_VOICE", "Cherry"),
+        voice=os.getenv("QWEN_VOICE", "Serena"),
         instructions=instructions,
     )
 
