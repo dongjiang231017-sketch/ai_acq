@@ -234,3 +234,87 @@ def create_report_export(payload: ReportExportCreate, db: Session = Depends(get_
     db.commit()
     db.refresh(export)
     return export
+
+
+@router.get("/exports/{export_id}/download")
+def download_report_export(export_id: str, db: Session = Depends(get_db)):
+    """真实生成 xlsx 并下载（2026-07-09：此前 download_url 是死链，需求 7.11.3.2）。"""
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+
+    export = db.get(ReportExport, export_id)
+    report_type = export.report_type if export else "线索明细"
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = report_type[:28] or "报表"
+
+    if report_type == "渠道分析":
+        rows = channel_reports(db)
+        headers = ["渠道", "线索数", "触达数", "接通/回复", "意向数", "转人工"]
+        sheet.append(headers)
+        for row in rows:
+            sheet.append([row.get("channel"), row.get("leads"), row.get("touches"), row.get("connected"), row.get("intent"), row.get("handoff")])
+    elif report_type == "销售绩效":
+        rows = sales_performance_reports(db)
+        headers = ["销售", "跟进客户数", "待办工单", "完成工单", "成交数"]
+        sheet.append(headers)
+        for row in rows:
+            sheet.append([row.get("owner"), row.get("customers"), row.get("pendingOrders"), row.get("closedOrders"), row.get("deals")])
+    elif report_type == "通话记录":
+        sheet.append(["商家", "电话", "接听结果", "意向等级", "时长(秒)", "呼叫时间", "转写摘要"])
+        for record in db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc()).limit(5000)):
+            sheet.append([
+                record.merchant_name,
+                record.phone or "",
+                record.outcome,
+                record.intent_level,
+                record.duration_seconds,
+                record.created_at.isoformat(sep=" ", timespec="seconds") if record.created_at else "",
+                (record.transcript or "")[:500],
+            ])
+    elif report_type == "意向客户":
+        sheet.append(["商家", "城市", "类目", "电话", "意向等级", "来源渠道", "最新信号", "跟进状态", "跟进人"])
+        for customer in db.scalars(select(IntentCustomer).order_by(IntentCustomer.updated_at.desc()).limit(5000)):
+            sheet.append([
+                customer.merchant_name,
+                customer.city,
+                customer.category,
+                customer.phone or "",
+                customer.intent_level,
+                customer.source_channels,
+                (customer.latest_signal or "")[:200],
+                customer.follow_status,
+                customer.owner_name,
+            ])
+    else:  # 线索明细（默认）
+        sheet.append(["商家名称", "城市", "区县", "类目", "电话", "地址", "来源", "评分", "电话状态", "跟进状态", "创建时间"])
+        for lead in db.scalars(select(MerchantLead).order_by(MerchantLead.created_at.desc()).limit(10000)):
+            sheet.append([
+                lead.name,
+                lead.city,
+                lead.district or "",
+                lead.category,
+                lead.phone or "",
+                lead.address or "",
+                lead.source,
+                lead.intent_score,
+                lead.status,
+                lead.follow_up_status,
+                lead.created_at.isoformat(sep=" ", timespec="seconds") if lead.created_at else "",
+            ])
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    from urllib.parse import quote
+
+    # HTTP 头必须 latin-1：中文文件名需 RFC 5987 百分号编码，否则 starlette 编码报 500
+    filename = quote(f"{report_type}-{datetime.utcnow().strftime('%Y%m%d%H%M')}.xlsx")
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )

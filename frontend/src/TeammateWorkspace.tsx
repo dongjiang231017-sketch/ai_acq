@@ -1717,6 +1717,8 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [collectionTasks, setCollectionTasks] = useState<LeadCollectionTask[]>(fallbackCollectionTasks);
   const [collectionRuns, setCollectionRuns] = useState<LeadCollectionRun[]>(fallbackCollectionRuns);
   const [rawLeadRecords, setRawLeadRecords] = useState<RawLeadRecord[]>(fallbackRawLeadRecords);
+  const [isImportingLeads, setIsImportingLeads] = useState(false);
+  const [leadImportMessage, setLeadImportMessage] = useState("");
   const [runsPage, setRunsPage] = useState(1);
   const [rawPage, setRawPage] = useState(1);
   const [callsPage, setCallsPage] = useState(1);
@@ -4325,6 +4327,23 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     }
   }
 
+  async function handleImportLeadsExcel(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setIsImportingLeads(true);
+    setLeadImportMessage(`正在导入「${file.name}」...`);
+    try {
+      const result = await api.importLeadsExcel(file);
+      setLeadImportMessage(`导入完成：新增 ${result.inserted} 条，重复 ${result.duplicated} 条，无效 ${result.invalid} 条（共 ${result.total} 行）`);
+      setLeads(await api.leads());
+    } catch (error) {
+      setLeadImportMessage(error instanceof Error ? error.message : "导入失败");
+    } finally {
+      setIsImportingLeads(false);
+    }
+  }
+
   function toggleLead(leadId: string) {
     setSelectedLeadIds((current) =>
       current.includes(leadId) ? current.filter((id) => id !== leadId) : [...current, leadId],
@@ -6292,8 +6311,19 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                 <p>最近线索</p>
                 <h2>商家跟进列表</h2>
               </div>
-              <Users size={22} />
+              <label className="secondary-button" style={{ cursor: "pointer" }}>
+                <Upload size={16} />
+                {isImportingLeads ? "导入中..." : "Excel导入"}
+                <input
+                  accept=".xlsx,.xls"
+                  disabled={isImportingLeads}
+                  hidden
+                  onChange={(event) => void handleImportLeadsExcel(event)}
+                  type="file"
+                />
+              </label>
             </div>
+            {leadImportMessage && <p className="form-result wide" aria-live="polite">{leadImportMessage}</p>}
             <LeadTable leads={leads} selectable={false} selectedLeadIds={selectedLeadIds} onToggleLead={toggleLead} />
           </article>
 

@@ -448,6 +448,21 @@ def start_outbound_task(task_id: str, db: Session = Depends(get_db)) -> Outreach
     if not task or task.channel != "call":
         raise HTTPException(status_code=404, detail="外呼任务不存在")
 
+    gateway_mode = telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode).strip().lower()
+    if gateway_mode == "livekit":
+        # 2026-07-09：LiveKit 模式走真实批量外呼编排（此前会 fallback 到模拟器生成假记录）
+        if not telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled):
+            raise HTTPException(status_code=503, detail="真实拨号开关未开启（ASTERISK_LIVE_CALL_ENABLED）")
+        from app.services.livekit_batch_runner import start_livekit_outbound_task
+
+        task.status = "运行中"
+        task.started_at = datetime.utcnow()
+        task.finished_at = None
+        db.commit()
+        start_livekit_outbound_task(task.id)
+        db.refresh(task)
+        return task
+
     if settings.outbound_queue_enabled:
         try:
             enqueue_outbound_task(task.id)

@@ -14,3 +14,4 @@ python-multipart==0.0.32
 dashscope==1.26.0
 livekit-agents==1.6.4
 livekit-plugins-openai==1.6.4
+openpyxl==3.1.5

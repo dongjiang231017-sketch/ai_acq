@@ -53,8 +53,8 @@ class CallRecord(Base):
     __tablename__ = "call_records"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
-    task_id: Mapped[str] = mapped_column(String(32), ForeignKey("outreach_tasks.id"), index=True)
-    lead_id: Mapped[str] = mapped_column(String(32), ForeignKey("merchant_leads.id"), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("outreach_tasks.id"), nullable=True, index=True)
+    lead_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("merchant_leads.id"), nullable=True, index=True)
     merchant_name: Mapped[str] = mapped_column(String(120), index=True)
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     ai_seat: Mapped[str] = mapped_column(String(40), default="AI-01")

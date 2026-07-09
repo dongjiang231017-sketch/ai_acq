@@ -103,6 +103,8 @@ async def entrypoint(ctx: Any) -> None:
     room_name = str(metadata.get("roomName") or getattr(ctx.room, "name", "") or "")
     participant_identity = str(metadata.get("participantIdentity") or "").strip()
     dial_phone = str(metadata.get("dialPhone") or metadata.get("phone") or "")
+    batch_task_id = str(metadata.get("taskId") or "").strip() or None
+    batch_lead_id = str(metadata.get("leadId") or "").strip() or None
     trunk_id = str(metadata.get("sipOutboundTrunkId") or settings.livekit_sip_outbound_trunk_id).strip()
     merchant_name = str(metadata.get("merchantName") or "您的门店")
     opening_text = str(metadata.get("openingText") or settings.realtime_call_opening_text)
@@ -259,6 +261,7 @@ async def entrypoint(ctx: Any) -> None:
     try:
         participant = await ctx.wait_for_participant(identity=participant_identity or None)
         participant_identity = str(getattr(participant, "identity", participant_identity) or participant_identity)
+        call_state["joined_at"] = time.monotonic()
         _emit_livekit_event(
             "livekit_customer_joined",
             callId=action_id,
@@ -315,6 +318,10 @@ async def entrypoint(ctx: Any) -> None:
             detail="未找到开场白录音，退回 generate_reply（可能等客户先开口才响应）。",
         )
 
+    # ---- 通话落库状态（2026-07-09：需求 7.7.7 每通电话必须完整落库）----
+    conversation_log: list[str] = []
+    call_state = {"joined_at": 0.0, "refused": False, "persisted": False}
+
     # ---- 意向标记（对齐 bench：AI 问过微信 + 客户同意 => 落库）----
     wechat_ask = {"pending": 0, "ai_text": ""}
     lead_marked = {"v": False}
@@ -362,6 +369,9 @@ async def entrypoint(ctx: Any) -> None:
         if not text:
             return
         last_activity["t"] = time.monotonic()
+        conversation_log.append(f"客户：{text}")
+        if any(w in text for w in ("不需要", "不用了", "别打", "别再", "不感兴趣", "投诉")):
+            call_state["refused"] = True
         # 实时字幕流：客户侧转写推给前端实时监听页
         _emit_livekit_event(
             "user_transcript",
@@ -391,6 +401,7 @@ async def entrypoint(ctx: Any) -> None:
         text = str(getattr(item, "text_content", "") or "")
         if role != "assistant" or not text:
             return
+        conversation_log.append(f"AI：{text}")
         # 实时字幕流：AI 侧回复推给前端实时监听页
         _emit_livekit_event(
             "ai_transcript",
@@ -410,7 +421,53 @@ async def entrypoint(ctx: Any) -> None:
 
     done = asyncio.Event()
 
+    def _persist_call() -> None:
+        """通话结束落库：CallRecord + 线索状态 + 意向池 + 工单 + 勿扰（需求 7.7.7/7.7.9）。"""
+        if call_state["persisted"]:
+            return
+        call_state["persisted"] = True
+        connected = call_state["joined_at"] > 0 and any(line.startswith("客户：") for line in conversation_log)
+        duration = int(time.monotonic() - call_state["joined_at"]) if call_state["joined_at"] else 0
+        if lead_marked["v"]:
+            intent_level, outcome, reason = "A", "有意向", "客户同意加微信"
+        elif call_state["refused"] and connected:
+            intent_level, outcome, reason = "D", "拒绝", "客户明确拒绝"
+        elif connected:
+            intent_level, outcome, reason = "C", "已接通", "接通对话，未确认意向"
+        else:
+            intent_level, outcome, reason = "无效", "未接通", "未接通或无人说话"
+        try:
+            from app.services.livekit_call_persistence import persist_livekit_call_result
+
+            record_id = persist_livekit_call_result(
+                action_id=action_id,
+                phone=dial_phone,
+                merchant_name=merchant_name if merchant_name != "您的门店" else "",
+                task_id=batch_task_id,
+                lead_id=batch_lead_id,
+                duration_seconds=duration,
+                connected=connected,
+                intent_level=intent_level,
+                outcome=outcome,
+                transcript="\n".join(conversation_log),
+                intent_reason=reason,
+                refused=bool(call_state["refused"]),
+            )
+            _emit_livekit_event(
+                "call_record_saved",
+                callId=action_id,
+                roomName=room_name,
+                recordId=record_id or "",
+                intentLevel=intent_level,
+                outcome=outcome,
+                durationSeconds=duration,
+                detail="通话记录已落库（含线索状态/意向池/工单联动）。",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit_livekit_event("call_record_save_error", callId=action_id, roomName=room_name, error=str(exc))
+
     async def _on_shutdown(reason: str = "") -> None:
+        await asyncio.to_thread(_persist_call)
         _emit_livekit_event(
             "livekit_agent_shutdown",
             callId=action_id,

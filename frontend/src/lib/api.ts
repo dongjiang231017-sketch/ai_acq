@@ -1465,6 +1465,14 @@ export const api = {
   // 2026-07-09：记录列表类接口后端已改分页信封 {items,total,page,pageSize}。
   // 旧函数保持返回数组（解包 items，一次拿全量 ≤1000），列表 UI 用客户端分页渲染。
   leads: (params: LeadListParams = {}) => request<PageResp<Lead>>(`/leads${buildQuery(params)}`).then((r) => r.items),
+  importLeadsExcel: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<{ total: number; inserted: number; duplicated: number; invalid: number }>("/leads/import-excel", {
+      method: "POST",
+      body: form,
+    });
+  },
   leadsPage: (params: LeadListParams & { page?: number; pageSize?: number } = {}) => {
     const { page, pageSize, ...rest } = params;
     return request<PageResp<Lead>>(

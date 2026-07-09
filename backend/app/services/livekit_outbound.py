@@ -112,6 +112,8 @@ def dispatch_livekit_outbound_call(
     *,
     caller_id: str | None = None,
     merchant_name: str = "单号真实试拨",
+    task_id: str | None = None,
+    lead_id: str | None = None,
 ) -> LiveKitOutboundResult:
     require_livekit_outbound_ready()
     dial_phone = normalize_livekit_phone(phone)
@@ -127,6 +129,8 @@ def dispatch_livekit_outbound_call(
         "roomName": room_name,
         "participantIdentity": participant_identity,
         "agentMode": settings.livekit_agent_mode.strip().lower() or "openai_realtime",
+        "taskId": task_id or "",
+        "leadId": lead_id or "",
         "sipOutboundTrunkId": settings.livekit_sip_outbound_trunk_id.strip(),
         "sipFromNumber": settings.livekit_sip_from_number.strip(),
         "openingText": settings.realtime_call_opening_text,
