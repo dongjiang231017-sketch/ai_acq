@@ -110,6 +110,9 @@ class QwenOmniRealtimeSession(RealtimeSession):
         # response.created 一到（future 被消费）立刻放行。没有手动请求时完全不拦
         # ——固定录音开场白模式下客户第一句话不能被挡。
         self._input_gate_deadline = time.monotonic() + 12.0  # 失效保护：12s 后无条件放开
+        # 输入总闸：开场白播完前置 False，客户音频完全不喂给 DashScope，
+        # 从根上避免"客户一声'喂'就被模型抢答"。业务层（agent）控制开合。
+        self.input_open = True
         self._connect()
 
     @property
@@ -355,6 +358,9 @@ class QwenOmniRealtimeSession(RealtimeSession):
 
     # ===== RealtimeSession 抽象方法 =====
     def push_audio(self, frame: rtc.AudioFrame) -> None:
+        # 输入总闸：开场白播完前不喂音频，避免模型抢答客户的"喂"
+        if not self.input_open:
+            return
         # 手动 generate_reply 在途时不喂音频（见 __init__ 的暗坑3注释）
         if (
             any(not f.done() for f in self._reply_futures.values())
