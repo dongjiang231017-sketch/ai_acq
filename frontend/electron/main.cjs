@@ -360,7 +360,7 @@ async function checkClientUpdate({ prompt = false, owner = null } = {}) {
     autoInstallSupported: Boolean(autoInstallAsset?.url),
     manifestUrl: UPDATE_MANIFEST_URL,
     remoteFrontendUrl: REMOTE_FRONTEND_URL,
-    onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "true",
+    onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND !== "false",
     appName: packageJson.productName || packageJson.name || app.getName(),
     message: updateAvailable
       ? `发现客户端 ${manifest.version}，当前 ${currentVersion}。`
@@ -458,7 +458,10 @@ async function loadCustomerFrontend(window) {
     return { mode: "explicit", url: explicitFrontendUrl };
   }
 
-  const remoteEnabled = process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "true";
+  // 在线更新：默认加载服务器前端（改功能只需更新服务器，客户端无需重装）。
+  // 只有显式设 AI_ACQ_DESKTOP_REMOTE_FRONTEND=false 才关掉，改用本地打包页。
+  // 远程加载失败会自动回退本地 dist（base=./ 已保证本地页可渲染）。
+  const remoteEnabled = process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND !== "false";
   if (app.isPackaged && remoteEnabled) {
     try {
       await loadUrlWithTimeout(window, REMOTE_FRONTEND_URL, REMOTE_FRONTEND_TIMEOUT_MS);
@@ -1375,7 +1378,7 @@ ipcMain.handle("app-info:get", async () => ({
   version: app.getVersion(),
   remoteFrontendUrl: REMOTE_FRONTEND_URL,
   manifestUrl: UPDATE_MANIFEST_URL,
-  onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND === "true",
+  onlineFrontendEnabled: app.isPackaged && process.env.AI_ACQ_DESKTOP_REMOTE_FRONTEND !== "false",
 }));
 
 ipcMain.handle("app-update:check", async (event, payload = {}) =>
