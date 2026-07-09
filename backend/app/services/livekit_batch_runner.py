@@ -112,14 +112,20 @@ def _run_task(task_id: str) -> None:
                     if lead is not None:
                         lead.status = "拨打中"
                         db.commit()
-            except LiveKitOutboundError as exc:
+            except Exception as exc:  # noqa: BLE001
+                # 单通失败隔离：一次瞬时网络/DB 抖动只跳过这一个号码继续下一个，
+                # 不能让整批 367 个号码因一次可恢复错误全部放弃（子代理审计 bug C，
+                # 原来只捕 LiveKitOutboundError，其它异常穿透到外层→整批判"异常"）。
                 dispatch_failed += 1
                 logger.warning("批量外呼 dispatch 失败 lead=%s: %s", lead_id, exc)
-                with SessionLocal() as db:
-                    task = db.get(OutreachTask, task_id)
-                    if task is not None:
-                        task.failed_count = (task.failed_count or 0) + 1
-                        db.commit()
+                try:
+                    with SessionLocal() as db:
+                        task = db.get(OutreachTask, task_id)
+                        if task is not None:
+                            task.failed_count = (task.failed_count or 0) + 1
+                            db.commit()
+                except Exception:  # noqa: BLE001
+                    logger.exception("dispatch 失败计数写库也失败 lead=%s", lead_id)
             time.sleep(_DIAL_GAP_SECONDS)
 
         # 收尾：等余下呼叫落库或超时
@@ -134,10 +140,34 @@ def _run_task(task_id: str) -> None:
         with SessionLocal() as db:
             task = db.get(OutreachTask, task_id)
             if task is not None:
-                done = _completed_count(db, [a for a, _ in dispatched])
+                # 从 CallRecord 聚合权威计数覆盖（不依赖 persist 的增量计数器——
+                # 多进程并发落库的 Python 层 +1 会丢更新，子代理审计 bug A）。
+                action_ids = [a for a, _ in dispatched]
+                done = _completed_count(db, action_ids)
+                if action_ids:
+                    connected = int(
+                        db.scalar(
+                            select(func.count()).select_from(CallRecord).where(
+                                CallRecord.gateway_call_id.in_(action_ids),
+                                CallRecord.outcome.in_(["有意向", "已接通", "稍后联系"]),
+                            )
+                        ) or 0
+                    )
+                    intent = int(
+                        db.scalar(
+                            select(func.count()).select_from(CallRecord).where(
+                                CallRecord.gateway_call_id.in_(action_ids),
+                                CallRecord.intent_level.in_(["A", "B"]),
+                            )
+                        ) or 0
+                    )
+                else:
+                    connected = intent = 0
                 missing = len(dispatched) - done
-                task.failed_count = (task.failed_count or 0) + missing
                 task.completed_count = max(task.completed_count or 0, done)
+                task.connected_count = connected
+                task.intent_count = intent
+                task.failed_count = dispatch_failed + missing
                 task.status = "已完成" if missing == 0 and dispatch_failed == 0 else "部分完成"
                 task.finished_at = datetime.utcnow()
                 db.commit()

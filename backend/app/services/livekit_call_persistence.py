@@ -15,7 +15,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.db.session import SessionLocal
 from app.models.growth import FollowUpWorkOrder, IntentCustomer, IntentEvent
@@ -166,13 +167,22 @@ def persist_livekit_call_result(
                     )
 
         if task_id:
-            task = db.get(OutreachTask, task_id)
-            if task is not None:
-                task.completed_count = (task.completed_count or 0) + 1
-                if outcome in {"有意向", "已接通", "稍后联系"}:
-                    task.connected_count = (task.connected_count or 0) + 1
-                if intent_level in {"A", "B"}:
-                    task.intent_count = (task.intent_count or 0) + 1
+            # 原子自增（col = col + 1 交给数据库做）：worker 每通电话独立事务，
+            # 并发落库时若用 Python 层读改写(=x+1)会互相覆盖丢更新，导致接通数/
+            # 意向数系统性少计（子代理审计 bug A）。用 UPDATE ... SET col=col+1 消竞态。
+            increments: dict = {"completed_count": OutreachTask.completed_count + 1}
+            if outcome in {"有意向", "已接通", "稍后联系"}:
+                increments["connected_count"] = OutreachTask.connected_count + 1
+            if intent_level in {"A", "B"}:
+                increments["intent_count"] = OutreachTask.intent_count + 1
+            db.execute(update(OutreachTask).where(OutreachTask.id == task_id).values(**increments))
 
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # 幂等兜底：两个进程同时越过前面的 SELECT 各自 INSERT，唯一索引拦下后者。
+            # 回滚后按 gateway_call_id 取已落库的那条返回，不重复写意向池/工单/计数。
+            db.rollback()
+            existing = db.scalar(select(CallRecord).where(CallRecord.gateway_call_id == action_id))
+            return existing.id if existing else None
         return record.id

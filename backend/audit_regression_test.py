@@ -89,6 +89,45 @@ for rnd in range(10):
         n = db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.gateway_call_id == aid))
     check(f"persist_idempotent#{rnd}", r1 == r2 and n == 1, f"r1==r2:{r1==r2} count:{n}")
 
+# ---- 并发原子计数：10个线程同时对同一task落库，completed/connected/intent 不能丢更新 ----
+import threading as _th
+from app.models.task import OutreachTask
+with SessionLocal() as db:
+    t = OutreachTask(name=f"{MARK}并发计数", channel="call", target_count=10, target_lead_ids="",
+                     concurrency=8, status="运行中")
+    db.add(t); db.commit(); ctask_id = t.id
+
+def _concurrent_persist(idx):
+    persist_livekit_call_result(
+        action_id=f"audit-concur-{ctask_id}-{idx}", phone=f"1993000{idx:04d}", merchant_name="",
+        task_id=ctask_id, lead_id=None, duration_seconds=20, connected=True,
+        intent_level="A", outcome="有意向", transcript="x", intent_reason="c", refused=False)
+
+threads = [_th.Thread(target=_concurrent_persist, args=(i,)) for i in range(10)]
+for th in threads: th.start()
+for th in threads: th.join()
+with SessionLocal() as db:
+    t = db.get(OutreachTask, ctask_id)
+    # 10通并发 A 意向落库：completed/connected/intent 都必须=10（原子自增不丢）
+    check("concurrent_completed_count", t.completed_count == 10, str(t.completed_count))
+    check("concurrent_connected_count", t.connected_count == 10, str(t.connected_count))
+    check("concurrent_intent_count", t.intent_count == 10, str(t.intent_count))
+    n_records = db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.task_id == ctask_id))
+    check("concurrent_no_dup_records", n_records == 10, str(n_records))
+
+# ---- 唯一索引真实存在：手动插入重复 gateway_call_id 必须被拒 ----
+from sqlalchemy.exc import IntegrityError
+dup_ok = False
+with SessionLocal() as db:
+    aid = f"audit-uniq-{uuid4().hex[:8]}"
+    db.add(CallRecord(merchant_name="u1", gateway_call_id=aid, outcome="已接通")); db.commit()
+    try:
+        db.add(CallRecord(merchant_name="u2", gateway_call_id=aid, outcome="已接通")); db.commit()
+    except IntegrityError:
+        db.rollback(); dup_ok = True
+    db.execute(delete(CallRecord).where(CallRecord.gateway_call_id == aid)); db.commit()
+check("gateway_call_id_unique_enforced", dup_ok, "重复gateway_call_id没被拒")
+
 # ---- 清理 ----
 with SessionLocal() as db:
     from app.models.growth import IntentCustomer, IntentEvent, FollowUpWorkOrder
@@ -98,6 +137,8 @@ with SessionLocal() as db:
         db.execute(delete(IntentEvent).where(IntentEvent.customer_id.in_(cids)))
         db.execute(delete(IntentCustomer).where(IntentCustomer.id.in_(cids)))
     db.execute(delete(CallRecord).where(CallRecord.gateway_call_id.like("audit-idem-%")))
+    db.execute(delete(CallRecord).where(CallRecord.gateway_call_id.like("audit-concur-%")))
+    db.execute(delete(OutreachTask).where(OutreachTask.name.like(f"{MARK}%")))
     lids = list(db.scalars(select(MerchantLead.id).where(MerchantLead.remark == MARK)))
     run_ids = list(db.scalars(select(LeadCollectionRun.id).join(LeadCollectionTask).where(LeadCollectionTask.name.like(f"{MARK}%"))))
     task_ids = list(db.scalars(select(LeadCollectionTask.id).where(LeadCollectionTask.name.like(f"{MARK}%"))))

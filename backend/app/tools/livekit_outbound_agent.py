@@ -71,27 +71,38 @@ class _OpeningPlayer:
         await asyncio.sleep(delay)
         src = rtc.AudioSource(24000, 1)
         track = rtc.LocalAudioTrack.create_audio_track("opening", src)
-        await self._room.local_participant.publish_track(
+        publication = await self._room.local_participant.publish_track(
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_UNKNOWN)
         )
         total = len(self._data) // 480  # 每帧 10ms @24k 16bit mono
         # 墙钟驱动：保证 play() 跑满真实时长才返回，避免音频一次性灌进缓冲、
         # 输入闸过早打开、模型抢答客户"喂"（Workbuddy 真机复现过的 bug）。
-        start = time.monotonic()
-        next_frame = 0
-        while not self._stop:
-            due = int((time.monotonic() - start) / 0.01)
-            while next_frame <= due and next_frame < total:
-                chunk = self._data[next_frame * 480:(next_frame + 1) * 480]
-                if len(chunk) < 480:
-                    chunk += b"\x00" * (480 - len(chunk))
-                await src.capture_frame(
-                    rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
-                )
-                next_frame += 1
-            if next_frame >= total:
-                break
-            await asyncio.sleep(0.01)
+        try:
+            start = time.monotonic()
+            next_frame = 0
+            while not self._stop:
+                due = int((time.monotonic() - start) / 0.01)
+                while next_frame <= due and next_frame < total:
+                    chunk = self._data[next_frame * 480:(next_frame + 1) * 480]
+                    if len(chunk) < 480:
+                        chunk += b"\x00" * (480 - len(chunk))
+                    await src.capture_frame(
+                        rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
+                    )
+                    next_frame += 1
+                if next_frame >= total:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            # 播完/被打断后清理开场白轨道与音频源，别留到删房间才回收（审计 bug E）
+            try:
+                await self._room.local_participant.unpublish_track(publication.sid)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await src.aclose()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def entrypoint(ctx: Any) -> None:
