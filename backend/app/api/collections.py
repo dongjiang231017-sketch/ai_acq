@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
@@ -12,6 +12,7 @@ from app.schemas.collection import (
     LeadCollectionTaskRead,
     RawLeadRecordRead,
 )
+from app.schemas.common import Page, paginate
 from app.services.collection import CollectionError, enqueue_collection_task, normalize_collection_mode
 
 router = APIRouter()
@@ -75,31 +76,43 @@ def run_task(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@router.get("/runs", response_model=list[LeadCollectionRunRead])
+@router.get("/runs", response_model=Page[LeadCollectionRunRead])
 def list_collection_runs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=1000, ge=1, le=1000, alias="pageSize"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[LeadCollectionRun]:
-    return list(
-        db.scalars(
-            select(LeadCollectionRun)
-            .join(LeadCollectionTask)
-            .where(LeadCollectionTask.owner_user_id == current_user.id)
-            .order_by(LeadCollectionRun.started_at.desc()),
-        ).all(),
+) -> Page[LeadCollectionRunRead]:
+    statement = (
+        select(LeadCollectionRun)
+        .join(LeadCollectionTask)
+        .where(LeadCollectionTask.owner_user_id == current_user.id)
+    )
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    offset, page = paginate(total, page, page_size)
+    items = db.scalars(statement.order_by(LeadCollectionRun.started_at.desc()).offset(offset).limit(page_size)).all()
+    return Page(
+        items=[LeadCollectionRunRead.model_validate(i, from_attributes=True) for i in items],
+        total=total,
+        page=page,
+        pageSize=page_size,
     )
 
 
-@router.get("/raw-records", response_model=list[RawLeadRecordRead])
+@router.get("/raw-records", response_model=Page[RawLeadRecordRead])
 def list_raw_records(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=1000, ge=1, le=1000, alias="pageSize"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[RawLeadRecord]:
-    return list(
-        db.scalars(
-            select(RawLeadRecord)
-            .where(RawLeadRecord.owner_user_id == current_user.id)
-            .order_by(RawLeadRecord.created_at.desc())
-            .limit(200),
-        ).all(),
+) -> Page[RawLeadRecordRead]:
+    statement = select(RawLeadRecord).where(RawLeadRecord.owner_user_id == current_user.id)
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    offset, page = paginate(total, page, page_size)
+    items = db.scalars(statement.order_by(RawLeadRecord.created_at.desc()).offset(offset).limit(page_size)).all()
+    return Page(
+        items=[RawLeadRecordRead.model_validate(i, from_attributes=True) for i in items],
+        total=total,
+        page=page,
+        pageSize=page_size,
     )

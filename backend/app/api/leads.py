@@ -1,26 +1,29 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
 from app.db.session import get_db
 from app.models.lead import MerchantLead
 from app.models.user import User
+from app.schemas.common import Page, paginate
 from app.schemas.lead import LeadCreate, LeadRead
 
 router = APIRouter()
 
 
-@router.get("", response_model=list[LeadRead])
+@router.get("", response_model=Page[LeadRead])
 def list_leads(
     source: str | None = Query(default=None),
     platform: str | None = Query(default=None),
     city: str | None = Query(default=None),
     category: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=1000, ge=1, le=1000, alias="pageSize"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> list[MerchantLead]:
+) -> Page[LeadRead]:
     statement = select(MerchantLead).where(
         MerchantLead.owner_user_id == current_user.id,
         MerchantLead.phone.is_not(None),
@@ -36,7 +39,15 @@ def list_leads(
         statement = statement.where(MerchantLead.category.ilike(f"%{category}%"))
     if status:
         statement = statement.where(MerchantLead.status == status)
-    return list(db.scalars(statement.order_by(MerchantLead.created_at.desc())).all())
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    offset, page = paginate(total, page, page_size)
+    items = db.scalars(statement.order_by(MerchantLead.created_at.desc()).offset(offset).limit(page_size)).all()
+    return Page(
+        items=[LeadRead.model_validate(i, from_attributes=True) for i in items],
+        total=total,
+        page=page,
+        pageSize=page_size,
+    )
 
 
 @router.post("", response_model=LeadRead)

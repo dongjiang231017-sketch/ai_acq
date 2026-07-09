@@ -13,6 +13,9 @@ function resolveApiBaseUrl() {
 
 export const API_BASE_URL = resolveApiBaseUrl();
 
+// 分页信封（对应后端 app/schemas/common.py Page）
+export type PageResp<T> = { items: T[]; total: number; page: number; pageSize: number };
+
 export function apiAssetUrl(path: string) {
   if (!path) return "";
   if (/^https?:\/\//.test(path)) return path;
@@ -1459,7 +1462,15 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   modules: () => request<ModuleSummary[]>("/modules"),
-  leads: (params: LeadListParams = {}) => request<Lead[]>(`/leads${buildQuery(params)}`),
+  // 2026-07-09：记录列表类接口后端已改分页信封 {items,total,page,pageSize}。
+  // 旧函数保持返回数组（解包 items，一次拿全量 ≤1000），列表 UI 用客户端分页渲染。
+  leads: (params: LeadListParams = {}) => request<PageResp<Lead>>(`/leads${buildQuery(params)}`).then((r) => r.items),
+  leadsPage: (params: LeadListParams & { page?: number; pageSize?: number } = {}) => {
+    const { page, pageSize, ...rest } = params;
+    return request<PageResp<Lead>>(
+      `/leads${buildQuery({ ...rest, page: page ? String(page) : undefined, pageSize: pageSize ? String(pageSize) : undefined })}`,
+    );
+  },
   createLead: (lead: Omit<Lead, "id" | "intentScore" | "status">) =>
     request<Lead>("/leads", {
       method: "POST",
@@ -1481,8 +1492,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
-  collectionRuns: () => request<LeadCollectionRun[]>("/collections/runs"),
-  rawLeadRecords: () => request<RawLeadRecord[]>("/collections/raw-records"),
+  collectionRuns: () => request<PageResp<LeadCollectionRun>>("/collections/runs").then((r) => r.items),
+  rawLeadRecords: () => request<PageResp<RawLeadRecord>>("/collections/raw-records").then((r) => r.items),
   tasks: () => request<OutreachTask[]>("/tasks"),
   createTask: (task: Pick<OutreachTask, "name" | "channel" | "targetCount" | "scheduledAt">) =>
     request<OutreachTask>("/tasks", {
@@ -1506,7 +1517,7 @@ export const api = {
     request<OutreachTask>(`/outbound/tasks/${taskId}/start`, {
       method: "POST",
     }),
-  callRecords: () => request<CallRecord[]>("/outbound/records"),
+  callRecords: () => request<PageResp<CallRecord>>("/outbound/records").then((r) => r.items),
   liveCalls: () => request<CallRecord[]>("/outbound/live"),
   callScripts: () => request<CallScript[]>("/outbound/scripts"),
   createCallScript: (script: Omit<CallScript, "id" | "createdAt">) =>

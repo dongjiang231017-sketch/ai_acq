@@ -2,12 +2,13 @@ import logging
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
+from app.schemas.common import Page, paginate
 from app.models.lead import MerchantLead
 from app.models.task import CallRecord, CallScript, OutreachTask, RecallRule
 from app.schemas.task import (
@@ -465,9 +466,21 @@ def start_outbound_task(task_id: str, db: Session = Depends(get_db)) -> Outreach
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.get("/records", response_model=list[CallRecordRead])
-def list_call_records(db: Session = Depends(get_db)) -> list[CallRecord]:
-    return list(db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc())).all())
+@router.get("/records", response_model=Page[CallRecordRead])
+def list_call_records(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=1000, ge=1, le=1000, alias="pageSize"),
+    db: Session = Depends(get_db),
+) -> Page[CallRecordRead]:
+    total = db.scalar(select(func.count()).select_from(CallRecord)) or 0
+    offset, page = paginate(total, page, page_size)
+    items = db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc()).offset(offset).limit(page_size)).all()
+    return Page(
+        items=[CallRecordRead.model_validate(i, from_attributes=True) for i in items],
+        total=total,
+        page=page,
+        pageSize=page_size,
+    )
 
 
 @router.get("/live", response_model=list[CallRecordRead])

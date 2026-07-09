@@ -1584,6 +1584,43 @@ function realtimeSessionStatusText(status: string) {
   return status;
 }
 
+const LIST_PAGE_SIZE = 20;
+
+function PaginationBar({
+  total,
+  page,
+  onPage,
+  pageSize = LIST_PAGE_SIZE,
+}: {
+  total: number;
+  page: number;
+  onPage: (next: number) => void;
+  pageSize?: number;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const current = Math.min(page, pages);
+  if (total <= pageSize) return null;
+  return (
+    <div className="pagination-bar">
+      <button className="secondary-button" disabled={current <= 1} onClick={() => onPage(current - 1)} type="button">
+        上一页
+      </button>
+      <span>
+        第 {current} / {pages} 页 · 共 {total} 条
+      </span>
+      <button className="secondary-button" disabled={current >= pages} onClick={() => onPage(current + 1)} type="button">
+        下一页
+      </button>
+    </div>
+  );
+}
+
+function pageSlice<T>(items: T[], page: number, pageSize = LIST_PAGE_SIZE): T[] {
+  const pages = Math.max(1, Math.ceil(items.length / pageSize));
+  const current = Math.min(page, pages);
+  return items.slice((current - 1) * pageSize, current * pageSize);
+}
+
 function realtimeLiveEventTitle(type: string) {
   if (type === "user_transcript") return "客户说";
   if (type === "ai_transcript") return "AI 说";
@@ -1680,6 +1717,9 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [collectionTasks, setCollectionTasks] = useState<LeadCollectionTask[]>(fallbackCollectionTasks);
   const [collectionRuns, setCollectionRuns] = useState<LeadCollectionRun[]>(fallbackCollectionRuns);
   const [rawLeadRecords, setRawLeadRecords] = useState<RawLeadRecord[]>(fallbackRawLeadRecords);
+  const [runsPage, setRunsPage] = useState(1);
+  const [rawPage, setRawPage] = useState(1);
+  const [callsPage, setCallsPage] = useState(1);
   const [tasks, setTasks] = useState<OutreachTask[]>(fallbackTasks);
   const [overview, setOverview] = useState<OutboundOverview>(fallbackOverview);
   const [telephonyConfig, setTelephonyConfig] = useState<TelephonyConfig>(fallbackTelephonyConfig);
@@ -6455,7 +6495,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                       </td>
                     </tr>
                   )}
-                  {collectionRuns.map((run) => (
+                  {pageSlice(collectionRuns, runsPage).map((run) => (
                     <tr key={run.id}>
                       <td>
                         {providerLabel(run.provider)}
@@ -6472,6 +6512,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                   ))}
                 </tbody>
               </table>
+              <PaginationBar total={collectionRuns.length} page={runsPage} onPage={setRunsPage} />
             </div>
           </article>
 
@@ -6502,7 +6543,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                       </td>
                     </tr>
                   )}
-                  {rawLeadRecords.slice(0, 80).map((record) => (
+                  {pageSlice(rawLeadRecords, rawPage).map((record) => (
                     <tr key={record.id}>
                       <td>
                         <strong>{record.name}</strong>
@@ -6518,6 +6559,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                   ))}
                 </tbody>
               </table>
+              <PaginationBar total={rawLeadRecords.length} page={rawPage} onPage={setRawPage} />
             </div>
           </article>
         </section>
@@ -7748,7 +7790,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
               </div>
               <div className="record-grid">
                 {callRecords.length === 0 && <div className="empty-state">暂无通话记录。</div>}
-                {callRecords.slice(0, 6).map((record) => (
+                {pageSlice(callRecords, callsPage, 6).map((record) => (
                   <article className="record-card" key={record.id}>
                     <div>
                       <strong>{record.merchantName}</strong>
@@ -7761,6 +7803,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                   </article>
                 ))}
               </div>
+              <PaginationBar total={callRecords.length} page={callsPage} onPage={setCallsPage} pageSize={6} />
             </article>
           </section>
         )}
@@ -9253,6 +9296,7 @@ function LeadTable({
   selectedLeadIds: string[];
   onToggleLead: (leadId: string) => void;
 }) {
+  const [page, setPage] = useState(1);
   return (
     <div className="table-wrap">
       <table>
@@ -9274,7 +9318,7 @@ function LeadTable({
               </td>
             </tr>
           )}
-          {leads.map((lead) => (
+          {pageSlice(leads, page).map((lead) => (
             <tr key={lead.id}>
               {selectable && (
                 <td>
@@ -9299,6 +9343,7 @@ function LeadTable({
           ))}
         </tbody>
       </table>
+      <PaginationBar total={leads.length} page={page} onPage={setPage} />
     </div>
   );
 }
