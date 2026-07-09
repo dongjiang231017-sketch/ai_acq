@@ -310,7 +310,11 @@ class QwenOmniRealtimeSession(RealtimeSession):
         return f"event_{int(time.time()*1000)}_{threading.get_ident() & 0xffff}"
 
     async def _emit_speech_started(self):
-        self.emit("input_speech_started")
+        # 【2026-07-09 修打断失效】必须带事件对象。原来 emit 不带参数，
+        # 框架回调 _on_input_speech_started(ev) 直接 TypeError，而异常落在
+        # run_coroutine_threadsafe 的 future 里被静默吞掉——interrupt() 永远
+        # 不会执行，表现为"客户插话 AI 不停嘴"。
+        self.emit("input_speech_started", llm.InputSpeechStartedEvent())
 
     async def _handle_speech_stopped(self):
         logger.info("用户说话结束，commit_audio 并等待服务端自动 response")
