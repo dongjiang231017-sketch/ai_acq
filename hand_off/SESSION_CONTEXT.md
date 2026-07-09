@@ -70,11 +70,16 @@ DashScope 模型：`qwen3-omni-flash-realtime`。
    确认接通即出声、可打断、延迟达标。达标后主线路即"拿下来能用"。
    注意：终验拨测建议走 dial_api（已带防封卡节流）；按默认 6 通/时，10 通连测约需 2 小时，
    赶时间可当天临时调 DIAL_PORT_HOURLY_CAP，测完改回。
-2. 同事按 `WORKER_MIGRATION.md` 把他 worker 的适配器换成验证版，部署到 101.132.63.159。
-   （2026-07-09 复查补充：他分支从 6c59bba 分叉、不含 livekit-poc/，建议直接拷
-   qwen_omni_realtime.py 单文件；他 config 默认模型是未验证的 qwen3.5-omni-flash-realtime-
-   2026-03-15/Serena，需统一回验证过的 qwen3-omni-flash-realtime/Cherry；outbound 应强制
-   wait_until_answered=true；他的 worker 还缺通话时长硬上限与延迟打点。）
+2. ~~同事按 `WORKER_MIGRATION.md` 把他 worker 的适配器换成验证版~~
+   →【2026-07-09 代码已改完，提交在 feature/auth-and-leads `0c3e8b8`】：
+   验证版适配器拷入 backend/app/tools/、DashScope 分支弃用 openai 插件改裸
+   AgentSession、say()→generate_reply、outbound 强制 wait_until_answered=True、
+   模型默认统一回 qwen3-omni-flash-realtime/Cherry、补硬上限（LIVEKIT_MAX_CALL_SECONDS）
+   与 turn_latency 打点（待办6 A/B 依赖）。
+   剩余动作：同事 pull + review，部署到 101.132.63.159（worker 必须 systemd 常驻）。
+   ⚠️ 顺带发现：dev 分支 config.py 的 dashscope_omni_realtime_model 默认也是
+   qwen3.5-omni-flash-realtime-2026-03-15（旧线路 Omni 桥在用），该模型串未见验证记录，
+   需确认生产 .env 实际值后再决定是否同样统一。
 3. 8 口鼎信网关的 trunk 对接（本地只验证了 UC100 单卡链路，非 8 路并发）。
    接好后把 8 个口配进 `DIAL_PORTS`，防封卡轮换即生效。
 4. ~~外呼队列加防封卡策略（见坑 6）~~ →【2026-07-09 完成】见坑 6 的更新说明。
@@ -91,6 +96,8 @@ DashScope 模型：`qwen3-omni-flash-realtime`。
 分支 `dev`，最新 `25b1caa`。本次相关提交：
 `5c4ee84`/`03745d3`/`b7933c4`/`25b1caa`（主线路+对接+竞态修复）、
 `2a4ad1e`（旧线路底座+审计）。同事的 LiveKit 对接在 `feature/auth-and-leads`。
+2026-07-09 新增：dev `f3f11d1`（防封卡策略）、feature/auth-and-leads `0c3e8b8`
+（worker 迁移到验证版适配器）。两个提交均未 push（push 记得走本机代理，见坑 8）。
 
 ## 关键路径速查
 
