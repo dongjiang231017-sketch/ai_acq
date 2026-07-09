@@ -1,4 +1,4 @@
-# 会话交接文档（2026-07-08）
+# 会话交接文档（2026-07-08，2026-07-09 更新）
 
 > 给下一个接手的人/模型（新对话、Fable 5、或协作同事）。
 > 目的：不用重讲，读完这份 + `git pull` 就能接着干。
@@ -54,6 +54,12 @@ DashScope 模型：`qwen3-omni-flash-realtime`。
 6. **SIM 卡风控**：同一号码一小时内十几通短呼会被移动停机（运营商未知/信号空白）。这是今天
    真机终验没做成的唯一原因，代码无关。上量前外呼队列必须加：单卡日呼上限、同号间隔、
    多卡轮换、间隔随机化。
+   →【2026-07-09 已做】`dial_policy.py`（backend/app/services/ 与 livekit-poc/agent/ 各一份，
+   单一来源是 backend）。已接入三个拨号入口：livekit-poc `dial_api.py`（429+Retry-After，
+   另加 GET /policy 观测）、backend `outbound_runner.py`（跳过并写回拨时间）、
+   `/telephony/test-call` 试拨（429）。默认：单卡 6 通/时、50 通/日；同号间隔 30min、3 通/日；
+   同卡随机间隔 60-150s；多口配 `DIAL_PORTS` 自动 LRU 轮换。参数见 .env.example「防封卡」段。
+   单测 13 项含事故回放（一小时 15 通只放行 6 通）：`backend/tests/test_dial_policy.py`。
 7. **本地网络拓扑**：Mac 和 UC100 必须同网段（UC100 在 192.168.1.4）。Mac 连到别的路由器
    （如中国移动 cmcc.wifi 192.168.10.x）时，SIP 去程通但回程被 NAT 挡，表现为"电话响了但 AI 不说话"。
 8. git push 在某些环境要走本机代理：`export https_proxy=http://127.0.0.1:7890` 再 push。
@@ -62,9 +68,16 @@ DashScope 模型：`qwen3-omni-flash-realtime`。
 
 1. **主线路真机终验**：SIM 恢复后，Workbuddy 环境 `outbound_call.py 18107090349` 打一通，
    确认接通即出声、可打断、延迟达标。达标后主线路即"拿下来能用"。
+   注意：终验拨测建议走 dial_api（已带防封卡节流）；按默认 6 通/时，10 通连测约需 2 小时，
+   赶时间可当天临时调 DIAL_PORT_HOURLY_CAP，测完改回。
 2. 同事按 `WORKER_MIGRATION.md` 把他 worker 的适配器换成验证版，部署到 101.132.63.159。
+   （2026-07-09 复查补充：他分支从 6c59bba 分叉、不含 livekit-poc/，建议直接拷
+   qwen_omni_realtime.py 单文件；他 config 默认模型是未验证的 qwen3.5-omni-flash-realtime-
+   2026-03-15/Serena，需统一回验证过的 qwen3-omni-flash-realtime/Cherry；outbound 应强制
+   wait_until_answered=true；他的 worker 还缺通话时长硬上限与延迟打点。）
 3. 8 口鼎信网关的 trunk 对接（本地只验证了 UC100 单卡链路，非 8 路并发）。
-4. 外呼队列加防封卡策略（见坑 6）。
+   接好后把 8 个口配进 `DIAL_PORTS`，防封卡轮换即生效。
+4. ~~外呼队列加防封卡策略（见坑 6）~~ →【2026-07-09 完成】见坑 6 的更新说明。
 5. 旧线路用 `deploy/deploy.sh` 部署冒烟 + 真实拨打回归。
 6. 两条线路同批号码各打 50 通 A/B，比 P50/P95/接通率/意向率，定最终主链路。
 
@@ -86,4 +99,5 @@ DashScope 模型：`qwen3-omni-flash-realtime`。
 - 话术：`livekit-poc/agent/sales_prompt.py`
 - 后台对接：`livekit-poc/integration/livekit_route.py` + `INTEGRATION.md`
 - 旧线路媒体桥：`backend/app/tools/realtime_audio_bridge.py`
+- 防封卡策略：`backend/app/services/dial_policy.py`（单一来源）+ 同名拷贝在 `livekit-poc/agent/`
 - 本地测试环境：`~/Workbuddy/2026-07-07-15-55-19/livekit-local/`（不在 git，是本地实测台）

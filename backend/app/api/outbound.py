@@ -39,6 +39,7 @@ from app.services.asterisk_ami import (
     check_asterisk_health,
     originate_test_call,
 )
+from app.services.dial_policy import get_dial_policy
 from app.services.outbound_gateway import OutboundGatewayConfigurationError
 from app.services.outbound_queue import enqueue_outbound_task
 from app.services.outbound_runner import run_outbound_task
@@ -171,6 +172,16 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
                 "请先把 bridge 重启到可承接该路线的模式，否则这通电话不会走你选择的路线。"
             ),
         )
+    # 防封卡策略（交接文档待办4/坑6）：试拨也是真实呼出，同样过额度。
+    # 2026-07-08 正是反复试拨同号把 SIM 打到停机——被拒时按提示等待，不要绕过。
+    dial_policy = get_dial_policy()
+    policy_decision = dial_policy.acquire(payload.phone)
+    if not policy_decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"防封卡策略拦截：{policy_decision.reason}，约 {policy_decision.wait_seconds}s 后可再试拨。",
+            headers={"Retry-After": str(policy_decision.wait_seconds)},
+        )
     register_realtime_test_call_context(
         phone=payload.phone,
         caller_id=payload.caller_id,
@@ -180,6 +191,7 @@ def create_telephony_test_call(payload: TelephonyTestCallCreate) -> dict[str, ob
     try:
         result = originate_test_call(payload.phone, caller_id=payload.caller_id, conversation_route=effective_route)
     except AsteriskAmiValidationError as exc:
+        dial_policy.cancel(policy_decision.reservation_id)  # 参数校验失败，呼叫未发出
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AsteriskAmiError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -21,6 +21,8 @@ from pydantic import BaseModel
 
 from livekit import api
 
+from dial_policy import get_dial_policy
+
 load_dotenv()
 
 app = FastAPI(title="livekit-poc dial api")
@@ -46,6 +48,20 @@ async def create_call(req: DialRequest) -> dict:
     phone = req.phone_number.strip()
     if not phone:
         raise HTTPException(400, "phone_number 不能为空")
+    # 防封卡策略（交接文档待办4/坑6）：先过额度再 dispatch。
+    # 被拒返回 429 + Retry-After，调用方按 retryAfterSeconds 稍后重试。
+    policy = get_dial_policy()
+    decision = policy.acquire(phone)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "reason": decision.reason,
+                "code": decision.code,
+                "retryAfterSeconds": decision.wait_seconds,
+            },
+            headers={"Retry-After": str(decision.wait_seconds)},
+        )
     call_id = f"lk-{uuid.uuid4().hex[:12]}"
     room = f"call-{call_id}"
     lkapi = _lk()
@@ -64,9 +80,19 @@ async def create_call(req: DialRequest) -> dict:
                 ),
             )
         )
+    except Exception:
+        # dispatch 没成功 = 电话没打出去，退回额度
+        policy.cancel(decision.reservation_id)
+        raise
     finally:
         await lkapi.aclose()
-    return {"call_id": call_id, "room": room}
+    return {"call_id": call_id, "room": room, "port": decision.port}
+
+
+@app.get("/policy")
+async def policy_stats() -> dict:
+    """防封卡策略用量观测：各口今日/滚动一小时呼出数与冷却剩余。"""
+    return get_dial_policy().stats()
 
 
 @app.get("/calls/{call_id}")
