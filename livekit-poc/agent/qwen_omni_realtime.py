@@ -67,7 +67,10 @@ class QwenOmniRealtimeModel(RealtimeModel):
         return self._capabilities
 
     def session(self) -> "QwenOmniRealtimeSession":
-        return QwenOmniRealtimeSession(self)
+        sess = QwenOmniRealtimeSession(self)
+        # 暴露给业务层（话术状态机需要在通话中动态 update_instructions）
+        self.last_session = sess
+        return sess
 
     async def aclose(self) -> None:
         pass
