@@ -64,6 +64,13 @@ def persist_livekit_call_result(
     """写库并返回 CallRecord id；任何异常向上抛，由调用方兜底记录事件。"""
 
     with SessionLocal() as db:
+        # 幂等：LiveKit 可能重派同一 job（新 worker 进程 persisted 守卫失效），
+        # gateway_call_id=action_id 是天然幂等键，已落库过就直接返回，不重复写
+        # CallRecord/意向池/工单（子代理审计的重复落库风险）。
+        existing = db.scalar(select(CallRecord).where(CallRecord.gateway_call_id == action_id))
+        if existing is not None:
+            return existing.id
+
         lead = _find_lead(db, lead_id=lead_id, phone=phone)
         display_name = (lead.name if lead else "") or merchant_name or "未知商户"
 

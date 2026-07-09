@@ -251,7 +251,16 @@ def download_report_export(export_id: str, db: Session = Depends(get_db)):
     sheet = workbook.active
     sheet.title = report_type[:28] or "报表"
 
-    if report_type == "渠道分析":
+    if report_type in ("经营总览", "经营概览"):
+        counts = _report_counts(db)
+        sheet.append(["指标", "数值"])
+        _label_map = {
+            "total_leads": "线索总数", "total_touches": "总触达数", "connected": "接通/回复数",
+            "high_intent": "高意向客户", "pending_work_orders": "待办工单", "export_jobs": "导出任务数",
+        }
+        for key, value in counts.items():
+            sheet.append([_label_map.get(key, key), value])
+    elif report_type == "渠道分析":
         rows = channel_reports(db)
         headers = ["渠道", "线索数", "触达数", "接通/回复", "意向数", "转人工"]
         sheet.append(headers)

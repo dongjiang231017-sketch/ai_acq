@@ -32,13 +32,19 @@ _SKIP_STATUS_MARKERS = ("勿扰", "黑名单", "拒绝", "已成交", "拨打中
 _PER_CALL_TIMEOUT_SECONDS = 360
 _DIAL_GAP_SECONDS = 2.0
 _RUNNING_TASKS: set[str] = set()
+_RUNNING_LOCK = threading.Lock()
 
 
 def start_livekit_outbound_task(task_id: str) -> None:
-    """后台线程启动批量外呼；重复启动同一任务直接忽略。"""
-    if task_id in _RUNNING_TASKS:
-        return
-    _RUNNING_TASKS.add(task_id)
+    """后台线程启动批量外呼；重复启动同一任务直接忽略。
+
+    check-then-add 用锁包成原子，防止并发/双击两次进入把同一名单每个号码拨两遍
+    （子代理审计的竞态）。注：这是进程内守卫，多 worker 进程仍需 DB 层幂等兜底。
+    """
+    with _RUNNING_LOCK:
+        if task_id in _RUNNING_TASKS:
+            return
+        _RUNNING_TASKS.add(task_id)
     thread = threading.Thread(target=_run_task, args=(task_id,), daemon=True, name=f"lk-batch-{task_id[:8]}")
     thread.start()
 

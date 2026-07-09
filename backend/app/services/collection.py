@@ -10,6 +10,7 @@ from hashlib import md5
 from math import ceil
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
+from uuid import uuid4
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -1338,13 +1339,14 @@ def _create_raw_record(
         lead_id=lead.id if lead else None,
         owner_user_id=owner_user_id,
         provider=provider,
-        source_poi_id=poi_id,
-        name=str(poi.get("name") or ""),
-        city=str(poi.get("cityname") or city or "") or None,
-        district=str(poi.get("adname") or "") or None,
-        category=str(poi.get("type") or category or "") or None,
+        source_poi_id=poi_id[:120],
+        # 源头截断，与线索侧一致，避免批量 flush 触发 VARCHAR 约束错误
+        name=str(poi.get("name") or "")[:160],
+        city=(str(poi.get("cityname") or city or "")[:40] or None),
+        district=(str(poi.get("adname") or "")[:80] or None),
+        category=(str(poi.get("type") or category or "")[:120] or None),
         phone=phone or _first_valid_phone(str(poi.get("tel") or "")),
-        address=str(poi.get("address") or "") or None,
+        address=(str(poi.get("address") or "")[:255] or None),
         source_url=_normalize_homepage_url(
             _extract_homepage_url(poi),
             fallback_poi_id=poi_id,
@@ -1411,16 +1413,21 @@ def _create_lead_from_poi(
         return LeadImportResult(lead=existing, import_status="重复线索", phone=phone)
 
     lead = MerchantLead(
-        name=name,
+        # 显式生成主键：快路径延迟到运行结尾才 flush，若靠 default 的 uuid lambda，
+        # lead.id 在 flush 前为 None，紧接着 _create_raw_record 读 lead.id 会写入 NULL
+        # 外键（raw 记录与线索断链）。客户端生成 id 让 lead.id 立即可用。
+        id=uuid4().hex,
+        # 源头截断超长字段：高德 type 拼接后常超 VARCHAR(80)，否则批量 flush 触发约束错误
+        name=name[:120],
         platform=provider,
-        city=city_name or city,
-        category=category_text,
+        city=(city_name or city)[:40],
+        category=category_text[:80],
         phone=phone,
-        platform_homepage_url=homepage_url,
+        platform_homepage_url=homepage_url[:500] if homepage_url else None,
         source_poi_id=poi_id,
-        province=str(poi.get("pname") or "").strip() or None,
-        district=district,
-        address=address,
+        province=(str(poi.get("pname") or "").strip()[:40] or None),
+        district=district[:80] if district else None,
+        address=address[:255] if address else None,
         longitude=longitude,
         latitude=latitude,
         source=source_label,
@@ -1583,7 +1590,15 @@ def _run_discovery_collection(db: Session, task: LeadCollectionTask, run: LeadCo
                         poi=poi,
                         cache=cache,
                     )
-    db.flush()  # 一次性批量写入本轮全部新线索/原始记录
+    # 一次性批量写入本轮全部新线索/原始记录。
+    # 快路径去掉了逐条 SAVEPOINT，若某条触发约束错误（字段已在源头截断，极少发生），
+    # 批量 flush 会整批失败并让会话进入失效事务——必须 rollback，否则上游 finalize 的
+    # commit 会在中毒会话上再抛，任务永久卡在「运行中」无法重跑（子代理审计 BUG 2）。
+    try:
+        db.flush()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise CollectionError(f"批量入库失败，本轮已回滚：{_safe_error_text(exc)}") from exc
 
 
 def _run_platform_enrichment(db: Session, task: LeadCollectionTask, run: LeadCollectionRun) -> None:

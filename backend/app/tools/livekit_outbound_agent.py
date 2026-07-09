@@ -207,6 +207,11 @@ async def entrypoint(ctx: Any) -> None:
         ),
     )
 
+    # 通话落库状态：必须在 customer_joined 回调（下方写 joined_at）之前定义，
+    # 否则 Python 视 call_state 为整函数局部变量、读取时 UnboundLocalError。
+    conversation_log: list[str] = []
+    call_state = {"joined_at": 0.0, "refused": False, "persisted": False}
+
     if call_direction == "outbound":
         if not trunk_id:
             _emit_livekit_event("livekit_sip_error", callId=action_id, roomName=room_name, error="缺少 SIP outbound trunk id")
@@ -318,11 +323,8 @@ async def entrypoint(ctx: Any) -> None:
             detail="未找到开场白录音，退回 generate_reply（可能等客户先开口才响应）。",
         )
 
-    # ---- 通话落库状态（2026-07-09：需求 7.7.7 每通电话必须完整落库）----
-    conversation_log: list[str] = []
-    call_state = {"joined_at": 0.0, "refused": False, "persisted": False}
-
     # ---- 意向标记（对齐 bench：AI 问过微信 + 客户同意 => 落库）----
+    # 注：conversation_log / call_state 已在 session 启动后、customer_joined 前定义
     wechat_ask = {"pending": 0, "ai_text": ""}
     lead_marked = {"v": False}
     _WECHAT_HINTS = ("微信", "加您", "加个微信", "加一下")
@@ -425,7 +427,6 @@ async def entrypoint(ctx: Any) -> None:
         """通话结束落库：CallRecord + 线索状态 + 意向池 + 工单 + 勿扰（需求 7.7.7/7.7.9）。"""
         if call_state["persisted"]:
             return
-        call_state["persisted"] = True
         # wait_until_answered=true：客户 participant 进房 == 电话已接通（含静默接听/语音信箱）
         connected = call_state["joined_at"] > 0
         duration = int(time.monotonic() - call_state["joined_at"]) if call_state["joined_at"] else 0
@@ -437,36 +438,56 @@ async def entrypoint(ctx: Any) -> None:
             intent_level, outcome, reason = "C", "已接通", "接通对话，未确认意向"
         else:
             intent_level, outcome, reason = "无效", "未接通", "未接通或无人说话"
-        try:
-            from app.services.livekit_call_persistence import persist_livekit_call_result
+        from app.services.livekit_call_persistence import persist_livekit_call_result
 
-            record_id = persist_livekit_call_result(
-                action_id=action_id,
-                phone=dial_phone,
-                # 占位商户名不写入记录，落库时优先用匹配到的线索真实店名
-                merchant_name=merchant_name if merchant_name not in ("您的门店", "单号真实试拨") else "",
-                task_id=batch_task_id,
-                lead_id=batch_lead_id,
-                duration_seconds=duration,
-                connected=connected,
-                intent_level=intent_level,
-                outcome=outcome,
-                transcript="\n".join(conversation_log),
-                intent_reason=reason,
-                refused=bool(call_state["refused"]),
-            )
-            _emit_livekit_event(
-                "call_record_saved",
-                callId=action_id,
-                roomName=room_name,
-                recordId=record_id or "",
-                intentLevel=intent_level,
-                outcome=outcome,
-                durationSeconds=duration,
-                detail="通话记录已落库（含线索状态/意向池/工单联动）。",
-            )
-        except Exception as exc:  # noqa: BLE001
-            _emit_livekit_event("call_record_save_error", callId=action_id, roomName=room_name, error=str(exc))
+        # 落库对连接类异常有限重试（远程 PG 会静默回收空闲连接）；persist 按
+        # gateway_call_id 幂等，重试不会重复写。全部失败才落本地 jsonl 兜底防丢数据。
+        last_error = ""
+        for attempt in range(3):
+            try:
+                record_id = persist_livekit_call_result(
+                    action_id=action_id,
+                    phone=dial_phone,
+                    merchant_name=merchant_name if merchant_name not in ("您的门店", "单号真实试拨") else "",
+                    task_id=batch_task_id,
+                    lead_id=batch_lead_id,
+                    duration_seconds=duration,
+                    connected=connected,
+                    intent_level=intent_level,
+                    outcome=outcome,
+                    transcript="\n".join(conversation_log),
+                    intent_reason=reason,
+                    refused=bool(call_state["refused"]),
+                )
+                call_state["persisted"] = True  # 仅成功后置位，失败可由下次挂断回调重试
+                _emit_livekit_event(
+                    "call_record_saved",
+                    callId=action_id,
+                    roomName=room_name,
+                    recordId=record_id or "",
+                    intentLevel=intent_level,
+                    outcome=outcome,
+                    durationSeconds=duration,
+                    detail="通话记录已落库（含线索状态/意向池/工单联动）。",
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                time.sleep(1.0 * (attempt + 1))
+        # 三次全失败：写本地 outbox 兜底，避免通话数据永久丢失
+        try:
+            outbox = os.getenv("CALL_OUTBOX_PATH", "call_persist_outbox.jsonl")
+            with open(outbox, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "action_id": action_id, "phone": dial_phone, "task_id": batch_task_id,
+                    "lead_id": batch_lead_id, "duration": duration, "connected": connected,
+                    "intent_level": intent_level, "outcome": outcome, "reason": reason,
+                    "refused": bool(call_state["refused"]), "transcript": "\n".join(conversation_log),
+                    "at": datetime.now().isoformat(timespec="seconds"),
+                }, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+        _emit_livekit_event("call_record_save_error", callId=action_id, roomName=room_name, error=last_error, detail="落库失败已写本地 outbox 兜底。")
 
     async def _on_shutdown(reason: str = "") -> None:
         await asyncio.to_thread(_persist_call)
