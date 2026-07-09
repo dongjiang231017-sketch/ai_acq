@@ -146,6 +146,11 @@ class QwenOmniRealtimeSession(RealtimeSession):
             return
         t = obj.get("type", "")
         logger.info("_on_message 收到: %s", t)
+        # 通话内容落日志：排障（打断/话术）和后续意向分析都靠它
+        if t == "conversation.item.input_audio_transcription.completed":
+            logger.info("【客户】%s", obj.get("transcript") or "")
+        elif t == "response.audio_transcript.done":
+            logger.info("【AI】%s", obj.get("transcript") or "")
         if t == "session.created":
             self._send_session_update()
             self._wait_connected.set()
