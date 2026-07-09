@@ -113,6 +113,12 @@ class QwenOmniRealtimeSession(RealtimeSession):
         # 输入总闸：开场白播完前置 False，客户音频完全不喂给 DashScope，
         # 从根上避免"客户一声'喂'就被模型抢答"。业务层（agent）控制开合。
         self.input_open = True
+        # 【2026-07-09 修意向标记偶发失败】用户转写完成回调（业务层注册）。
+        # 框架的 conversation_item_added(user) 在转写完成前就发出，拿到的常是空文本，
+        # 意向标记/话术阶段判定必须改挂 DashScope 的
+        # conversation.item.input_audio_transcription.completed（带 transcript）。
+        # 签名：on_user_transcript(transcript: str)，在事件循环线程回调。
+        self.on_user_transcript = None
         self._connect()
 
     @property
@@ -192,8 +198,14 @@ class QwenOmniRealtimeSession(RealtimeSession):
         elif t == "response.done":
             self._handle_response_done()
         elif t == "conversation.item.input_audio_transcription.completed":
-            transcript = obj.get("transcript", "")
+            transcript = obj.get("transcript", "") or ""
             logger.info("用户输入转录 completed: %s", transcript)
+            cb = self.on_user_transcript
+            if cb is not None and transcript.strip():
+                # ws 线程 -> 事件循环线程。不用 run_coroutine_threadsafe：
+                # 异常会落在没人看的 future 里被静默吞（07-09 打断失效就是这么丢的）。
+                # call_soon_threadsafe 的同步回调异常会走 loop 异常处理器，日志可见。
+                self._loop.call_soon_threadsafe(cb, transcript)
         elif t == "error":
             logger.error("DashScope error: %s", obj.get("error"))
 
