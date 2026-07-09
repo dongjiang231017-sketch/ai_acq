@@ -1107,6 +1107,70 @@ def _find_existing_lead(
     return None
 
 
+class _DiscoveryIngestCache:
+    """采集去重缓存（2026-07-09）。
+
+    数据库迁到云端后，逐条 SELECT + SAVEPOINT + flush 被公网 RTT 放大
+    （28ms/往返 × ~10 往返/条 ≈ 300ms/条，200 条要 1 分钟；库在本地时无感）。
+    运行开头用两条查询把已有 raw poi_id 与线索匹配键拉进内存，循环内零查询、
+    零 flush，结尾一次性 flush（executemany 批量写入）。
+    匹配语义与 _find_existing_lead 一致：poi_id → 电话精确 → 名称+地址 →
+    主页链接 → 归一化电话。
+    """
+
+    def __init__(self, db: Session, owner_user_id: str | None, provider: str) -> None:
+        self.raw_poi_ids: set[str] = {
+            v
+            for v in db.scalars(
+                select(RawLeadRecord.source_poi_id).where(
+                    RawLeadRecord.owner_user_id == owner_user_id,
+                    RawLeadRecord.provider == provider,
+                ),
+            ).all()
+            if v
+        }
+        self.by_poi: dict[tuple[str, str], MerchantLead] = {}
+        self.by_phone: dict[str, MerchantLead] = {}
+        self.by_norm_phone: dict[str, MerchantLead] = {}
+        self.by_name_addr: dict[tuple[str, str], MerchantLead] = {}
+        self.by_homepage: dict[str, MerchantLead] = {}
+        for lead in db.scalars(select(MerchantLead).where(MerchantLead.owner_user_id == owner_user_id)).all():
+            self.register_lead(lead)
+
+    def register_lead(self, lead: MerchantLead) -> None:
+        if lead.platform and lead.source_poi_id:
+            self.by_poi.setdefault((lead.platform, lead.source_poi_id), lead)
+        if lead.phone:
+            self.by_phone.setdefault(lead.phone, lead)
+            normalized = _normalize_phone_item(lead.phone)
+            if normalized:
+                self.by_norm_phone.setdefault(normalized, lead)
+        if lead.name and lead.address:
+            self.by_name_addr.setdefault((lead.name, lead.address), lead)
+        if lead.platform_homepage_url:
+            self.by_homepage.setdefault(lead.platform_homepage_url, lead)
+
+    def find_existing_lead(
+        self,
+        provider: str,
+        poi_id: str,
+        name: str,
+        address: str | None,
+        phone: str | None,
+        homepage_url: str | None,
+    ) -> MerchantLead | None:
+        lead = self.by_poi.get((provider, poi_id))
+        if lead is None and phone:
+            lead = self.by_phone.get(phone)
+        if lead is None and name and address:
+            lead = self.by_name_addr.get((name, address))
+        if lead is None and homepage_url:
+            lead = self.by_homepage.get(homepage_url)
+        if lead is None and phone:
+            lead = self.by_norm_phone.get(_normalize_phone_item(phone) or "")
+        return lead
+
+
 def _lead_matches_keyword(lead: MerchantLead, keyword: str) -> bool:
     normalized_keyword = _normalize_text(keyword)
     if not normalized_keyword:
@@ -1302,6 +1366,7 @@ def _create_lead_from_poi(
     keyword: str,
     source_label: str,
     seed_lead: MerchantLead | None = None,
+    cache: "_DiscoveryIngestCache | None" = None,
 ) -> LeadImportResult:
     poi_id = str(poi.get("id") or "").strip()
     name = str(poi.get("name") or "").strip()
@@ -1335,7 +1400,11 @@ def _create_lead_from_poi(
     longitude, latitude = _split_location(str(poi.get("location") or ""))
     category_text = str(poi.get("type") or category or "").strip() or category
 
-    existing = _find_existing_lead(db, owner_user_id, provider, poi_id, name, address, phone, homepage_url)
+    existing = (
+        cache.find_existing_lead(provider, poi_id, name, address, phone, homepage_url)
+        if cache is not None
+        else _find_existing_lead(db, owner_user_id, provider, poi_id, name, address, phone, homepage_url)
+    )
     if existing:
         if _is_blacklisted_lead(existing):
             return LeadImportResult(lead=None, import_status="黑名单拦截", phone=phone)
@@ -1363,7 +1432,10 @@ def _create_lead_from_poi(
         created_by_user_id=owner_user_id,
     )
     db.add(lead)
-    db.flush()
+    if cache is not None:
+        cache.register_lead(lead)  # 批内去重靠缓存，flush 留到运行结尾一次性做
+    else:
+        db.flush()
     return LeadImportResult(lead=lead, import_status="已入库", phone=phone)
 
 
@@ -1390,6 +1462,7 @@ def _record_import_result(
     keyword: str,
     poi: dict[str, Any],
     seed_lead: MerchantLead | None = None,
+    cache: "_DiscoveryIngestCache | None" = None,
 ) -> None:
     owner_user_id = task.owner_user_id
     poi_id = str(poi.get("id") or "").strip()
@@ -1397,19 +1470,25 @@ def _record_import_result(
         run.failed_count += 1
         return
 
-    existing_raw = db.scalar(
-        select(RawLeadRecord).where(
-            RawLeadRecord.owner_user_id == owner_user_id,
-            RawLeadRecord.provider == task.provider,
-            RawLeadRecord.source_poi_id == poi_id,
-        ),
-    )
-    if existing_raw:
-        run.duplicate_count += 1
-        return
+    if cache is not None:
+        if poi_id in cache.raw_poi_ids:
+            run.duplicate_count += 1
+            return
+    else:
+        existing_raw = db.scalar(
+            select(RawLeadRecord).where(
+                RawLeadRecord.owner_user_id == owner_user_id,
+                RawLeadRecord.provider == task.provider,
+                RawLeadRecord.source_poi_id == poi_id,
+            ),
+        )
+        if existing_raw:
+            run.duplicate_count += 1
+            return
 
     try:
-        with db.begin_nested():
+        if cache is not None:
+            # 快路径：内存去重 + 延迟到运行结尾批量 flush，不用 SAVEPOINT
             import_result = _create_lead_from_poi(
                 db,
                 owner_user_id,
@@ -1420,6 +1499,7 @@ def _record_import_result(
                 keyword,
                 _collection_source_label(task.provider, task.collection_mode),
                 seed_lead=seed_lead,
+                cache=cache,
             )
             raw_record = _create_raw_record(
                 task=task,
@@ -1434,7 +1514,34 @@ def _record_import_result(
                 phone=import_result.phone,
             )
             db.add(raw_record)
-            db.flush()
+            cache.raw_poi_ids.add(poi_id)
+        else:
+            with db.begin_nested():
+                import_result = _create_lead_from_poi(
+                    db,
+                    owner_user_id,
+                    task.provider,
+                    poi,
+                    city,
+                    category,
+                    keyword,
+                    _collection_source_label(task.provider, task.collection_mode),
+                    seed_lead=seed_lead,
+                )
+                raw_record = _create_raw_record(
+                    task=task,
+                    run=run,
+                    provider=task.provider,
+                    owner_user_id=owner_user_id,
+                    poi=poi,
+                    city=city,
+                    category=category,
+                    lead=import_result.lead,
+                    import_status=import_result.import_status,
+                    phone=import_result.phone,
+                )
+                db.add(raw_record)
+                db.flush()
     except Exception as exc:
         run.failed_count += 1
         if not run.error_message:
@@ -1457,6 +1564,9 @@ def _run_discovery_collection(db: Session, task: LeadCollectionTask, run: LeadCo
     keywords = _clean_items(task.keywords or []) or [""]
     run.requested_count = len(cities) * len(categories) * len(keywords) * task.target_per_keyword
 
+    # 去重缓存：两条查询预热，循环内零数据库往返（云端库下 200 条从 ~60s 降到秒级）
+    cache = _DiscoveryIngestCache(db, task.owner_user_id, task.provider)
+
     for city in cities:
         for category in categories:
             for keyword in keywords:
@@ -1471,7 +1581,9 @@ def _run_discovery_collection(db: Session, task: LeadCollectionTask, run: LeadCo
                         category=category,
                         keyword=keyword,
                         poi=poi,
+                        cache=cache,
                     )
+    db.flush()  # 一次性批量写入本轮全部新线索/原始记录
 
 
 def _run_platform_enrichment(db: Session, task: LeadCollectionTask, run: LeadCollectionRun) -> None:

@@ -38,6 +38,64 @@ def build_telephony_preflight(test_phone: str | None = None) -> dict[str, object
     bulk_call_enabled = telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled)
     steps: list[TelephonyPreflightStep] = []
 
+    if gateway_mode.strip().lower() == "livekit":
+        # 2026-07-09：LiveKit 路由的预检——不再检测 Asterisk/AMI（外呼链路是
+        # 本地 LiveKit → SIP trunk → 语音网关，Asterisk 不参与）。
+        lk_configured = bool(
+            settings.livekit_url.strip() and settings.livekit_api_key.strip() and settings.livekit_api_secret.strip()
+        )
+        trunk_id = settings.livekit_sip_outbound_trunk_id.strip()
+        steps.append(_step("gateway_mode", "网关模式", "pass", "当前为 LiveKit Agent 外呼模式（本地 LiveKit + SIP trunk 直连语音网关）。"))
+        steps.append(
+            _step(
+                "livekit_config",
+                "LiveKit 连接",
+                "pass" if lk_configured else "fail",
+                f"LIVEKIT_URL={settings.livekit_url.strip() or '未配置'}",
+                "" if lk_configured else "配置 LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET。",
+            )
+        )
+        steps.append(
+            _step(
+                "livekit_trunk",
+                "SIP Trunk",
+                "pass" if trunk_id else "fail",
+                f"outbound trunk：{trunk_id or '未配置'}",
+                "" if trunk_id else "配置 LIVEKIT_SIP_OUTBOUND_TRUNK_ID。",
+            )
+        )
+        steps.append(
+            _step(
+                "gateway_profile",
+                "语音网关档案",
+                "pass" if profile.host else "warn",
+                f"{profile.label} · {profile.host}:{profile.sip_port} · {profile.max_channels} 路",
+            )
+        )
+        if live_call_enabled:
+            steps.append(_step("live_switch", "单号试拨开关", "pass", "真实拨号开关已开启。"))
+        else:
+            steps.append(_step("live_switch", "单号试拨开关", "warn", "真实拨号开关关闭。", "设置 ASTERISK_LIVE_CALL_ENABLED=true。"))
+        ready = lk_configured and bool(trunk_id)
+        ready_single = ready and live_call_enabled
+        ready_bulk = ready_single and bulk_call_enabled
+        if not ready:
+            lk_next = "补齐 LiveKit 连接信息和 SIP trunk 配置。"
+        elif not ready_single:
+            lk_next = "打开单号试拨开关后即可从前端试拨。"
+        else:
+            lk_next = "线路就绪：确认本地 LiveKit 栈（docker）与 agent worker 在跑，即可试拨/批量外呼。"
+        return {
+            "checkedAt": datetime.utcnow(),
+            "voiceGatewayProfile": profile.as_dict(),
+            "readyForDeviceTest": ready,
+            "readyForSingleNumberTest": ready_single,
+            "readyForBulkTasks": ready_bulk,
+            "nextStep": lk_next,
+            "health": health.as_dict(),
+            "steps": [step.as_dict() for step in steps],
+        }
+
     if gateway_mode == "asterisk":
         steps.append(_step("gateway_mode", "网关模式", "pass", f"当前已切到 Asterisk/{profile.label} 真实线路模式。"))
     else:
