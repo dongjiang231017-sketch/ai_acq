@@ -531,7 +531,52 @@ def _trunk_status_from_output(output: str) -> tuple[bool | None, str]:
     return None, "已连接 AMI，但无法自动判断 trunk 状态"
 
 
+def _livekit_line_health(gateway_mode: str) -> AsteriskHealth:
+    """LiveKit 路由的线路健康：外呼走 本地LiveKit→SIP trunk→语音网关，不经 Asterisk/AMI。
+
+    2026-07-09：修复"可以拨通却显示线路不可用"——线路面板此前只会查 Asterisk AMI，
+    LiveKit 路由根本不经过它。这里按 LiveKit 配置完备性给出真实状态。
+    """
+    profile = current_voice_gateway_profile()
+    errors: list[str] = []
+    configured = bool(
+        settings.livekit_url.strip() and settings.livekit_api_key.strip() and settings.livekit_api_secret.strip()
+    )
+    trunk_id = settings.livekit_sip_outbound_trunk_id.strip()
+    trunk_configured = bool(trunk_id)
+    if not configured:
+        errors.append("LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET 未配置")
+    if not trunk_configured:
+        errors.append("LIVEKIT_SIP_OUTBOUND_TRUNK_ID 未配置")
+    return AsteriskHealth(
+        checked_at=datetime.utcnow(),
+        gateway_mode=gateway_mode,
+        asterisk_deployment_mode=telephony_str(
+            "ASTERISK_DEPLOYMENT_MODE", "AI_ACQ_ASTERISK_DEPLOYMENT_MODE", fallback=settings.asterisk_deployment_mode
+        ),
+        voice_gateway_profile=profile.as_dict(),
+        configured=configured,
+        live_call_enabled=telephony_bool("ASTERISK_LIVE_CALL_ENABLED", fallback=settings.asterisk_live_call_enabled),
+        bulk_call_enabled=telephony_bool("ASTERISK_BULK_CALL_ENABLED", fallback=settings.asterisk_bulk_call_enabled),
+        ami_reachable=configured,
+        authenticated=configured,
+        ping_ok=configured,
+        trunk_configured=trunk_configured,
+        trunk_reachable=True if (configured and trunk_configured) else None,
+        trunk_status=(
+            f"LiveKit SIP trunk 已配置（{trunk_id}）"
+            if trunk_configured
+            else "LiveKit SIP trunk 未配置"
+        ),
+        max_channels=telephony_int("ASTERISK_MAX_CHANNELS", "VOICE_GATEWAY_MAX_CHANNELS", fallback=profile.max_channels),
+        errors=errors,
+    )
+
+
 def check_asterisk_health() -> AsteriskHealth:
+    gateway_mode_value = telephony_str("TELEPHONY_GATEWAY_MODE", fallback=settings.telephony_gateway_mode).strip().lower()
+    if gateway_mode_value == "livekit":
+        return _livekit_line_health(gateway_mode_value)
     errors: list[str] = []
     profile = current_voice_gateway_profile()
     configured = bool(

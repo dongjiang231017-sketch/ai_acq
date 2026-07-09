@@ -20,6 +20,79 @@ load_dotenv()
 # 单通电话硬上限秒数：防止对语音信箱/静默线路无限烧钱（对齐 livekit-poc/agent/main.py）。
 _MAX_CALL_SECONDS = int(os.getenv("LIVEKIT_MAX_CALL_SECONDS", "300"))
 
+# 固定开场白录音：接通即播、一字不差、可被客户说话打断。
+# 为什么不用模型说开场白：DashScope 对空上下文的 response.create 静默忽略
+# （2026-07-09 真机复现：generate_reply 后 7.5s 无响应，直到客户先开口"喂"），
+# Workbuddy 台子同日已验证固定录音方案。默认路径 backend/assets/opening.wav。
+_OPENING_WAV_PATH = os.getenv(
+    "OPENING_WAV_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "opening.wav"),
+)
+
+
+class _OpeningPlayer:
+    """移植自 Workbuddy livekit-local/agent.py（2026-07-09 真机验证版）。"""
+
+    def __init__(self, room: Any, path: str) -> None:
+        self._room = room
+        self._stop = False
+        self._data = self._load(path)
+
+    @staticmethod
+    def _load(path: str) -> bytes:
+        import struct
+        import wave as _wave
+
+        with _wave.open(path, "rb") as w:
+            assert w.getframerate() == 24000 and w.getnchannels() == 1
+            data = w.readframes(w.getnframes())
+
+        def rms(seg: bytes) -> float:
+            n = len(seg) // 2
+            if not n:
+                return 0.0
+            ss = struct.unpack(f"<{n}h", seg[: n * 2])
+            return (sum(x * x for x in ss) / n) ** 0.5
+
+        win = 4800  # 100ms @24k
+        start, end = 0, len(data)
+        while start + win < end and rms(data[start:start + win]) < 200:
+            start += win
+        while end - win > start and rms(data[end - win:end]) < 200:
+            end -= win
+        return data[start:end]
+
+    def stop(self) -> None:
+        self._stop = True
+
+    async def play(self, delay: float = 0.3) -> None:
+        from livekit import rtc
+
+        await asyncio.sleep(delay)
+        src = rtc.AudioSource(24000, 1)
+        track = rtc.LocalAudioTrack.create_audio_track("opening", src)
+        await self._room.local_participant.publish_track(
+            track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_UNKNOWN)
+        )
+        total = len(self._data) // 480  # 每帧 10ms @24k 16bit mono
+        # 墙钟驱动：保证 play() 跑满真实时长才返回，避免音频一次性灌进缓冲、
+        # 输入闸过早打开、模型抢答客户"喂"（Workbuddy 真机复现过的 bug）。
+        start = time.monotonic()
+        next_frame = 0
+        while not self._stop:
+            due = int((time.monotonic() - start) / 0.01)
+            while next_frame <= due and next_frame < total:
+                chunk = self._data[next_frame * 480:(next_frame + 1) * 480]
+                if len(chunk) < 480:
+                    chunk += b"\x00" * (480 - len(chunk))
+                await src.capture_frame(
+                    rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
+                )
+                next_frame += 1
+            if next_frame >= total:
+                break
+            await asyncio.sleep(0.01)
+
 
 async def entrypoint(ctx: Any) -> None:
     from livekit import api
@@ -203,20 +276,44 @@ async def entrypoint(ctx: Any) -> None:
             error=str(exc),
         )
 
-    # 【WORKER_MIGRATION 必改1】不能用 session.say()——realtime-only 会话没配 TTS，
-    # say() 直接抛错，开场白永远不响（2026-07-08 真机复现：客户接通只听到沉默）。
-    # generate_reply 由验证版适配器转成 conversation.item.create + response.create，
-    # DashScope 认这个（空上下文的裸 response.create 会被静默忽略）。
+    # 开场白：优先固定录音（接通即播、消除 2026-07-09 真机复现的 7.5s 空窗），
+    # 无录音才退回 generate_reply 兜底（DashScope 对空上下文 response.create 静默
+    # 忽略，兜底模式下 AI 可能等客户先开口才响应）。
     call_started["t"] = time.monotonic()
-    session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
-    _emit_livekit_event(
-        "tts_start",
-        callId=action_id,
-        roomName=room_name,
-        provider="livekit_agent",
-        text=opening_text,
-        detail="LiveKit Agent 已请求生成开场白（generate_reply），允许客户插话打断。",
-    )
+    opening_player: _OpeningPlayer | None = None
+    if os.path.exists(_OPENING_WAV_PATH):
+        try:
+            opening_player = _OpeningPlayer(ctx.room, _OPENING_WAV_PATH)
+        except Exception as exc:  # noqa: BLE001
+            _emit_livekit_event("opening_wav_load_error", callId=action_id, roomName=room_name, error=str(exc))
+    if opening_player is not None:
+        _llm_for_opening = getattr(session, "llm", None) or getattr(session, "_llm", None)
+        _rt_for_opening = getattr(_llm_for_opening, "last_session", None)
+        if _rt_for_opening is not None:
+            try:
+                # 客户开口（服务端 VAD speech_started）立即停掉开场白录音
+                _rt_for_opening.on("input_speech_started", lambda *_: opening_player.stop())
+            except Exception:  # noqa: BLE001
+                pass
+        asyncio.create_task(opening_player.play())
+        _emit_livekit_event(
+            "tts_start",
+            callId=action_id,
+            roomName=room_name,
+            provider="livekit_agent",
+            text=opening_text,
+            detail="播放固定开场白录音（接通即播，可被客户说话打断）。",
+        )
+    else:
+        session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
+        _emit_livekit_event(
+            "tts_start",
+            callId=action_id,
+            roomName=room_name,
+            provider="livekit_agent",
+            text=opening_text,
+            detail="未找到开场白录音，退回 generate_reply（可能等客户先开口才响应）。",
+        )
 
     # ---- 意向标记（对齐 bench：AI 问过微信 + 客户同意 => 落库）----
     wechat_ask = {"pending": 0, "ai_text": ""}
@@ -265,6 +362,14 @@ async def entrypoint(ctx: Any) -> None:
         if not text:
             return
         last_activity["t"] = time.monotonic()
+        # 实时字幕流：客户侧转写推给前端实时监听页
+        _emit_livekit_event(
+            "user_transcript",
+            callId=action_id,
+            roomName=room_name,
+            text=text[:200],
+            detail="客户说话（实时转写）",
+        )
         if wechat_ask["pending"] > 0:
             if any(w in text for w in _REFUSE_WORDS):
                 wechat_ask["pending"] = 0
@@ -286,6 +391,14 @@ async def entrypoint(ctx: Any) -> None:
         text = str(getattr(item, "text_content", "") or "")
         if role != "assistant" or not text:
             return
+        # 实时字幕流：AI 侧回复推给前端实时监听页
+        _emit_livekit_event(
+            "ai_transcript",
+            callId=action_id,
+            roomName=room_name,
+            text=text[:200],
+            detail="AI 回复（实时转写）",
+        )
         if any(w in text for w in _WECHAT_HINTS):
             wechat_ask["pending"] = 2  # 给客户 2 轮回应窗口
             wechat_ask["ai_text"] = text

@@ -1448,6 +1448,12 @@ function serverAmiDisplay(config: TelephonyConfig) {
 }
 
 function telephonyReadinessDetail(config: TelephonyConfig, health: TelephonyHealth) {
+  if (config.gatewayMode === "livekit") {
+    if (!health.configured) return "LiveKit 连接信息未配置（LIVEKIT_URL/API_KEY/API_SECRET）";
+    if (!health.trunkConfigured) return "LiveKit SIP trunk 未配置";
+    if (!health.liveCallEnabled) return "单号试拨开关未开启";
+    return health.trunkStatus || "LiveKit 线路已配置，可单号试拨";
+  }
   if (config.gatewayMode !== "asterisk") return "当前仍为模拟线路";
   if (!health.configured) return "请先配置 AMI 账号和密码";
   if (!health.amiReachable) return "后端还连不上 Asterisk AMI";
@@ -1579,6 +1585,19 @@ function realtimeSessionStatusText(status: string) {
 }
 
 function realtimeLiveEventTitle(type: string) {
+  if (type === "user_transcript") return "客户说";
+  if (type === "ai_transcript") return "AI 说";
+  if (type === "livekit_dispatch_start") return "发起外呼";
+  if (type === "livekit_dispatch_submitted") return "外呼已提交";
+  if (type === "livekit_agent_job_start") return "AI 坐席接单";
+  if (type === "livekit_agent_session_started") return "AI 会话就绪";
+  if (type === "livekit_sip_participant_created") return "电话已拨出";
+  if (type === "livekit_customer_joined") return "客户接通";
+  if (type === "livekit_auto_hangup") return "自动挂断";
+  if (type === "livekit_agent_shutdown") return "通话结束";
+  if (type === "livekit_sip_error") return "拨号失败";
+  if (type === "turn_latency") return "转向延迟";
+  if (type === "intent_lead_marked") return "意向客户确认";
   if (type === "call_connected") return "电话接通";
   if (type === "opening_start") return "开场播放";
   if (type === "remote_speech_started") return "听到对端声音";
@@ -1800,7 +1819,7 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [telephonyTestForm, setTelephonyTestForm] = useState({
     phone: "",
     callerId: "",
-    conversationRoute: "omni" as "pipeline" | "omni" | "livekit",
+    conversationRoute: "livekit" as "pipeline" | "omni" | "livekit",
   });
   const [telephonyTestResult, setTelephonyTestResult] = useState<TelephonyTestCallResult | null>(null);
   const [telephonyLineRecovery, setTelephonyLineRecovery] = useState<TelephonyLineRecovery | null>(null);

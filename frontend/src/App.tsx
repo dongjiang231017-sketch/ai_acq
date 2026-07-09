@@ -35,7 +35,9 @@ function App() {
   if (pathname === WORKSPACE_PATH) {
     return <TeammateWorkspace />;
   }
-  return <LegacyWorkspaceShell />;
+  // 2026-07-09：默认进完整工作台（此前默认是旧版静态预览 iframe，
+  // 用户以为功能被隐藏）。旧版预览仍可通过 /ui-preview 访问。
+  return <TeammateWorkspace />;
 }
 
 export default App;
