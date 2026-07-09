@@ -185,6 +185,7 @@ async def entrypoint(ctx: JobContext):
     answered_event = asyncio.Event()
     greeting_triggered = False
     lead_phone = {"v": ""}  # 被叫号码（从 SIP participant identity 提取）
+    sip_track = {"t": None}  # 客户音频轨（本地 VAD 用）
 
     def _on_track_subscribed(track, publication, participant):
         nonlocal greeting_triggered
@@ -193,9 +194,11 @@ async def entrypoint(ctx: JobContext):
         logger.info("track_subscribed: identity=%s source=%s", identity, source)
         if identity.startswith("sip_"):
             lead_phone["v"] = identity[4:]
+            if getattr(track, "kind", None) == rtc.TrackKind.KIND_AUDIO and sip_track["t"] is None:
+                sip_track["t"] = track
         if identity.startswith("sip_") and not greeting_triggered:
             greeting_triggered = True
-            logger.info("检测到 SIP participant %s 的音频轨道已订阅，判定已接听", identity)
+            logger.info("检测到 SIP participant %s 的音频轨道已订阅（信道已通，等真人开口）", identity)
             answered_event.set()
 
     def _on_track_published(publication, participant):
@@ -370,11 +373,71 @@ async def entrypoint(ctx: JobContext):
         await session.start(agent=OutboundAgent(), room=ctx.room)
         logger.info("AgentSession 已启动，等待 SIP 接听...")
 
-        # 等待 SIP 接听后说开场白
+        # 等待信道接通 -> 本地 VAD 等真人开口 -> 播开场白（治网关"提前应答"）
         try:
             await asyncio.wait_for(answered_event.wait(), timeout=25.0)
+
+            import struct as _struct
+
+            SPEAK_RMS = int(os.getenv("OPENING_SPEAK_RMS", "600"))       # 人声能量阈值
+            SUSTAIN_S = float(os.getenv("OPENING_SUSTAIN_S", "0.30"))    # 持续多久算真开口
+            FALLBACK_S = float(os.getenv("OPENING_FALLBACK_S", "8.0"))   # 兜底：没等到也播
+            human_spoke = asyncio.Event()
+            greeting_on = {"v": False}
+
+            def _rms16(buf: bytes) -> float:
+                n = len(buf) // 2
+                if n == 0:
+                    return 0.0
+                try:
+                    s = _struct.unpack(f"<{n}h", buf[: n * 2])
+                except _struct.error:
+                    return 0.0
+                return (sum(x * x for x in s) / n) ** 0.5
+
+            async def _local_vad() -> None:
+                """本地能量 VAD：接通前不喂 DashScope，靠它判断真人开口 + 开场白期间打断。"""
+                track = sip_track["t"]
+                if track is None:
+                    human_spoke.set()  # 拿不到轨，退回立即播
+                    return
+                stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+                speaking_since = None
+                async for ev in stream:
+                    loud = _rms16(bytes(ev.frame.data)) > SPEAK_RMS
+                    now = _time.monotonic()
+                    if not greeting_on["v"]:
+                        # 阶段A：等真人持续开口
+                        if loud:
+                            if speaking_since is None:
+                                speaking_since = now
+                            elif now - speaking_since >= SUSTAIN_S:
+                                logger.info("本地 VAD 检测到真人开口，触发开场白")
+                                human_spoke.set()
+                        else:
+                            speaking_since = None
+                    else:
+                        # 阶段B：开场白播放中，客户出声即打断
+                        if loud and opening_player is not None:
+                            opening_player.stop()
+
+            rt = getattr(llm_model, "last_session", None)
+            if rt is not None:
+                rt.input_open = False  # 关输入总闸：接通前客户音频不进模型
+
+            vad_task = asyncio.create_task(_local_vad())
+            try:
+                await asyncio.wait_for(human_spoke.wait(), timeout=FALLBACK_S)
+            except asyncio.TimeoutError:
+                logger.info("等真人开口超时(%.0fs)，兜底直接播开场白", FALLBACK_S)
+
+            greeting_on["v"] = True
             call_started["t"] = _time.monotonic()
-            asyncio.create_task(_play_greeting(session, opening_player))
+            await _play_greeting(session, opening_player)   # 播完/被打断才返回
+
+            if rt is not None:
+                rt.input_open = True  # 开输入总闸：正式进入对话
+            logger.info("开场白结束，输入总闸打开，进入对话")
             asyncio.create_task(_watchdog())
         except asyncio.TimeoutError:
             logger.warning("25 秒内未检测到 SIP 接听")
