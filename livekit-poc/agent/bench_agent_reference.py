@@ -338,8 +338,11 @@ async def entrypoint(ctx: JobContext):
     wechat_ask = {"pending": 0, "ai_text": ""}   # AI 要微信后，给客户 2 轮回应窗口
     lead_marked = {"v": False}
     _WECHAT_ASK_HINTS = ("微信", "加您", "加个微信", "加一下")
-    _AGREE_WORDS = ("可以", "行", "好的", "好啊", "嗯", "加吧", "发吧", "就是微信", "是微信", "同意", "没问题")
-    _REFUSE_WORDS = ("不用", "不加", "别加", "不需要", "不方便", "不行")
+    # 注意：判定顺序是先拒绝后同意（_handle_user_text），所以"不对/不是"会先被拒绝分支
+    # 拦住，"对/是的"才能安全进同意词表（真机 14:35 通话客户答"对。"曾漏标）
+    _AGREE_WORDS = ("可以", "行", "好的", "好啊", "嗯", "加吧", "发吧", "就是微信", "是微信", "同意", "没问题",
+                    "对", "是的", "对的", "嗯嗯")
+    _REFUSE_WORDS = ("不用", "不加", "别加", "不需要", "不方便", "不行", "不对", "不是")
     _INTENT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intent_leads.jsonl")
 
     def _mark_lead(customer_text: str) -> None:
