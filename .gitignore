@@ -59,3 +59,4 @@ backend/platform_browser_profiles/
 .vscode/
 *.swp
 *.swo
+*.jsonl
