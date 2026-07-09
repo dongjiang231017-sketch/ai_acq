@@ -138,19 +138,40 @@ def _ensure_work_order(db: Session, customer: IntentCustomer) -> None:
 
 
 def _sync_intent_customers(db: Session) -> None:
-    leads = list(db.scalars(select(MerchantLead).order_by(MerchantLead.created_at.desc())).all())
+    # 2026-07-09 复查修复（逻辑+性能双重 bug）：
+    # 原来遍历全部线索、凡评分≥50 就塞进意向池——高德采集线索默认评分 95，
+    # 等于把所有采集线索都误当成"意向客户"（逻辑错，池子被 367 条采集线索污染）；
+    # 且每条线索 2 次远程查询 ×28ms RTT ≈ 28 秒，导致意向池/报表页请求超时（性能错）。
+    # 意向 = 真实触达信号（外呼 A/B 或明确「有意向」状态），不是采集质量分。
+    # 只处理状态已标记「有意向」的线索（由通话落库写入），池子既正确又快。
+    leads = list(
+        db.scalars(select(MerchantLead).where(MerchantLead.status == "有意向").order_by(MerchantLead.updated_at.desc())).all()
+    )
     for lead in leads:
-        if lead.intent_score < 50:
-            continue
         customer = _upsert_customer_from_lead(db, lead)
-        if lead.intent_score >= 70:
-            _ensure_work_order(db, customer)
+        _ensure_work_order(db, customer)
 
-    calls = list(db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc()).limit(80)).all())
+    # 只处理「尚未生成意向事件」的通话记录：LiveKit 落库已在通话时直接写意向客户+事件，
+    # 这里只兜底老网关（模拟器/Asterisk）产生的、还没入池的 A/B 记录，避免每次全量重扫。
+    from app.models.growth import IntentEvent as _IntentEvent
+
+    synced_record_ids = set(
+        db.scalars(select(_IntentEvent.source_record_id).where(_IntentEvent.source_type == "call_record")).all()
+    )
+    calls = list(
+        db.scalars(
+            select(CallRecord)
+            .where(CallRecord.intent_level.in_(["A", "B"]))
+            .order_by(CallRecord.created_at.desc())
+            .limit(80)
+        ).all()
+    )
     for record in calls:
+        if record.id in synced_record_ids:
+            continue
         if record.intent_level not in {"A", "B"} and not record.need_handoff:
             continue
-        lead = db.get(MerchantLead, record.lead_id)
+        lead = db.get(MerchantLead, record.lead_id) if record.lead_id else None
         customer = _upsert_customer_from_lead(db, lead) if lead else _find_customer(db, None, record.merchant_name)
         if not customer:
             customer = IntentCustomer(

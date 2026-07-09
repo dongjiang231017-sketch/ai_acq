@@ -27,7 +27,8 @@ from app.services.outbound_runner import get_task_leads
 
 logger = logging.getLogger(__name__)
 
-_SKIP_STATUS_MARKERS = ("勿扰", "黑名单", "拒绝", "已成交")
+# 拨打中：防任务重启后重拨进行中的号码；有意向：已确认意向的交给销售跟进，不再机拨
+_SKIP_STATUS_MARKERS = ("勿扰", "黑名单", "拒绝", "已成交", "拨打中", "有意向")
 _PER_CALL_TIMEOUT_SECONDS = 360
 _DIAL_GAP_SECONDS = 2.0
 _RUNNING_TASKS: set[str] = set()

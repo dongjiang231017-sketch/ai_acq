@@ -259,10 +259,17 @@ def download_report_export(export_id: str, db: Session = Depends(get_db)):
             sheet.append([row.get("channel"), row.get("leads"), row.get("touches"), row.get("connected"), row.get("intent"), row.get("handoff")])
     elif report_type == "销售绩效":
         rows = sales_performance_reports(db)
-        headers = ["销售", "跟进客户数", "待办工单", "完成工单", "成交数"]
+        headers = ["销售", "跟进客户数", "高意向数", "待办工单", "完成工单", "转化率(%)"]
         sheet.append(headers)
         for row in rows:
-            sheet.append([row.get("owner"), row.get("customers"), row.get("pendingOrders"), row.get("closedOrders"), row.get("deals")])
+            sheet.append([
+                row.get("owner_name"),
+                row.get("assigned_customers"),
+                row.get("high_intent"),
+                row.get("pending_work_orders"),
+                row.get("closed_work_orders"),
+                row.get("conversion_rate"),
+            ])
     elif report_type == "通话记录":
         sheet.append(["商家", "电话", "接听结果", "意向等级", "时长(秒)", "呼叫时间", "转写摘要"])
         for record in db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc()).limit(5000)):

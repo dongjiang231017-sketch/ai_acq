@@ -69,8 +69,10 @@ class CallScriptRead(CallScriptCreate):
 
 class CallRecordRead(BaseModel):
     id: str
-    task_id: Annotated[str, Field(alias="taskId")]
-    lead_id: Annotated[str, Field(alias="leadId")]
+    # 2026-07-09：单号试拨的通话没有任务/线索上下文，模型已改可空，schema 必须同步，
+    # 否则含 None 的记录会让 /outbound/records 列表 500（本次复查抓到的真 bug）
+    task_id: Annotated[str | None, Field(alias="taskId")] = None
+    lead_id: Annotated[str | None, Field(alias="leadId")] = None
     merchant_name: Annotated[str, Field(alias="merchantName")]
     phone: str | None
     ai_seat: Annotated[str, Field(alias="aiSeat")]

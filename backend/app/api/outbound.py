@@ -6,8 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.auth import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
+from app.models.user import User
 from app.schemas.common import Page, paginate
 from app.models.lead import MerchantLead
 from app.models.task import CallRecord, CallScript, OutreachTask, RecallRule
@@ -443,7 +445,12 @@ def create_outbound_task(payload: OutboundTaskCreate, db: Session = Depends(get_
 
 
 @router.post("/tasks/{task_id}/start", response_model=TaskRead)
-def start_outbound_task(task_id: str, db: Session = Depends(get_db)) -> OutreachTask:
+def start_outbound_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: "User" = Depends(get_current_user),
+) -> OutreachTask:
+    # 需求 7.3：批量外呼是敏感操作，必须登录（角色细分权限留待权限体系完善后收紧）
     task = db.get(OutreachTask, task_id)
     if not task or task.channel != "call":
         raise HTTPException(status_code=404, detail="外呼任务不存在")

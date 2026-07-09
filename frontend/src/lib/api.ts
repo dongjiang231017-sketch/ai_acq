@@ -212,8 +212,8 @@ export type OutboundOverview = {
 
 export type CallRecord = {
   id: string;
-  taskId: string;
-  leadId: string;
+  taskId?: string | null;
+  leadId?: string | null;
   merchantName: string;
   phone?: string | null;
   aiSeat: string;

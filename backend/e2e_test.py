@@ -150,6 +150,18 @@ status, data = req("/leads/import-excel", "POST", token=token,
                    form={"file": (f"e2e-{E2E_MARK}.xlsx", buf.getvalue(), "application/octet-stream")})
 check("excel_reimport_alldup", status == 200 and data.get("inserted") == 0 and data.get("duplicated") == 3, json.dumps(data))
 
+# 数字单元格电话回归（Excel浮点损坏修复：13800000000.0 不得变成12位错号）
+wb = Workbook(); ws = wb.active
+ws.append(["商家名称", "电话", "城市", "类目", "地址"])
+ws.append(["E2E浮点店", 19930000001.0, "测试市", "餐饮", "测试路f号"])
+buf = io.BytesIO(); wb.save(buf)
+status, data = req("/leads/import-excel", "POST", token=token,
+                   form={"file": (f"e2e-{E2E_MARK}.xlsx", buf.getvalue(), "application/octet-stream")})
+check("excel_float_phone_insert", status == 200 and data.get("inserted") == 1, json.dumps(data))
+with SessionLocal() as db:
+    stored = db.scalar(select(MerchantLead.phone).where(MerchantLead.name == "E2E浮点店"))
+check("excel_float_phone_value", stored == "19930000001", str(stored))
+
 # ---------- 6. 批量外呼编排（安全空跑：名单全是勿扰 → 跳过不拨号） ----------
 from app.models.task import OutreachTask
 
@@ -166,7 +178,14 @@ with SessionLocal() as db:
                         target_lead_ids=",".join(dnc_lead_ids), concurrency=2, status="待启动")
     db.add(task); db.commit(); e2e_task_id = task.id
 
-status, data = req(f"/outbound/tasks/{e2e_task_id}/start", "POST")
+# 未登录启动批量外呼必须被拒（需求7.3 敏感操作鉴权）
+try:
+    status_noauth, _ = req(f"/outbound/tasks/{e2e_task_id}/start", "POST", body={})
+    check("batch_start_requires_auth", False, f"unexpected {status_noauth}")
+except Exception as exc:
+    check("batch_start_requires_auth", "401" in str(exc) or "403" in str(exc), str(exc)[:60])
+
+status, data = req(f"/outbound/tasks/{e2e_task_id}/start", "POST", body={}, token=token)
 check("batch_start_202", status == 200 and data.get("status") in ("运行中", "已完成"), str(status))
 deadline = time.time() + 30
 final = None

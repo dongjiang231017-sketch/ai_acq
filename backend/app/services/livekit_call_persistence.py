@@ -65,7 +65,7 @@ def persist_livekit_call_result(
 
     with SessionLocal() as db:
         lead = _find_lead(db, lead_id=lead_id, phone=phone)
-        display_name = merchant_name or (lead.name if lead else "") or "未知商户"
+        display_name = (lead.name if lead else "") or merchant_name or "未知商户"
 
         record = CallRecord(
             task_id=task_id or None,

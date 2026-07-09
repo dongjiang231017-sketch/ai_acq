@@ -4956,6 +4956,17 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
               {activeReportExport && (
                 <p className="panel-note">
                   当前选中：{activeReportExport.reportType} · {activeReportExport.status} · {activeReportExport.rowCount} 行
+                  {activeReportExport.downloadUrl && (
+                    <a
+                      className="secondary-button"
+                      href={apiAssetUrl(activeReportExport.downloadUrl)}
+                      rel="noreferrer"
+                      style={{ marginLeft: 12 }}
+                      target="_blank"
+                    >
+                      下载 Excel
+                    </a>
+                  )}
                 </p>
               )}
             </article>

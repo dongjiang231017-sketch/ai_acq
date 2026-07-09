@@ -27,12 +27,17 @@ _IMPORT_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _normalize_import_phone(value: object) -> str | None:
-    digits = re.sub(r"\D+", "", str(value or ""))
+    text = str(value or "").strip()
+    # Excel 数字单元格会读成浮点（"13800000000.0"）：先剥掉小数部分，
+    # 否则去符号后变成 12 位错号还能通过座机校验入库
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+    digits = re.sub(r"\D+", "", text)
     if digits.startswith("86") and len(digits) == 13:
         digits = digits[2:]
     if len(digits) == 11 and digits.startswith("1"):
         return digits
-    if 7 <= len(digits) <= 12:  # 座机
+    if 7 <= len(digits) <= 12 and not digits.startswith("1"):  # 座机（含区号）
         return digits
     return None
 

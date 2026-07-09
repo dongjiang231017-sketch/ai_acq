@@ -426,7 +426,8 @@ async def entrypoint(ctx: Any) -> None:
         if call_state["persisted"]:
             return
         call_state["persisted"] = True
-        connected = call_state["joined_at"] > 0 and any(line.startswith("客户：") for line in conversation_log)
+        # wait_until_answered=true：客户 participant 进房 == 电话已接通（含静默接听/语音信箱）
+        connected = call_state["joined_at"] > 0
         duration = int(time.monotonic() - call_state["joined_at"]) if call_state["joined_at"] else 0
         if lead_marked["v"]:
             intent_level, outcome, reason = "A", "有意向", "客户同意加微信"
@@ -442,7 +443,8 @@ async def entrypoint(ctx: Any) -> None:
             record_id = persist_livekit_call_result(
                 action_id=action_id,
                 phone=dial_phone,
-                merchant_name=merchant_name if merchant_name != "您的门店" else "",
+                # 占位商户名不写入记录，落库时优先用匹配到的线索真实店名
+                merchant_name=merchant_name if merchant_name not in ("您的门店", "单号真实试拨") else "",
                 task_id=batch_task_id,
                 lead_id=batch_lead_id,
                 duration_seconds=duration,
