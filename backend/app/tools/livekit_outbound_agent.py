@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime
 from typing import Any
 
 from dotenv import load_dotenv
@@ -55,13 +56,43 @@ async def entrypoint(ctx: Any) -> None:
     # 待办6 两线路 A/B 对比就看这个事件的 P50/P95，没有它对比无数据可用。
     last_user_stop = {"t": 0.0}
 
+    # ---- 三层挂断基础设施（对齐 bench_agent_reference.py：道别/静默/硬上限）----
+    hangup_flag = {"v": False}
+    last_activity = {"t": time.monotonic()}
+    call_started = {"t": 0.0}
+
+    async def _hangup(reason: str, delay: float = 0.0) -> None:
+        if hangup_flag["v"]:
+            return
+        hangup_flag["v"] = True
+        if delay:
+            await asyncio.sleep(delay)
+        _emit_livekit_event("livekit_auto_hangup", callId=action_id, roomName=room_name, reason=reason)
+        try:
+            # 不能用 ctx.api：session 事件回调里 create_task 出来的协程没有 job 的
+            # http 上下文，ctx.api 懒建 aiohttp session 会抛 "outside of a job context"，
+            # 房间删不掉（07-09 真机复现：AI 道完别电话不挂）。自建 LiveKitAPI。
+            lkapi = api.LiveKitAPI(
+                url=settings.livekit_url.strip().replace("ws://", "http://").replace("wss://", "https://"),
+                api_key=settings.livekit_api_key.strip(),
+                api_secret=settings.livekit_api_secret.strip(),
+            )
+            try:
+                await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
+            finally:
+                await lkapi.aclose()
+        except Exception as exc:  # noqa: BLE001
+            _emit_livekit_event("livekit_auto_hangup_error", callId=action_id, roomName=room_name, error=str(exc))
+
     @session.on("user_state_changed")
     def _on_user_state(ev: Any) -> None:
+        last_activity["t"] = time.monotonic()
         if str(getattr(ev, "new_state", "")) == "listening":
             last_user_stop["t"] = time.perf_counter()
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev: Any) -> None:
+        last_activity["t"] = time.monotonic()
         if str(getattr(ev, "new_state", "")) == "speaking" and last_user_stop["t"]:
             _emit_livekit_event(
                 "turn_latency",
@@ -176,6 +207,7 @@ async def entrypoint(ctx: Any) -> None:
     # say() 直接抛错，开场白永远不响（2026-07-08 真机复现：客户接通只听到沉默）。
     # generate_reply 由验证版适配器转成 conversation.item.create + response.create，
     # DashScope 认这个（空上下文的裸 response.create 会被静默忽略）。
+    call_started["t"] = time.monotonic()
     session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
     _emit_livekit_event(
         "tts_start",
@@ -185,6 +217,83 @@ async def entrypoint(ctx: Any) -> None:
         text=opening_text,
         detail="LiveKit Agent 已请求生成开场白（generate_reply），允许客户插话打断。",
     )
+
+    # ---- 意向标记（对齐 bench：AI 问过微信 + 客户同意 => 落库）----
+    wechat_ask = {"pending": 0, "ai_text": ""}
+    lead_marked = {"v": False}
+    _WECHAT_HINTS = ("微信", "加您", "加个微信", "加一下")
+    # 判定顺序先拒绝后同意："不对/不是"先被拒绝分支拦住，"对/是的"才能安全进同意词表
+    _AGREE_WORDS = ("可以", "行", "好的", "好啊", "嗯", "加吧", "发吧", "就是微信", "是微信",
+                    "同意", "没问题", "对", "是的", "对的", "嗯嗯", "方便")
+    _REFUSE_WORDS = ("不用", "不加", "别加", "不需要", "不方便", "不行", "不对", "不是")
+    # 2026-07-09 真机踩坑：AI 实际道别语是"先不多打扰/拜拜/您先忙"，
+    # 只留"不打扰"匹配不上（"不多打扰"不含子串"不打扰"），挂断永不触发
+    _FAREWELLS = ("再见", "拜拜", "不打扰", "不多打扰", "您先忙", "生意兴隆")
+    lead_path = os.getenv("INTENT_LEADS_PATH", "intent_leads.jsonl")
+
+    def _mark_lead(customer_text: str) -> None:
+        if lead_marked["v"]:
+            return
+        lead_marked["v"] = True
+        record = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "phone": dial_phone,
+            "room": room_name,
+            "level": "A",
+            "reason": "客户同意加微信",
+            "ai_ask": wechat_ask["ai_text"][:120],
+            "customer_reply": customer_text[:120],
+        }
+        try:
+            with open(lead_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            _emit_livekit_event("intent_lead_write_error", callId=action_id, roomName=room_name, error=str(exc))
+        _emit_livekit_event(
+            "intent_lead_marked",
+            callId=action_id,
+            roomName=room_name,
+            phone=_masked_phone(dial_phone),
+            customerReply=customer_text[:80],
+            detail="客户同意加微信，已写入意向池。",
+        )
+
+    def _on_user_transcript(text: str) -> None:
+        # 挂适配器 on_user_transcript（DashScope 转写完成事件，带 transcript）。
+        # 不用 conversation_item_added——user 事件在转写完成前发出，常拿到空文本。
+        text = (text or "").strip()
+        if not text:
+            return
+        last_activity["t"] = time.monotonic()
+        if wechat_ask["pending"] > 0:
+            if any(w in text for w in _REFUSE_WORDS):
+                wechat_ask["pending"] = 0
+            elif any(w in text for w in _AGREE_WORDS):
+                _mark_lead(text)
+                wechat_ask["pending"] = 0
+            else:
+                wechat_ask["pending"] -= 1
+
+    _llm_obj = getattr(session, "llm", None) or getattr(session, "_llm", None)
+    _rt = getattr(_llm_obj, "last_session", None)
+    if _rt is not None:
+        _rt.on_user_transcript = _on_user_transcript
+
+    @session.on("conversation_item_added")
+    def _on_item(ev: Any) -> None:
+        item = getattr(ev, "item", None)
+        role = str(getattr(item, "role", ""))
+        text = str(getattr(item, "text_content", "") or "")
+        if role != "assistant" or not text:
+            return
+        if any(w in text for w in _WECHAT_HINTS):
+            wechat_ask["pending"] = 2  # 给客户 2 轮回应窗口
+            wechat_ask["ai_text"] = text
+        if any(w in text for w in _FAREWELLS):
+            # 保护：接通 20 秒内不因道别语挂断（防模型口滑/话术污染误触发）
+            if call_started["t"] and time.monotonic() - call_started["t"] < 20.0:
+                return
+            asyncio.create_task(_hangup("AI 道别", delay=4.0))
 
     done = asyncio.Event()
 
@@ -198,18 +307,32 @@ async def entrypoint(ctx: Any) -> None:
         done.set()
 
     ctx.add_shutdown_callback(_on_shutdown)
-    try:
-        await asyncio.wait_for(done.wait(), timeout=_MAX_CALL_SECONDS)
-    except asyncio.TimeoutError:
-        _emit_livekit_event(
-            "livekit_call_timeout",
-            callId=action_id,
-            roomName=room_name,
-            limitSeconds=_MAX_CALL_SECONDS,
-            detail="到达单通电话硬上限，主动收尾（防语音信箱/静默线路空耗计费）。",
-        )
-        ctx.shutdown("max_call_seconds_reached")
-        await done.wait()
+
+    # 看门狗：2s 一查，静默超时 + 硬上限（道别挂断由 _on_item 异步触发）
+    idle_hangup_seconds = float(os.getenv("LIVEKIT_IDLE_HANGUP_SECONDS", "25"))
+    start_t = time.monotonic()
+    while not done.is_set():
+        try:
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            break
+        except asyncio.TimeoutError:
+            pass
+        if time.monotonic() - start_t > _MAX_CALL_SECONDS:
+            _emit_livekit_event(
+                "livekit_call_timeout",
+                callId=action_id,
+                roomName=room_name,
+                limitSeconds=_MAX_CALL_SECONDS,
+                detail="到达单通电话硬上限，主动收尾（防语音信箱/静默线路空耗计费）。",
+            )
+            await _hangup(f"硬上限 {_MAX_CALL_SECONDS}s")
+            ctx.shutdown("max_call_seconds_reached")
+            break
+        if time.monotonic() - last_activity["t"] > idle_hangup_seconds:
+            await _hangup(f"双方静默超 {idle_hangup_seconds:.0f}s")
+            ctx.shutdown("idle_timeout")
+            break
+    await done.wait()
 
 
 def _build_agent_session(*, inference: Any, agent_mode: str, instructions: str = "") -> Any:
@@ -330,6 +453,9 @@ def _build_agent_instructions(*, merchant_name: str) -> str:
         "这通电话的最终目标是确认客户是否有意向继续了解。"
         "确认有意向后，问客户方不方便加个微信，我们在微信上继续聊。"
         "客户同意加微信后必须确认当前手机号是不是微信；如果是，就明确记录为当前手机号可加微信；如果不是，就问微信号并复述确认。"
+        "商家名称整通电话最多说一次（开场提一下即可），之后一律用「您」称呼对方，禁止每句话重复商家名。"
+        "同一个问题整通电话最多问一次（比如「想看案例还是看费用」），客户没有正面回答就换个角度说，或直接推进到加微信，禁止原样复读。"
+        "客户报出或更正微信号/手机号后，必须复述最新号码请客户确认；客户再次补充或更正时，以最新说法为准重新复述确认，号码未经客户确认不得道别。"
     )
 
 
