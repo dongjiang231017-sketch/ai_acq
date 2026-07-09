@@ -135,10 +135,17 @@ class OpeningPlayer:
         await self._room.local_participant.publish_track(
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_UNKNOWN)
         )
-        logger.info("固定开场白开始播放（%.1fs）", len(self._data) / 48000)
+        import time as _t
+        dur = len(self._data) / 48000
+        logger.info("固定开场白开始播放（%.1fs）", dur)
+        # 墙钟节奏发帧：每帧 10ms，按真实时间推进。capture_frame 若不自阻塞，
+        # 这里的 sleep 保证音频不会被一次性灌进缓冲、play() 立刻返回——那会让
+        # 输入闸过早打开、模型抢在录音播完前就应答客户的"喂"（本次真机复现的 bug）。
+        start = _t.monotonic()
+        n = 0
         for i in range(0, len(self._data), 480):
             if self._stop:
-                logger.info("开场白被客户说话打断，停止播放")
+                logger.info("开场白被客户说话打断，停止播放（已播 %.1fs）", _t.monotonic() - start)
                 break
             chunk = self._data[i:i + 480]
             if len(chunk) < 480:
@@ -146,7 +153,12 @@ class OpeningPlayer:
             await src.capture_frame(
                 rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
             )
-        logger.info("固定开场白播放结束")
+            n += 1
+            target = start + n * 0.01
+            lag = target - _t.monotonic()
+            if lag > 0:
+                await asyncio.sleep(lag)
+        logger.info("固定开场白播放结束（实际 %.1fs）", _t.monotonic() - start)
 
 
 class OutboundAgent(Agent):
