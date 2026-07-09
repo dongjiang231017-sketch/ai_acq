@@ -145,29 +145,34 @@ class OpeningPlayer:
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_UNKNOWN)
         )
         import time as _t
-        dur = len(self._data) / 48000
-        logger.info("固定开场白开始播放（%.1fs）", dur)
-        # 墙钟节奏发帧：每帧 10ms，按真实时间推进。capture_frame 若不自阻塞，
-        # 这里的 sleep 保证音频不会被一次性灌进缓冲、play() 立刻返回——那会让
-        # 输入闸过早打开、模型抢在录音播完前就应答客户的"喂"（本次真机复现的 bug）。
+        total = len(self._data) // 480  # 帧总数（每帧 10ms）
+        dur = total * 0.01
+        logger.info("固定开场白开始播放（%.1fs，%d帧）", dur, total)
+        # 墙钟驱动：循环条件是"真实时间未到结尾"，而非帧索引跑完。每次按当前经过
+        # 的时间算出"该发到第几帧"，把欠的帧补发出去，然后睡 10ms。无论 capture_frame
+        # 是否自阻塞，都保证 play() 跑满 dur 秒才返回——避免音频一次性灌进缓冲、
+        # play() 秒返回、输入闸过早打开、模型抢答客户"喂"（真机复现过的 bug）。
         start = _t.monotonic()
-        n = 0
-        for i in range(0, len(self._data), 480):
-            if self._stop:
-                logger.info("开场白被客户说话打断，停止播放（已播 %.1fs）", _t.monotonic() - start)
+        next_frame = 0
+        while not self._stop:
+            now = _t.monotonic()
+            due = int((now - start) / 0.01)
+            while next_frame <= due and next_frame < total:
+                chunk = self._data[next_frame * 480:(next_frame + 1) * 480]
+                if len(chunk) < 480:
+                    chunk += b"\x00" * (480 - len(chunk))
+                await src.capture_frame(
+                    rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
+                )
+                next_frame += 1
+            if next_frame >= total:
                 break
-            chunk = self._data[i:i + 480]
-            if len(chunk) < 480:
-                chunk += b"\x00" * (480 - len(chunk))
-            await src.capture_frame(
-                rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
-            )
-            n += 1
-            target = start + n * 0.01
-            lag = target - _t.monotonic()
-            if lag > 0:
-                await asyncio.sleep(lag)
-        logger.info("固定开场白播放结束（实际 %.1fs）", _t.monotonic() - start)
+            await asyncio.sleep(0.01)
+        played = _t.monotonic() - start
+        if self._stop:
+            logger.info("开场白被客户说话打断（已播 %.1fs / %d帧）", played, next_frame)
+        else:
+            logger.info("固定开场白播放结束（实际 %.1fs，发出 %d帧）", played, next_frame)
 
 
 class OutboundAgent(Agent):
@@ -298,7 +303,17 @@ async def entrypoint(ctx: JobContext):
             await asyncio.sleep(delay)
         logger.info("主动挂断: %s", reason)
         try:
-            await ctx.api.room.delete_room(lk_api.DeleteRoomRequest(room=ctx.room.name))
+            # 【2026-07-09 修道别挂断失效】不能用 ctx.api：从 session 事件回调
+            # create_task 出来的协程没有 job 的 http 上下文，ctx.api 懒建 aiohttp
+            # session 会抛 "outside of a job context"，房间删不掉（真机复现，
+            # 表现为 AI 道完别电话不挂，只能等客户挂/watchdog）。
+            # 自建 LiveKitAPI（读 LIVEKIT_URL/API_KEY/API_SECRET 环境变量，
+            # 内部自管 ClientSession），不依赖 job 上下文。
+            lkapi = lk_api.LiveKitAPI()
+            try:
+                await lkapi.room.delete_room(lk_api.DeleteRoomRequest(room=ctx.room.name))
+            finally:
+                await lkapi.aclose()
         except Exception as e:
             logger.warning("删除房间失败: %s", e)
 
