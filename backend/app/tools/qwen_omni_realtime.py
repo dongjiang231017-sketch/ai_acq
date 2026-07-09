@@ -102,11 +102,11 @@ class QwenOmniRealtimeSession(RealtimeSession):
         self._pending_auto_reply_timer: Optional[asyncio.TimerHandle] = None
         self._wait_connected = threading.Event()
         # 【2026-07-09 暗坑3】DashScope 在 server_vad 模式下、输入音频流活跃时，
-        # 会静默忽略手动 conversation.item.create + response.create（开场白因此
-        # 间歇性不响，探针 probe_v2.py 可复现）。修法：开场白（首个 response）
-        # 完成前不向服务端喂输入音频。代价：开场那几秒检测不到客户插话，可接受。
-        self._first_response_done = False
-        self._input_gate_deadline = time.monotonic() + 12.0  # 失效保护：12s 后强制放开
+        # 会静默忽略手动 response.create（探针 probe_v2.py 可复现）。
+        # 修法：存在未完成的 generate_reply（手动生成请求）期间不喂输入音频，
+        # response.created 一到（future 被消费）立刻放行。没有手动请求时完全不拦
+        # ——固定录音开场白模式下客户第一句话不能被挡。
+        self._input_gate_deadline = time.monotonic() + 12.0  # 失效保护：12s 后无条件放开
         self._connect()
 
     @property
@@ -272,8 +272,6 @@ class QwenOmniRealtimeSession(RealtimeSession):
             )
 
     def _handle_response_done(self):
-        # 开场白（首个 response）完成，放开输入音频门控（暗坑3）
-        self._first_response_done = True
         self._flush_audio_buf()
         if self._current_gen:
             if not self._current_gen.modalities_fut.done():
@@ -354,8 +352,11 @@ class QwenOmniRealtimeSession(RealtimeSession):
 
     # ===== RealtimeSession 抽象方法 =====
     def push_audio(self, frame: rtc.AudioFrame) -> None:
-        # 开场白完成前不喂音频（见 __init__ 的暗坑3注释），防止手动 response.create 被丢
-        if not self._first_response_done and time.monotonic() < self._input_gate_deadline:
+        # 手动 generate_reply 在途时不喂音频（见 __init__ 的暗坑3注释）
+        if (
+            any(not f.done() for f in self._reply_futures.values())
+            and time.monotonic() < self._input_gate_deadline
+        ):
             return
         try:
             pcm = frame.data
