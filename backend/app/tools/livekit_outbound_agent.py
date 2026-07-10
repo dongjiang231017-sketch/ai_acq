@@ -23,18 +23,27 @@ load_dotenv()
 _MAX_CALL_SECONDS = int(os.getenv("LIVEKIT_MAX_CALL_SECONDS", "300"))
 
 # AI 结束语匹配：说完这些话且客户没有再开口，就主动挂断（解决"AI 说完再见不挂机"）。
-_FAREWELL_PATTERN = re.compile(r"再见|拜拜|不多打扰|不打扰(?:了|您)?|感谢接听|您先忙|生意兴隆")
+_FAREWELL_PATTERN = re.compile(
+    r"再见|拜拜|微信见|回头见|下次再聊|有空再聊|"
+    r"不多打扰|不打扰(?:了|您)?|感谢接听|您先忙|生意兴隆"
+)
 # 结束语播完后留给客户反悔的窗口秒数，窗口内客户开口则取消挂机继续对话。
 _HANGUP_GRACE_SECONDS = float(os.getenv("LIVEKIT_HANGUP_GRACE_SECONDS", "1.5"))
 
-# 固定开场白录音：接通即播、一字不差、可被客户说话打断。
-# 为什么不用模型说开场白：DashScope 对空上下文的 response.create 静默忽略
-# （2026-07-09 真机复现：generate_reply 后 7.5s 无响应，直到客户先开口"喂"），
-# Workbuddy 台子同日已验证固定录音方案。默认路径 backend/assets/opening.wav。
+# Legacy Omni 仅保留固定开场白录音兜底；Pipeline 开场与动态回复
+# 都走同一 CosyVoice 克隆 TTS。默认录音路径 backend/assets/opening.wav。
 _CONFIGURED_OPENING_WAV_PATH = os.getenv("OPENING_WAV_PATH", "").strip()
 _FALLBACK_OPENING_WAV_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "opening.wav"
 )
+_PIPELINE_MODE = "pipeline_clone"
+
+
+def _normalize_agent_mode(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"omni", "qwen_omni", "openai_realtime_legacy"}:
+        return "omni"
+    return _PIPELINE_MODE
 
 
 def _opening_wav_path() -> str:
@@ -119,6 +128,83 @@ class _OpeningPlayer:
                 pass
 
 
+class _RtpSilenceKeepalive:
+    """Publish silence continuously so the SIP mixer never runs out of RTP."""
+
+    def __init__(self, room: Any) -> None:
+        self._room = room
+        self._source: Any = None
+        self._publication: Any = None
+        self._task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+        self.frames_sent = 0
+
+    async def start(self) -> None:
+        from livekit import rtc
+
+        self._source = rtc.AudioSource(24000, 1)
+        track = rtc.LocalAudioTrack.create_audio_track("rtp_keepalive", self._source)
+        self._publication = await self._room.local_participant.publish_track(
+            track,
+            rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_UNKNOWN),
+        )
+        self._task = asyncio.create_task(self._run(), name="livekit_rtp_silence_keepalive")
+
+    async def _run(self) -> None:
+        from livekit import rtc
+
+        frame = rtc.AudioFrame(
+            data=b"\x00" * 960,
+            sample_rate=24000,
+            num_channels=1,
+            samples_per_channel=480,
+        )
+        loop = asyncio.get_running_loop()
+        next_frame_at = loop.time()
+        while not self._stop.is_set():
+            await self._source.capture_frame(frame)
+            self.frames_sent += 1
+            next_frame_at += 0.02
+            now = loop.time()
+            if next_frame_at < now - 0.1:
+                next_frame_at = now
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=max(0.001, next_frame_at - now))
+            except asyncio.TimeoutError:
+                pass
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await asyncio.wait_for(self._task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+            self._task = None
+        if self._publication is not None:
+            try:
+                await asyncio.wait_for(
+                    self._room.local_participant.unpublish_track(self._publication.sid),
+                    timeout=2.0,
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+            self._publication = None
+        if self._source is not None:
+            try:
+                await asyncio.wait_for(self._source.aclose(), timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+            self._source = None
+
+
 async def entrypoint(ctx: Any) -> None:
     from livekit import api
     from livekit.agents import Agent, AgentSession, inference, room_io
@@ -133,7 +219,8 @@ async def entrypoint(ctx: Any) -> None:
     trunk_id = str(metadata.get("sipOutboundTrunkId") or settings.livekit_sip_outbound_trunk_id).strip()
     merchant_name = str(metadata.get("merchantName") or "您的门店")
     opening_text = str(metadata.get("openingText") or VIDEO_GROUP_BUYING_OPENING_A)
-    agent_mode = str(metadata.get("agentMode") or settings.livekit_agent_mode or "openai_realtime").strip().lower()
+    requested_agent_mode = str(metadata.get("agentMode") or settings.livekit_agent_mode or _PIPELINE_MODE)
+    agent_mode = _normalize_agent_mode(requested_agent_mode)
     call_direction = "outbound" if dial_phone else "inbound"
 
     _emit_livekit_event(
@@ -148,9 +235,70 @@ async def entrypoint(ctx: Any) -> None:
     )
     await ctx.connect()
 
+    rtp_keepalive = _RtpSilenceKeepalive(ctx.room)
+    try:
+        await rtp_keepalive.start()
+    except Exception as exc:  # noqa: BLE001
+        _emit_livekit_event(
+            "rtp_keepalive_error",
+            callId=action_id,
+            roomName=room_name,
+            error=str(exc),
+            detail="RTP 静音保活轨发布失败，为避免 media-timeout，本通不继续建呼。",
+        )
+        ctx.shutdown("rtp_keepalive_start_failed")
+        return
+
+    async def _stop_rtp_keepalive(reason: str = "") -> None:
+        await rtp_keepalive.stop()
+        _emit_livekit_event(
+            "rtp_keepalive_stopped",
+            callId=action_id,
+            roomName=room_name,
+            reason=reason,
+            frames=rtp_keepalive.frames_sent,
+        )
+
+    ctx.add_shutdown_callback(_stop_rtp_keepalive)
+    _emit_livekit_event(
+        "rtp_keepalive_started",
+        callId=action_id,
+        roomName=room_name,
+        sampleRate=24000,
+        frameMs=20,
+        detail="已发布全程静音保活轨，持续保持 SIP RTP 媒体流。",
+    )
+
     instructions = _build_agent_instructions(merchant_name=merchant_name)
     session = _build_agent_session(inference=inference, agent_mode=agent_mode, instructions=instructions)
     agent = Agent(instructions=instructions)
+
+    for component_name, component in (("stt", session.stt), ("llm", session.llm), ("tts", session.tts)):
+        if component is None:
+            continue
+
+        def _on_metrics(metrics: Any, *, name: str = component_name, target_component: Any = component) -> None:
+            payload: dict[str, Any] = {
+                "callId": action_id,
+                "roomName": room_name,
+                "component": name,
+                "provider": str(getattr(target_component, "provider", "")),
+                "model": str(getattr(target_component, "model", "")),
+            }
+            for source, target in (
+                ("ttfb", "ttfbMs"),
+                ("duration", "durationMs"),
+                ("audio_duration", "audioDurationMs"),
+            ):
+                value = getattr(metrics, source, None)
+                if isinstance(value, (int, float)) and value >= 0:
+                    payload[target] = int(value * 1000)
+            _emit_livekit_event("pipeline_component_metrics", **payload)
+
+        try:
+            component.on("metrics_collected", _on_metrics)
+        except Exception:  # noqa: BLE001
+            pass
 
     # 转向延迟打点（对齐 livekit-poc/agent/main.py）：客户停→AI出声的真实延迟，
     # 待办6 两线路 A/B 对比就看这个事件的 P50/P95，没有它对比无数据可用。
@@ -162,6 +310,7 @@ async def entrypoint(ctx: Any) -> None:
     last_activity = {"t": time.monotonic()}
     last_agent_state = {"v": ""}
     call_started = {"t": 0.0}
+    done = asyncio.Event()
 
     async def _hangup(
         reason: str,
@@ -187,6 +336,7 @@ async def entrypoint(ctx: Any) -> None:
         if detail:
             event_payload["detail"] = detail
         _emit_livekit_event(event_name, **event_payload)
+        success = True
         try:
             # 不能用 ctx.api：session 事件回调里 create_task 出来的协程没有 job 的
             # http 上下文，ctx.api 懒建 aiohttp session 会抛 "outside of a job context"，
@@ -209,6 +359,7 @@ async def entrypoint(ctx: Any) -> None:
             finally:
                 await lkapi.aclose()
         except Exception as exc:  # noqa: BLE001
+            success = False
             _emit_livekit_event(
                 error_event_name,
                 callId=action_id,
@@ -217,10 +368,10 @@ async def entrypoint(ctx: Any) -> None:
                 error=str(exc),
                 detail="主动挂断失败，等待客户侧挂机或通话上限收尾。",
             )
-            return False
-        if shutdown_reason:
+        if shutdown_reason and success:
+            done.set()
             ctx.shutdown(shutdown_reason)
-        return True
+        return success
 
     def _cancel_farewell_hangup() -> None:
         hangup_state["pending"] = False
@@ -282,6 +433,20 @@ async def entrypoint(ctx: Any) -> None:
             last_user_stop["t"] = 0.0
         if new_state in {"listening", "idle"} and hangup_state["pending"] and hangup_state["task"] is None:
             hangup_state["task"] = asyncio.create_task(_hangup_after_grace())
+
+    @session.on("close")
+    def _on_session_close(ev: Any) -> None:
+        reason = str(getattr(ev, "reason", "") or "agent_session_closed")
+        _emit_livekit_event(
+            "livekit_agent_session_closed",
+            callId=action_id,
+            roomName=room_name,
+            reason=reason,
+        )
+        if not done.is_set():
+            done.set()
+            ctx.shutdown(reason)
+
     room_input_kwargs: dict[str, Any] = {
         "pre_connect_audio": True,
         "pre_connect_audio_timeout": 5.0,
@@ -390,51 +555,54 @@ async def entrypoint(ctx: Any) -> None:
             error=str(exc),
         )
 
-    # 开场白：优先固定录音（接通即播、消除 2026-07-09 真机复现的 7.5s 空窗），
-    # 无录音才退回 generate_reply 兜底（DashScope 对空上下文 response.create 静默
-    # 忽略，兜底模式下 AI 可能等客户先开口才响应）。
+    # Pipeline 开场直接走同一个 CosyVoice TTS，保证开场和后续回复音色一致。
+    # 仅显式选择 legacy Omni 时保留固定录音兜底。
     call_started["t"] = time.monotonic()
-    opening_player: _OpeningPlayer | None = None
-    opening_wav_path = _opening_wav_path()
-    if os.path.exists(opening_wav_path):
-        try:
-            opening_player = _OpeningPlayer(ctx.room, opening_wav_path)
-        except Exception as exc:  # noqa: BLE001
-            _emit_livekit_event("opening_wav_load_error", callId=action_id, roomName=room_name, error=str(exc))
-    if opening_player is not None:
-        _llm_for_opening = getattr(session, "llm", None) or getattr(session, "_llm", None)
-        _rt_for_opening = getattr(_llm_for_opening, "last_session", None)
-        if _rt_for_opening is not None:
-            try:
-                # 客户开口（服务端 VAD speech_started）立即停掉开场白录音
-                _rt_for_opening.on("input_speech_started", lambda *_: opening_player.stop())
-            except Exception:  # noqa: BLE001
-                pass
-        asyncio.create_task(opening_player.play())
+    if agent_mode == _PIPELINE_MODE:
+        session.say(opening_text, allow_interruptions=True, add_to_chat_ctx=True)
         _emit_livekit_event(
             "tts_start",
             callId=action_id,
             roomName=room_name,
-            provider="livekit_agent",
+            provider="dashscope_cosyvoice_pipeline",
             text=opening_text,
-            detail="播放固定开场白录音（接通即播，可被客户说话打断）。",
+            detail="开场白通过 Pipeline 克隆 TTS 播放，后续回复使用同一音色。",
         )
     else:
-        session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
-        _emit_livekit_event(
-            "tts_start",
-            callId=action_id,
-            roomName=room_name,
-            provider="livekit_agent",
-            text=opening_text,
-            detail="未找到开场白录音，退回 generate_reply（可能等客户先开口才响应）。",
-        )
+        opening_player: _OpeningPlayer | None = None
+        opening_wav_path = _opening_wav_path()
+        if os.path.exists(opening_wav_path):
+            try:
+                opening_player = _OpeningPlayer(ctx.room, opening_wav_path)
+            except Exception as exc:  # noqa: BLE001
+                _emit_livekit_event("opening_wav_load_error", callId=action_id, roomName=room_name, error=str(exc))
+        if opening_player is not None:
+            asyncio.create_task(opening_player.play())
+            _emit_livekit_event(
+                "tts_start",
+                callId=action_id,
+                roomName=room_name,
+                provider="legacy_omni_opening",
+                text=opening_text,
+                detail="Legacy Omni 使用固定开场录音。",
+            )
+        else:
+            session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
 
     # ---- 意向标记（对齐 bench：AI 问过微信 + 客户同意 => 落库）----
     # 注：conversation_log / call_state 已在 session 启动后、customer_joined 前定义
     wechat_ask = {"pending": 0, "ai_text": ""}
     lead_marked = {"v": False}
-    _WECHAT_HINTS = ("微信", "加您", "加个微信", "加一下")
+    _WECHAT_HINTS = (
+        "加您微信",
+        "加你微信",
+        "加个微信",
+        "加一下微信",
+        "这个号就是微信",
+        "这号是微信",
+        "手机号是微信",
+        "号码是微信",
+    )
     # 判定顺序先拒绝后同意："不对/不是"先被拒绝分支拦住，"对/是的"才能安全进同意词表
     _AGREE_WORDS = ("可以", "行", "好的", "好啊", "嗯", "加吧", "发吧", "就是微信", "是微信",
                     "同意", "没问题", "对", "是的", "对的", "嗯嗯", "方便")
@@ -505,7 +673,12 @@ async def entrypoint(ctx: Any) -> None:
         item = getattr(ev, "item", None)
         role = str(getattr(item, "role", ""))
         text = str(getattr(item, "text_content", "") or "")
-        if role != "assistant" or not text:
+        if not text:
+            return
+        if role == "user":
+            _on_user_transcript(text)
+            return
+        if role != "assistant":
             return
         conversation_log.append(f"AI：{text}")
         # 实时字幕流：AI 侧回复推给前端实时监听页
@@ -520,8 +693,6 @@ async def entrypoint(ctx: Any) -> None:
             wechat_ask["pending"] = 2  # 给客户 2 轮回应窗口
             wechat_ask["ai_text"] = text
         _arm_farewell_hangup(text)
-
-    done = asyncio.Event()
 
     def _persist_call() -> None:
         """通话结束落库：CallRecord + 线索状态 + 意向池 + 工单 + 勿扰（需求 7.7.7/7.7.9）。"""
@@ -618,12 +789,22 @@ async def entrypoint(ctx: Any) -> None:
                 limitSeconds=_MAX_CALL_SECONDS,
                 detail="到达单通电话硬上限，主动收尾（防语音信箱/静默线路空耗计费）。",
             )
-            await _hangup(f"硬上限 {_MAX_CALL_SECONDS}s")
-            ctx.shutdown("max_call_seconds_reached")
+            ended = await _hangup(
+                f"硬上限 {_MAX_CALL_SECONDS}s",
+                shutdown_reason="max_call_seconds_reached",
+            )
+            if not ended:
+                done.set()
+                ctx.shutdown("max_call_seconds_reached")
             break
         if time.monotonic() - last_activity["t"] > idle_hangup_seconds:
-            await _hangup(f"双方静默超 {idle_hangup_seconds:.0f}s")
-            ctx.shutdown("idle_timeout")
+            ended = await _hangup(
+                f"双方静默超 {idle_hangup_seconds:.0f}s",
+                shutdown_reason="idle_timeout",
+            )
+            if not ended:
+                done.set()
+                ctx.shutdown("idle_timeout")
             break
     await done.wait()
 
@@ -631,8 +812,8 @@ async def entrypoint(ctx: Any) -> None:
 def _build_agent_session(*, inference: Any, agent_mode: str, instructions: str = "") -> Any:
     from livekit.agents import APIConnectOptions
 
-    if agent_mode == "inference":
-        return _build_inference_agent_session(inference)
+    if agent_mode == _PIPELINE_MODE:
+        return _build_pipeline_clone_agent_session(inference)
     return _build_openai_realtime_agent_session(
         connect_options=APIConnectOptions(max_retry=2, retry_interval=0.8, timeout=8.0),
         instructions=instructions,
@@ -710,29 +891,58 @@ def _build_openai_realtime_agent_session(*, connect_options: Any, instructions: 
     )
 
 
-def _build_inference_agent_session(inference: Any) -> Any:
+def _build_pipeline_clone_agent_session(inference: Any) -> Any:
     from livekit.agents import AgentSession
+    from livekit.plugins import openai
 
-    tts_voice = settings.livekit_agent_tts_voice.strip()
+    from app.tools.livekit_cosyvoice_tts import CosyVoiceTTS
+    from app.tools.livekit_dashscope_stt import DashScopeSTT
+
+    runtime_config = get_runtime_ai_config()
+    if not runtime_config.dashscope_api_key.strip():
+        raise RuntimeError("Pipeline clone requires a DashScope API key")
+    if not runtime_config.realtime_tts_voice_id.strip():
+        raise RuntimeError("Pipeline clone requires a configured clone voice id")
+
+    asr_model = runtime_config.realtime_asr_model.strip()
+    if not asr_model.startswith("paraformer-realtime"):
+        asr_model = "paraformer-realtime-8k-v2"
+
+    if runtime_config.deepseek_api_key.strip():
+        llm_model = runtime_config.deepseek_chat_model.strip() or "deepseek-chat"
+        llm_base_url = runtime_config.deepseek_base_url.strip() or "https://api.deepseek.com"
+        llm_api_key = runtime_config.deepseek_api_key.strip()
+    else:
+        llm_model = os.getenv("LIVEKIT_PIPELINE_LLM_MODEL", "qwen-flash").strip() or "qwen-flash"
+        llm_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        llm_api_key = runtime_config.dashscope_api_key.strip()
+
     return AgentSession(
-        stt=inference.STT(
-            model=settings.livekit_agent_stt_model.strip() or "deepgram/flux-general-multi",
-            language=settings.livekit_agent_stt_language.strip() or "multi",
+        stt=DashScopeSTT(
+            api_key=runtime_config.dashscope_api_key,
+            model=asr_model,
+            workspace=runtime_config.dashscope_workspace,
         ),
-        llm=inference.LLM(model=settings.livekit_agent_llm_model.strip() or "openai/gpt-5-mini"),
-        tts=(
-            inference.TTS(model=settings.livekit_agent_tts_model.strip() or "elevenlabs/eleven_multilingual_v2", voice=tts_voice)
-            if tts_voice
-            else inference.TTS(model=settings.livekit_agent_tts_model.strip() or "elevenlabs/eleven_multilingual_v2")
+        llm=openai.LLM(
+            model=llm_model,
+            api_key=llm_api_key,
+            base_url=llm_base_url,
+            temperature=0.35,
         ),
-        vad=inference.VAD(model="silero", min_speech_duration=0.05, min_silence_duration=0.2),
+        tts=CosyVoiceTTS(
+            api_key=runtime_config.dashscope_api_key,
+            model=runtime_config.dashscope_tts_model or "cosyvoice-v3.5-flash",
+            voice_id=runtime_config.realtime_tts_voice_id,
+            workspace=runtime_config.dashscope_workspace,
+        ),
+        vad=inference.VAD(model="silero", min_speech_duration=0.05, min_silence_duration=0.3),
         allow_interruptions=True,
         min_interruption_duration=0.12,
         min_interruption_words=1,
         min_endpointing_delay=0.14,
         max_endpointing_delay=0.7,
         preemptive_generation=True,
-        user_away_timeout=12.0,
+        user_away_timeout=20.0,
     )
 
 
@@ -749,6 +959,7 @@ def _build_agent_instructions(*, merchant_name: str) -> str:
         "商家名称整通电话最多说一次（开场提一下即可），之后一律用「您」称呼对方，禁止每句话重复商家名。"
         "同一个问题整通电话最多问一次（比如「想看案例还是看门店方案」），客户没有正面回答就换个角度说，或直接推进到加微信，禁止原样复读。"
         "客户报出或更正微信号/手机号后，必须复述最新号码请客户确认；客户再次补充或更正时，以最新说法为准重新复述确认，号码未经客户确认不得道别。"
+        "客户明确说「再见」「拜拜」或表示要结束通话时，只用一句包含「再见」的话礼貌道别，不再提问或延展话题。"
     )
 
 

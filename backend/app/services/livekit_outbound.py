@@ -18,6 +18,16 @@ class LiveKitOutboundError(RuntimeError):
     pass
 
 
+_PIPELINE_MODE = "pipeline_clone"
+
+
+def _normalize_livekit_agent_mode(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"omni", "qwen_omni", "openai_realtime_legacy"}:
+        return "omni"
+    return _PIPELINE_MODE
+
+
 @dataclass(frozen=True)
 class LiveKitOutboundResult:
     accepted: bool
@@ -31,7 +41,7 @@ class LiveKitOutboundResult:
 
 
 def livekit_config_status() -> dict[str, object]:
-    mode = (settings.livekit_agent_mode or "openai_realtime").strip().lower()
+    mode = _normalize_livekit_agent_mode(settings.livekit_agent_mode or _PIPELINE_MODE)
     runtime_config = get_runtime_ai_config()
     realtime_base_url = settings.livekit_openai_realtime_base_url.strip() or runtime_config.dashscope_omni_realtime_url.strip()
     realtime_provider = "qwen_omni_realtime" if _looks_like_dashscope_realtime_url(realtime_base_url) else "openai_realtime"
@@ -39,6 +49,11 @@ def livekit_config_status() -> dict[str, object]:
         settings.livekit_openai_realtime_api_key.strip()
         or settings.openai_api_key.strip()
         or runtime_config.dashscope_api_key.strip()
+    )
+    pipeline_ready = bool(
+        runtime_config.dashscope_api_key.strip()
+        and runtime_config.realtime_asr_model.strip()
+        and runtime_config.realtime_tts_voice_id.strip()
     )
     configured = bool(
         settings.livekit_url.strip()
@@ -48,7 +63,7 @@ def livekit_config_status() -> dict[str, object]:
         and settings.livekit_sip_outbound_trunk_id.strip()
     )
     inference_ready = bool(settings.livekit_agent_stt_model.strip() and settings.livekit_agent_llm_model.strip() and settings.livekit_agent_tts_model.strip())
-    agent_ready = inference_ready if mode == "inference" else realtime_key_configured
+    agent_ready = pipeline_ready if mode == _PIPELINE_MODE else realtime_key_configured
     return {
         "configured": configured,
         "agentReady": agent_ready,
@@ -56,6 +71,10 @@ def livekit_config_status() -> dict[str, object]:
         "realtimeProvider": realtime_provider,
         "realtimeBaseUrlConfigured": bool(realtime_base_url),
         "realtimeKeyConfigured": realtime_key_configured,
+        "pipelineCloneReady": pipeline_ready,
+        "pipelineDashscopeKeyConfigured": bool(runtime_config.dashscope_api_key.strip()),
+        "pipelineAsrModelConfigured": bool(runtime_config.realtime_asr_model.strip()),
+        "pipelineCloneVoiceConfigured": bool(runtime_config.realtime_tts_voice_id.strip()),
         "urlConfigured": bool(settings.livekit_url.strip()),
         "apiKeyConfigured": bool(settings.livekit_api_key.strip()),
         "apiSecretConfigured": bool(settings.livekit_api_secret.strip()),
@@ -78,10 +97,15 @@ def require_livekit_outbound_ready() -> None:
         missing.append("LIVEKIT_API_SECRET")
     if not status["sipOutboundTrunkConfigured"]:
         missing.append("LIVEKIT_SIP_OUTBOUND_TRUNK_ID")
-    if status["mode"] == "openai_realtime" and not status["realtimeKeyConfigured"]:
+    if status["mode"] == "omni" and not status["realtimeKeyConfigured"]:
         missing.append("OPENAI_API_KEY / LIVEKIT_OPENAI_REALTIME_API_KEY / DASHSCOPE_API_KEY")
-    if status["mode"] == "inference" and not status["inferenceModelsConfigured"]:
-        missing.append("LIVEKIT_AGENT_STT_MODEL / LIVEKIT_AGENT_LLM_MODEL / LIVEKIT_AGENT_TTS_MODEL")
+    if status["mode"] == _PIPELINE_MODE:
+        if not status["pipelineDashscopeKeyConfigured"]:
+            missing.append("DASHSCOPE_API_KEY")
+        if not status["pipelineAsrModelConfigured"]:
+            missing.append("REALTIME_ASR_MODEL")
+        if not status["pipelineCloneVoiceConfigured"]:
+            missing.append("REALTIME_TTS_VOICE_ID / 运行时克隆音色")
     if missing:
         raise LiveKitOutboundError("LiveKit 外呼未配置完整：" + "、".join(missing))
 
@@ -129,7 +153,7 @@ def dispatch_livekit_outbound_call(
         "merchantName": merchant_name,
         "roomName": room_name,
         "participantIdentity": participant_identity,
-        "agentMode": settings.livekit_agent_mode.strip().lower() or "openai_realtime",
+        "agentMode": _normalize_livekit_agent_mode(settings.livekit_agent_mode or _PIPELINE_MODE),
         "taskId": task_id or "",
         "leadId": lead_id or "",
         "sipOutboundTrunkId": settings.livekit_sip_outbound_trunk_id.strip(),
@@ -237,7 +261,7 @@ def build_livekit_test_call_response(result: LiveKitOutboundResult) -> dict[str,
             "actionItems": [
                 "启动：python -m app.tools.livekit_outbound_agent dev",
                 "确认 LIVEKIT_URL/API_KEY/API_SECRET 和 LIVEKIT_SIP_OUTBOUND_TRUNK_ID 已配置。",
-                "如果使用 openai_realtime，确认 OPENAI_API_KEY、LIVEKIT_OPENAI_REALTIME_API_KEY 或 DASHSCOPE_API_KEY 至少配置一个。",
+                "确认 Pipeline 的 DASHSCOPE_API_KEY、Paraformer ASR 模型和 CosyVoice 克隆音色已配置。",
             ],
             "technicalDetail": result.raw_payload[:1000],
             "canRetry": True,
