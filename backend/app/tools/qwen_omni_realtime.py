@@ -400,6 +400,11 @@ class QwenOmniRealtimeSession(RealtimeSession):
         eid = self._eid()
         fut = self._loop.create_future()
         self._reply_futures[eid] = fut
+        # 每次手动发言（开场或无人回应确认）都重新开启输入闸。
+        # 原先 deadline 只在会话创建时设一次，12s 后的手动 response.create
+        # 会被持续输入音频干扰而静默忽略。response.created 到达后 future
+        # 会立即完成，push_audio 随即恢复，不影响客户打断。
+        self._input_gate_deadline = time.monotonic() + 10.0
         # DashScope 对"空上下文 + 手动 response.create"不响应（开场白因此从来没播过）。
         # 修法：先塞一条用户文本 item 进对话，再让模型响应它。
         if instructions is not NOT_GIVEN and instructions:

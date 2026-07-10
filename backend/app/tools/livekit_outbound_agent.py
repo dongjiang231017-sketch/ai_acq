@@ -38,10 +38,38 @@ _HANGUP_GRACE_SECONDS = float(os.getenv("LIVEKIT_HANGUP_GRACE_SECONDS", "1.5"))
 
 _QWEN_OMNI_MODE = "omni"
 _ACTIVE_AGENT_STATES = {"speaking", "thinking"}
+_SILENCE_PROBE_WAIT_SECONDS = float(os.getenv("LIVEKIT_SILENCE_PROBE_WAIT_SECONDS", "8"))
+_SILENCE_PROBE_INSTRUCTIONS = (
+    (
+        "关心、轻柔",
+        "用关心、轻柔的口气，语速稍慢，每个字都说清楚。"
+        "只说这一句，不要添加其他内容：老板，您还在吗？",
+    ),
+    (
+        "稍提高音量、仍然礼貌",
+        "用稍微提高音量、仍然礼貌的口气，停顿自然，咬字清楚。"
+        "只说这一句，不要添加其他内容：喂，老板，您能听到我说话吗？",
+    ),
+    (
+        "耐心、郑重地最后确认",
+        "用耐心、郑重地最后确认的口气，放慢语速，不吞字。"
+        "只说这一句，不要添加其他内容：老板，我最后确认一下，您还在听吗？",
+    ),
+)
 
 
 def _conversation_turn_in_progress(agent_state: str, user_state: str) -> bool:
     return agent_state in _ACTIVE_AGENT_STATES or user_state == "speaking"
+
+
+def _assistant_turn_expects_reply(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean or _FAREWELL_PATTERN.search(clean):
+        return False
+    return bool(
+        re.search(r"[？?](?:[\s”’'\"]*)$", clean)
+        or re.search(r"(?:吗|呢|行不行|可不可以)(?:[。！？!?\s”’'\"]*)$", clean)
+    )
 
 
 def _normalize_agent_mode(value: str) -> str:
@@ -230,11 +258,61 @@ async def entrypoint(ctx: Any) -> None:
     # ---- 三层挂断基础设施（对齐 bench_agent_reference.py：道别/静默/硬上限）----
     hangup_flag = {"v": False}
     hangup_state: dict[str, Any] = {"pending": False, "task": None}
-    last_activity = {"t": time.monotonic()}
     last_agent_state = {"v": ""}
     last_user_state = {"v": ""}
+    silence_probe_state: dict[str, Any] = {
+        "attempts": 0,
+        "eligible": False,
+        "waiting_since": 0.0,
+        "prompt_in_flight": False,
+    }
     call_started = {"t": 0.0}
     done = asyncio.Event()
+
+    def _reset_silence_probe() -> None:
+        silence_probe_state.update(
+            attempts=0,
+            eligible=False,
+            waiting_since=0.0,
+            prompt_in_flight=False,
+        )
+
+    def _arm_silence_probe_wait() -> None:
+        if not silence_probe_state["eligible"] or hangup_state["pending"]:
+            return
+        if _conversation_turn_in_progress(last_agent_state["v"], last_user_state["v"]):
+            return
+        silence_probe_state["waiting_since"] = time.monotonic()
+
+    def _request_next_silence_probe() -> None:
+        attempt = int(silence_probe_state["attempts"]) + 1
+        tone, probe_instruction = _SILENCE_PROBE_INSTRUCTIONS[attempt - 1]
+        silence_probe_state.update(
+            attempts=attempt,
+            eligible=True,
+            waiting_since=time.monotonic(),
+            prompt_in_flight=True,
+        )
+        try:
+            session.generate_reply(instructions=probe_instruction)
+            _emit_livekit_event(
+                "livekit_silence_probe",
+                callId=action_id,
+                roomName=room_name,
+                attempt=attempt,
+                tone=tone,
+                waitSeconds=_SILENCE_PROBE_WAIT_SECONDS,
+                detail=f"客户未回应，Qwen Omni 正在进行第 {attempt} 次在线确认。",
+            )
+        except Exception as exc:  # noqa: BLE001
+            silence_probe_state["prompt_in_flight"] = False
+            _emit_livekit_event(
+                "livekit_silence_probe_error",
+                callId=action_id,
+                roomName=room_name,
+                attempt=attempt,
+                error=str(exc),
+            )
 
     async def _hangup(
         reason: str,
@@ -337,9 +415,9 @@ async def entrypoint(ctx: Any) -> None:
     def _on_user_state(ev: Any) -> None:
         new_state = str(getattr(ev, "new_state", ""))
         last_user_state["v"] = new_state
-        last_activity["t"] = time.monotonic()
         if new_state == "speaking":
             _cancel_farewell_hangup()
+            _reset_silence_probe()
         if new_state == "listening":
             last_user_stop["t"] = time.perf_counter()
 
@@ -347,7 +425,6 @@ async def entrypoint(ctx: Any) -> None:
     def _on_agent_state(ev: Any) -> None:
         new_state = str(getattr(ev, "new_state", ""))
         last_agent_state["v"] = new_state
-        last_activity["t"] = time.monotonic()
         if new_state == "speaking" and last_user_stop["t"]:
             _emit_livekit_event(
                 "turn_latency",
@@ -358,6 +435,8 @@ async def entrypoint(ctx: Any) -> None:
             last_user_stop["t"] = 0.0
         if new_state in {"listening", "idle"} and hangup_state["pending"] and hangup_state["task"] is None:
             hangup_state["task"] = asyncio.create_task(_hangup_after_grace())
+        if new_state in {"listening", "idle"}:
+            _arm_silence_probe_wait()
 
     @session.on("close")
     def _on_session_close(ev: Any) -> None:
@@ -534,7 +613,7 @@ async def entrypoint(ctx: Any) -> None:
         if transcript_dedupe["text"] == fingerprint and now - transcript_dedupe["at"] < 0.8:
             return
         transcript_dedupe.update(text=fingerprint, at=now)
-        last_activity["t"] = now
+        _reset_silence_probe()
         conversation_log.append(f"客户：{text}")
         intent, _node = _classify_intent(text)
         signal = classify_realtime_call_input(text)
@@ -596,6 +675,17 @@ async def entrypoint(ctx: Any) -> None:
             return
         if role != "assistant":
             return
+        was_silence_probe = bool(silence_probe_state["prompt_in_flight"])
+        silence_probe_state["prompt_in_flight"] = False
+        silence_probe_state["eligible"] = (
+            (was_silence_probe and not _FAREWELL_PATTERN.search(text))
+            or _assistant_turn_expects_reply(text)
+        )
+        silence_probe_state["waiting_since"] = 0.0
+        if silence_probe_state["eligible"]:
+            _arm_silence_probe_wait()
+        elif not was_silence_probe:
+            silence_probe_state["attempts"] = 0
         conversation_log.append(f"AI：{text}")
         sales_fsm.record_assistant_reply(text)
         _emit_livekit_event(
@@ -684,7 +774,8 @@ async def entrypoint(ctx: Any) -> None:
     call_started["t"] = time.monotonic()
     session.generate_reply(
         instructions=(
-            "你现在直接向电话里的客户说开场白。"
+            "你现在直接向电话里的客户说开场白。语气亲切、明亮、自然，语速适中，"
+            "每个字都要说完整，在标点处清楚停顿，不吞字。"
             "只输出下面的开场白本身，不解释、不增删、不改写：\n"
             f"{opening_text}"
         )
@@ -793,12 +884,11 @@ async def entrypoint(ctx: Any) -> None:
 
     ctx.add_shutdown_callback(_on_shutdown)
 
-    # 看门狗：2s 一查，静默超时 + 硬上限（道别挂断由 _on_item 异步触发）
-    idle_hangup_seconds = float(os.getenv("LIVEKIT_IDLE_HANGUP_SECONDS", "45"))
+    # 看门狗：只保留硬上限和“三次在线确认”，不再因单一静默时长直接挂断。
     start_t = time.monotonic()
     while not done.is_set():
         try:
-            await asyncio.wait_for(done.wait(), timeout=2.0)
+            await asyncio.wait_for(done.wait(), timeout=1.0)
             break
         except asyncio.TimeoutError:
             pass
@@ -818,20 +908,29 @@ async def entrypoint(ctx: Any) -> None:
                 done.set()
                 ctx.shutdown("max_call_seconds_reached")
             break
-        # speaking/thinking 本身就是活动。以前只在状态“切换”时更新时间，
-        # Qwen 单次长回复超过 25s 就会被误判为双方静默，直接从句子中间删房。
         if _conversation_turn_in_progress(last_agent_state["v"], last_user_state["v"]):
-            last_activity["t"] = time.monotonic()
             continue
-        if time.monotonic() - last_activity["t"] > idle_hangup_seconds:
-            ended = await _hangup(
-                f"双方静默超 {idle_hangup_seconds:.0f}s",
-                shutdown_reason="idle_timeout",
-            )
-            if not ended:
-                done.set()
-                ctx.shutdown("idle_timeout")
-            break
+        if hangup_state["pending"] or not silence_probe_state["eligible"]:
+            continue
+        waiting_since = float(silence_probe_state["waiting_since"] or 0.0)
+        if not waiting_since or time.monotonic() - waiting_since < _SILENCE_PROBE_WAIT_SECONDS:
+            continue
+        attempts = int(silence_probe_state["attempts"])
+        if attempts < len(_SILENCE_PROBE_INSTRUCTIONS):
+            _request_next_silence_probe()
+            continue
+        ended = await _hangup(
+            "连续三次确认客户均无回应",
+            event_name="livekit_no_response_hangup",
+            error_event_name="livekit_no_response_hangup_error",
+            detail="AI 完整问询后已用三种不同口气确认客户是否在线，仍无任何回应，现主动挂断。",
+            shutdown_reason="customer_no_response_after_three_probes",
+            remove_participant_first=True,
+        )
+        if not ended:
+            done.set()
+            ctx.shutdown("customer_no_response_after_three_probes")
+        break
     await done.wait()
 
 
@@ -931,7 +1030,9 @@ def _build_agent_instructions(*, merchant_name: str) -> str:
     return (
         f"{base}\n"
         "LiveKit 实时电话规则：客户说话或插话时立刻停下听；不要解释打断机制。"
-        "回复要像日常外呼，短、快、自然；每次只解决一个问题。"
+        "回复要像日常外呼，短、自然、有亲和力；每次只解决一个问题，最多两个短句。"
+        "咬字要准确完整，语速适中，句号和逗号处自然停顿，不吞字、不抢话、不把多个要点连成长段。"
+        "开场亲切明亮；讲解稳定有条理；异议处理放缓且理解；费用口径坚定不生硬；微信收口友好不催促；拒绝收尾平和尊重。"
         "同一句话不要重复超过一遍；客户没听清时换一种更短的说法。"
         "这通电话的最终目标是确认客户是否有意向继续了解。"
         "确认有意向后，问客户方不方便加个微信，我们在微信上继续聊。"
