@@ -644,10 +644,8 @@ async def entrypoint(ctx: Any) -> None:
                         summary=wechat_result.summary,
                     )
                 )
-        _refresh_omni_instructions(
-            wechat_result.action if wechat_result else "",
-            wechat_result.reply if wechat_result else "",
-        )
+            if wechat_result.action:
+                _refresh_omni_instructions(wechat_result.action, wechat_result.reply)
         _emit_livekit_event(
             "user_transcript",
             callId=action_id,
