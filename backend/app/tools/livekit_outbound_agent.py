@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,11 @@ load_dotenv()
 
 # 单通电话硬上限秒数：防止对语音信箱/静默线路无限烧钱（对齐 livekit-poc/agent/main.py）。
 _MAX_CALL_SECONDS = int(os.getenv("LIVEKIT_MAX_CALL_SECONDS", "300"))
+
+# AI 结束语匹配：说完这些话且客户没有再开口，就主动挂断（解决"AI 说完再见不挂机"）。
+_FAREWELL_PATTERN = re.compile(r"再见|拜拜|不多打扰|不打扰(?:了|您)?|感谢接听|您先忙|生意兴隆")
+# 结束语播完后留给客户反悔的窗口秒数，窗口内客户开口则取消挂机继续对话。
+_HANGUP_GRACE_SECONDS = float(os.getenv("LIVEKIT_HANGUP_GRACE_SECONDS", "1.5"))
 
 # 固定开场白录音：接通即播、一字不差、可被客户说话打断。
 # 为什么不用模型说开场白：DashScope 对空上下文的 response.create 静默忽略
@@ -144,16 +150,35 @@ async def entrypoint(ctx: Any) -> None:
 
     # ---- 三层挂断基础设施（对齐 bench_agent_reference.py：道别/静默/硬上限）----
     hangup_flag = {"v": False}
+    hangup_state: dict[str, Any] = {"pending": False, "task": None}
     last_activity = {"t": time.monotonic()}
+    last_agent_state = {"v": ""}
     call_started = {"t": 0.0}
 
-    async def _hangup(reason: str, delay: float = 0.0) -> None:
+    async def _hangup(
+        reason: str,
+        delay: float = 0.0,
+        *,
+        event_name: str = "livekit_auto_hangup",
+        error_event_name: str = "livekit_auto_hangup_error",
+        detail: str = "",
+        shutdown_reason: str = "",
+        remove_participant_first: bool = False,
+    ) -> bool:
         if hangup_flag["v"]:
-            return
+            return False
         hangup_flag["v"] = True
         if delay:
             await asyncio.sleep(delay)
-        _emit_livekit_event("livekit_auto_hangup", callId=action_id, roomName=room_name, reason=reason)
+        event_payload: dict[str, Any] = {
+            "callId": action_id,
+            "roomName": room_name,
+            "participantIdentity": participant_identity,
+            "reason": reason,
+        }
+        if detail:
+            event_payload["detail"] = detail
+        _emit_livekit_event(event_name, **event_payload)
         try:
             # 不能用 ctx.api：session 事件回调里 create_task 出来的协程没有 job 的
             # http 上下文，ctx.api 懒建 aiohttp session 会抛 "outside of a job context"，
@@ -164,22 +189,82 @@ async def entrypoint(ctx: Any) -> None:
                 api_secret=settings.livekit_api_secret.strip(),
             )
             try:
-                await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
+                if remove_participant_first and participant_identity:
+                    try:
+                        await lkapi.room.remove_participant(
+                            api.RoomParticipantIdentity(room=room_name, identity=participant_identity)
+                        )
+                    except Exception:  # noqa: BLE001
+                        await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
+                else:
+                    await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))
             finally:
                 await lkapi.aclose()
         except Exception as exc:  # noqa: BLE001
-            _emit_livekit_event("livekit_auto_hangup_error", callId=action_id, roomName=room_name, error=str(exc))
+            _emit_livekit_event(
+                error_event_name,
+                callId=action_id,
+                roomName=room_name,
+                participantIdentity=participant_identity,
+                error=str(exc),
+                detail="主动挂断失败，等待客户侧挂机或通话上限收尾。",
+            )
+            return False
+        if shutdown_reason:
+            ctx.shutdown(shutdown_reason)
+        return True
+
+    def _cancel_farewell_hangup() -> None:
+        hangup_state["pending"] = False
+        task = hangup_state["task"]
+        if task is not None:
+            task.cancel()
+        hangup_state["task"] = None
+
+    async def _hangup_after_grace() -> None:
+        try:
+            await asyncio.sleep(_HANGUP_GRACE_SECONDS)
+            if not hangup_state["pending"]:
+                return
+            await _hangup(
+                "AI 道别",
+                event_name="livekit_agent_hangup",
+                error_event_name="livekit_agent_hangup_error",
+                detail="AI 结束语播放完毕且客户未再说话，主动挂断电话。",
+                shutdown_reason="agent_hangup_after_farewell",
+                remove_participant_first=True,
+            )
+        except asyncio.CancelledError:
+            return
+        finally:
+            hangup_state["pending"] = False
+            hangup_state["task"] = None
+
+    def _arm_farewell_hangup(text: str) -> None:
+        if not _FAREWELL_PATTERN.search(text):
+            return
+        # 保护：接通 20 秒内不因道别语挂断（防模型口滑/话术污染误触发）
+        if call_started["t"] and time.monotonic() - call_started["t"] < 20.0:
+            return
+        hangup_state["pending"] = True
+        if last_agent_state["v"] in {"listening", "idle"} and hangup_state["task"] is None:
+            hangup_state["task"] = asyncio.create_task(_hangup_after_grace())
 
     @session.on("user_state_changed")
     def _on_user_state(ev: Any) -> None:
+        new_state = str(getattr(ev, "new_state", ""))
         last_activity["t"] = time.monotonic()
-        if str(getattr(ev, "new_state", "")) == "listening":
+        if new_state == "speaking":
+            _cancel_farewell_hangup()
+        if new_state == "listening":
             last_user_stop["t"] = time.perf_counter()
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev: Any) -> None:
+        new_state = str(getattr(ev, "new_state", ""))
+        last_agent_state["v"] = new_state
         last_activity["t"] = time.monotonic()
-        if str(getattr(ev, "new_state", "")) == "speaking" and last_user_stop["t"]:
+        if new_state == "speaking" and last_user_stop["t"]:
             _emit_livekit_event(
                 "turn_latency",
                 callId=action_id,
@@ -187,6 +272,8 @@ async def entrypoint(ctx: Any) -> None:
                 latencyMs=int((time.perf_counter() - last_user_stop["t"]) * 1000),
             )
             last_user_stop["t"] = 0.0
+        if new_state in {"listening", "idle"} and hangup_state["pending"] and hangup_state["task"] is None:
+            hangup_state["task"] = asyncio.create_task(_hangup_after_grace())
     room_input_kwargs: dict[str, Any] = {
         "pre_connect_audio": True,
         "pre_connect_audio_timeout": 5.0,
@@ -343,9 +430,6 @@ async def entrypoint(ctx: Any) -> None:
     _AGREE_WORDS = ("可以", "行", "好的", "好啊", "嗯", "加吧", "发吧", "就是微信", "是微信",
                     "同意", "没问题", "对", "是的", "对的", "嗯嗯", "方便")
     _REFUSE_WORDS = ("不用", "不加", "别加", "不需要", "不方便", "不行", "不对", "不是")
-    # 2026-07-09 真机踩坑：AI 实际道别语是"先不多打扰/拜拜/您先忙"，
-    # 只留"不打扰"匹配不上（"不多打扰"不含子串"不打扰"），挂断永不触发
-    _FAREWELLS = ("再见", "拜拜", "不打扰", "不多打扰", "您先忙", "生意兴隆")
     lead_path = os.getenv("INTENT_LEADS_PATH", "intent_leads.jsonl")
 
     def _mark_lead(customer_text: str) -> None:
@@ -426,11 +510,7 @@ async def entrypoint(ctx: Any) -> None:
         if any(w in text for w in _WECHAT_HINTS):
             wechat_ask["pending"] = 2  # 给客户 2 轮回应窗口
             wechat_ask["ai_text"] = text
-        if any(w in text for w in _FAREWELLS):
-            # 保护：接通 20 秒内不因道别语挂断（防模型口滑/话术污染误触发）
-            if call_started["t"] and time.monotonic() - call_started["t"] < 20.0:
-                return
-            asyncio.create_task(_hangup("AI 道别", delay=4.0))
+        _arm_farewell_hangup(text)
 
     done = asyncio.Event()
 

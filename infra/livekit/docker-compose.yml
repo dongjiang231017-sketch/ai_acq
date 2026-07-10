@@ -1,0 +1,33 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "6379:6379"
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    depends_on:
+      - redis
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+
+  sip:
+    image: livekit/sip:latest
+    restart: unless-stopped
+    depends_on:
+      - livekit
+      - redis
+    command: --config /etc/livekit-sip.yaml
+    volumes:
+      - ./sip.yaml:/etc/livekit-sip.yaml:ro
+    ports:
+      - "5062:5062/udp"
+      - "10000-10100:10000-10100/udp"

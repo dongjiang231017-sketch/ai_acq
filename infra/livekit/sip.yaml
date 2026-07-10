@@ -1,0 +1,13 @@
+ws_url: ws://livekit:7880
+api_key: devkey
+api_secret: devsecret-key-for-ai-acq-local-20260709
+
+redis:
+  address: redis:6379
+
+sip_port: 5062
+rtp_port: 10000-10100
+use_external_ip: false
+
+logging:
+  level: info
