@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -51,6 +51,15 @@ class CallScript(Base):
 
 class CallRecord(Base):
     __tablename__ = "call_records"
+    __table_args__ = (
+        Index(
+            "uq_call_records_gateway_call_id",
+            "gateway_call_id",
+            unique=True,
+            postgresql_where=text("gateway_call_id IS NOT NULL"),
+            sqlite_where=text("gateway_call_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
     task_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("outreach_tasks.id"), nullable=True, index=True)
