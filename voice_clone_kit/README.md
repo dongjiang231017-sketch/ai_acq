@@ -1,6 +1,6 @@
 # voice_clone_kit · 百炼声音克隆 + 话术批量试听
 
-用授权录音克隆音色，把视频号团购电销话术批量合成 MP3 试听。当前包含 78 条已确认台词和 7 条待业务口径确认台词。
+用授权录音克隆音色，把视频号团购电销话术批量合成 MP3 试听。当前包含 74 条已确认台词和 7 条待业务口径确认台词。
 
 ## 运行（一条命令）
 
@@ -17,7 +17,7 @@ python3 voice_clone_kit/clone_and_tts.py --voice <已有音色ID> --lines lines_
 
 - `lines.json`：16 条开场白和主流程。
 - `lines_part2.json`：32 条高频问答、收尾和特殊场景。
-- `lines_part3.json`：30 条平台、价格、决策、信任、AI 兜底和回拨话术。
+- `lines_part3.json`：26 条平台、价格、决策、信任和 AI 兜底话术。
 - `lines_part3_pending.json`：7 条待确认业务承诺，默认不合成。
 
 ## 产出
