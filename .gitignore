@@ -54,6 +54,12 @@ infra/livekit/sip-native.yaml
 .tmp_desktop_runtime/
 backend/platform_browser_profiles/
 
+# Local voice-clone biometric samples and generated artifacts
+voice_clone_kit/output/
+voice_clone_kit/*.wav
+voice_clone_kit/*.m4a
+voice_clone_kit/*.docx
+
 # Editors
 .idea/
 .vscode/
