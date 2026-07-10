@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     livekit_openai_realtime_voice: str = "marin"
     livekit_openai_realtime_base_url: str = ""
     livekit_openai_realtime_api_key: str = ""
+    livekit_call_recording_dir: str = ".runtime/call-recordings"
     telephony_gateway_mode: str = "simulator"
     asterisk_deployment_mode: str = "server"
     voice_gateway_profile: str = "dinstar_8t_server"

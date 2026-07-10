@@ -20,6 +20,7 @@ htmlcov/
 backend/.venv/
 backend/local.db
 backend/.runtime/
+backend/.call_recordings/
 .voice_samples/
 backend/.voice_samples/
 .voice_outputs/

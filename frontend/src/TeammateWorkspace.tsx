@@ -14,6 +14,7 @@ import {
   KeyRound,
   MessageSquareText,
   PhoneCall,
+  Play,
   Plus,
   Radio,
   RefreshCw,
@@ -23,6 +24,7 @@ import {
   Sparkles,
   Upload,
   Users,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -539,7 +541,9 @@ function transcriptToMonitorMessages(record?: CallRecord | null): MonitorMessage
   const messages = lines.map((line, index) => {
     const customerMatch = /^(客户|商家|用户|Customer|User)[:：]\s*(.+)$/i.exec(line);
     if (customerMatch) return { speaker: "customer" as const, label: "客户", text: customerMatch[2] };
-    const aiMatch = /^(AI|坐席|系统|Agent)[:：]\s*(.+)$/i.exec(line);
+    const systemMatch = /^(系统|System)[:：]\s*(.+)$/i.exec(line);
+    if (systemMatch) return { speaker: "system" as const, label: "系统", text: systemMatch[2] };
+    const aiMatch = /^(AI|坐席|Agent)[:：]\s*(.+)$/i.exec(line);
     if (aiMatch) return { speaker: "ai" as const, label: "AI", text: aiMatch[2] };
     return {
       speaker: index % 2 === 0 ? ("ai" as const) : ("customer" as const),
@@ -1733,6 +1737,13 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const [realtimeSession, setRealtimeSession] = useState<RealtimeSession | null>(null);
   const [callRecords, setCallRecords] = useState<CallRecord[]>(fallbackRecords);
   const [liveCalls, setLiveCalls] = useState<CallRecord[]>(fallbackRecords);
+  const [recordSearch, setRecordSearch] = useState("");
+  const [selectedCallRecordId, setSelectedCallRecordId] = useState(fallbackRecords[0]?.id ?? "");
+  const [callRecordDialogId, setCallRecordDialogId] = useState<string | null>(null);
+  const [callRecordingUrl, setCallRecordingUrl] = useState("");
+  const [callRecordingMessage, setCallRecordingMessage] = useState("");
+  const [isLoadingCallRecording, setIsLoadingCallRecording] = useState(false);
+  const callRecordingRequestRef = useRef(0);
   const [scripts, setScripts] = useState<CallScript[]>(fallbackScripts);
   const [recallRules, setRecallRules] = useState<RecallRule[]>(fallbackRules);
   const [dmOverview, setDmOverview] = useState<DmOverview>(fallbackDmOverview);
@@ -1986,6 +1997,27 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
   const selectedLiveCall =
     liveCalls.find((record) => record.id === selectedLiveCallId) ?? liveCalls[0] ?? callRecords[0] ?? null;
   const selectedLiveCallMessages = useMemo(() => transcriptToMonitorMessages(selectedLiveCall), [selectedLiveCall]);
+  const filteredCallRecords = useMemo(() => {
+    const keyword = recordSearch.trim().toLowerCase();
+    if (!keyword) return callRecords;
+    return callRecords.filter((record) =>
+      [record.merchantName, record.phone, record.outcome, record.transcript]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(keyword)),
+    );
+  }, [callRecords, recordSearch]);
+  const selectedCallRecord =
+    filteredCallRecords.find((record) => record.id === selectedCallRecordId) ??
+    filteredCallRecords[0] ??
+    (recordSearch.trim() ? null : callRecords[0] ?? null);
+  const callRecordDialogRecord =
+    callRecords.find((record) => record.id === callRecordDialogId) ??
+    filteredCallRecords.find((record) => record.id === callRecordDialogId) ??
+    null;
+  const callRecordDialogMessages = useMemo(
+    () => transcriptToMonitorMessages(callRecordDialogRecord),
+    [callRecordDialogRecord],
+  );
   const activeDmTemplate = dmTemplates.find((template) => template.id === dmForm.templateId) ?? dmTemplates[0];
   const dmSupportedAccounts = useMemo(() => dmAccounts.filter(isSupportedDmAccount), [dmAccounts]);
   const dmLoginAccounts = useMemo(() => dmAccounts.filter(isLoginCapableAccount), [dmAccounts]);
@@ -2287,6 +2319,36 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     const nextRecord = liveCalls[0] ?? callRecords[0];
     if (nextRecord) setSelectedLiveCallId(nextRecord.id);
   }, [callRecords, liveCalls, selectedLiveCallId]);
+
+  useEffect(() => {
+    if (selectedCallRecordId && callRecords.some((record) => record.id === selectedCallRecordId)) return;
+    if (callRecords[0]) setSelectedCallRecordId(callRecords[0].id);
+  }, [callRecords, selectedCallRecordId]);
+
+  useEffect(() => {
+    if (!callRecordDialogId) return;
+    if (!callRecords.some((record) => record.id === callRecordDialogId)) closeCallRecordDialog();
+  }, [callRecordDialogId, callRecords]);
+
+  useEffect(() => {
+    setCallsPage(1);
+  }, [recordSearch]);
+
+  useEffect(() => {
+    if (!callRecordDialogId) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeCallRecordDialog();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [callRecordDialogId]);
+
+  useEffect(
+    () => () => {
+      if (callRecordingUrl) URL.revokeObjectURL(callRecordingUrl);
+    },
+    [callRecordingUrl],
+  );
 
   useEffect(() => {
     setIsDesktopClient(Boolean(window.aiAcqDesktop?.isDesktopClient));
@@ -2593,15 +2655,34 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
 
   useEffect(() => {
     if (!auth?.accessToken) return;
-    setLeads([]);
-    setTasks([]);
-    setCollectionTasks([]);
-    setCollectionRuns([]);
-    setRawLeadRecords([]);
-    setVoiceGatewayLines([]);
-    setSelectedLeadIds([]);
-    setSelectedDmLeadIds([]);
-    void loadData();
+    let cancelled = false;
+    const loadAuthenticatedWorkspace = async () => {
+      try {
+        const user = await api.me();
+        if (cancelled) return;
+        setCurrentUser(user);
+        setLeads([]);
+        setTasks([]);
+        setCollectionTasks([]);
+        setCollectionRuns([]);
+        setRawLeadRecords([]);
+        setVoiceGatewayLines([]);
+        setSelectedLeadIds([]);
+        setSelectedDmLeadIds([]);
+        await loadData();
+      } catch (error) {
+        if (cancelled) return;
+        clearStoredAuth();
+        setAuth(null);
+        setCurrentUser(null);
+        setApiStatus("未登录");
+        setAuthMessage(error instanceof Error ? error.message : "登录状态已过期，请重新登录。");
+      }
+    };
+    void loadAuthenticatedWorkspace();
+    return () => {
+      cancelled = true;
+    };
   }, [auth?.accessToken]);
 
   async function submitLogin(event: React.FormEvent<HTMLFormElement>) {
@@ -4086,6 +4167,62 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
     return `${Math.round(bytes / 1024 / 102.4) / 10} MB`;
+  }
+
+  function clearCallRecording(message = "") {
+    callRecordingRequestRef.current += 1;
+    setCallRecordingUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return "";
+    });
+    setCallRecordingMessage(message);
+    setIsLoadingCallRecording(false);
+  }
+
+  async function loadCallRecording(record: CallRecord) {
+    if (!record.recordingAvailable) {
+      clearCallRecording("这通电话没有可回听的录音。");
+      return;
+    }
+    const requestId = callRecordingRequestRef.current + 1;
+    callRecordingRequestRef.current = requestId;
+    setIsLoadingCallRecording(true);
+    setCallRecordingMessage("正在读取录音...");
+    try {
+      const blob = await api.callRecording(record.id);
+      const objectUrl = URL.createObjectURL(blob);
+      if (callRecordingRequestRef.current !== requestId) {
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      setCallRecordingUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return objectUrl;
+      });
+      setCallRecordingMessage("录音已就绪。");
+    } catch (error) {
+      if (callRecordingRequestRef.current === requestId) {
+        setCallRecordingMessage(error instanceof Error ? error.message : "录音读取失败。");
+      }
+    } finally {
+      if (callRecordingRequestRef.current === requestId) setIsLoadingCallRecording(false);
+    }
+  }
+
+  function openCallRecordDialog(record: CallRecord) {
+    clearCallRecording();
+    setSelectedCallRecordId(record.id);
+    setCallRecordDialogId(record.id);
+    if (record.recordingAvailable) {
+      void loadCallRecording(record);
+    } else {
+      setCallRecordingMessage("这通电话没有可回听的录音。");
+    }
+  }
+
+  function closeCallRecordDialog() {
+    clearCallRecording();
+    setCallRecordDialogId(null);
   }
 
   async function readAudioDurationSeconds(file: File): Promise<number> {
@@ -7829,24 +7966,159 @@ function TeammateWorkspace({ mode = "full" }: TeammateWorkspaceProps) {
                 </div>
                 <ClipboardList size={22} />
               </div>
-              <div className="record-grid">
-                {callRecords.length === 0 && <div className="empty-state">暂无通话记录。</div>}
-                {pageSlice(callRecords, callsPage, 6).map((record) => (
-                  <article className="record-card" key={record.id}>
-                    <div>
-                      <strong>{record.merchantName}</strong>
-                      <span>{record.outcome}</span>
-                    </div>
-                    <p>{record.transcript}</p>
-                    <small>
-                      {record.aiSeat} · {formatDuration(record.durationSeconds)} · {record.currentNode}
-                    </small>
-                  </article>
-                ))}
+              <div className="call-record-toolbar">
+                <label>
+                  <Search size={17} />
+                  <input
+                    aria-label="搜索通话记录"
+                    onChange={(event) => setRecordSearch(event.target.value)}
+                    placeholder="搜索商家、号码或对话内容"
+                    type="search"
+                    value={recordSearch}
+                  />
+                </label>
+                <span>共 {filteredCallRecords.length} 条</span>
               </div>
-              <PaginationBar total={callRecords.length} page={callsPage} onPage={setCallsPage} pageSize={6} />
+              <div className="call-record-table-wrap">
+                <table className="call-record-table">
+                  <thead>
+                    <tr>
+                      <th>商家</th>
+                      <th>号码</th>
+                      <th>结果</th>
+                      <th>意向</th>
+                      <th>时长</th>
+                      <th>录音</th>
+                      <th>时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredCallRecords.length === 0 && (
+                      <tr>
+                        <td colSpan={7}>
+                          <span className="empty-state">没有匹配的通话记录。</span>
+                        </td>
+                      </tr>
+                    )}
+                    {pageSlice(filteredCallRecords, callsPage, 10).map((record) => (
+                      <tr
+                        className={record.id === selectedCallRecord?.id ? "is-selected" : ""}
+                        key={record.id}
+                        onClick={() => openCallRecordDialog(record)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            openCallRecordDialog(record);
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <td>
+                          <strong>{record.merchantName}</strong>
+                          <small>
+                            {record.transcript ||
+                              (record.gatewayStatus === "active"
+                                ? "通话进行中，挂断后同步完整转写。"
+                                : "等待通话转写。")}
+                          </small>
+                        </td>
+                        <td>{record.phone ?? "无号码"}</td>
+                        <td>
+                          <span className="call-record-status">{record.outcome || record.gatewayStatus}</span>
+                        </td>
+                        <td>
+                          <span className={`intent-pill intent-${record.intentLevel.toLowerCase()}`}>
+                            {record.intentLevel || "未知"}
+                          </span>
+                        </td>
+                        <td>{formatDuration(record.durationSeconds)}</td>
+                        <td>
+                          {record.recordingAvailable
+                            ? "可回听"
+                            : record.recordingStatus === "recording"
+                              ? "录音中"
+                              : "无录音"}
+                        </td>
+                        <td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <PaginationBar total={filteredCallRecords.length} page={callsPage} onPage={setCallsPage} pageSize={10} />
             </article>
           </section>
+        )}
+        {showRecords && callRecordDialogRecord && (
+          <div className="call-record-modal-backdrop" onMouseDown={closeCallRecordDialog}>
+            <section
+              aria-label="通话记录详情"
+              aria-modal="true"
+              className="call-record-modal"
+              onMouseDown={(event) => event.stopPropagation()}
+              role="dialog"
+            >
+              <header>
+                <div>
+                  <span>通话详情</span>
+                  <h2>{callRecordDialogRecord.merchantName}</h2>
+                  <small>
+                    {callRecordDialogRecord.phone ?? "无号码"} · {formatDuration(callRecordDialogRecord.durationSeconds)} ·{" "}
+                    {callRecordDialogRecord.outcome} · 意向 {callRecordDialogRecord.intentLevel}
+                  </small>
+                </div>
+                <button
+                  className="secondary-button icon-only"
+                  onClick={closeCallRecordDialog}
+                  type="button"
+                  title="关闭"
+                >
+                  <X size={18} />
+                </button>
+              </header>
+              <div className="call-record-modal-meta">
+                <span>坐席 {callRecordDialogRecord.aiSeat}</span>
+                <span>节点 {callRecordDialogRecord.currentNode}</span>
+                <span>{new Date(callRecordDialogRecord.createdAt).toLocaleString("zh-CN", { hour12: false })}</span>
+              </div>
+              <div className="call-record-audio">
+                <div>
+                  <strong>通话录音</strong>
+                  <small>
+                    {callRecordDialogRecord.recordingAvailable
+                      ? `${callRecordDialogRecord.recordingMimeType || "audio"} · ${formatBytes(callRecordDialogRecord.recordingSizeBytes ?? 0)}`
+                      : callRecordDialogRecord.recordingStatus === "recording"
+                        ? "录音中"
+                        : callRecordDialogRecord.recordingStatus === "pending"
+                          ? "等待接通"
+                          : "本通无录音"}
+                  </small>
+                </div>
+                {callRecordDialogRecord.recordingAvailable && !callRecordingUrl && (
+                  <button
+                    className="secondary-button"
+                    disabled={isLoadingCallRecording}
+                    onClick={() => void loadCallRecording(callRecordDialogRecord)}
+                    type="button"
+                  >
+                    <Play size={16} />
+                    {isLoadingCallRecording ? "读取中" : "播放录音"}
+                  </button>
+                )}
+                {callRecordingUrl && <audio autoPlay controls preload="metadata" src={callRecordingUrl} />}
+                {callRecordingMessage && <span>{callRecordingMessage}</span>}
+              </div>
+              <div className="call-record-dialogue" aria-label="通话对话内容">
+                {callRecordDialogMessages.map((message, index) => (
+                  <div className={`monitor-message is-${message.speaker}`} key={`${message.label}-${index}`}>
+                    <span>{message.label}</span>
+                    <p>{message.text}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
         )}
       </>
     );

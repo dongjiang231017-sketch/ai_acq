@@ -53,7 +53,13 @@ def _completed_count(db, action_ids: list[str]) -> int:
     if not action_ids:
         return 0
     return int(
-        db.scalar(select(func.count()).select_from(CallRecord).where(CallRecord.gateway_call_id.in_(action_ids))) or 0
+        db.scalar(
+            select(func.count()).select_from(CallRecord).where(
+                CallRecord.gateway_call_id.in_(action_ids),
+                CallRecord.gateway_status.in_(["completed", "no_answer", "failed"]),
+            )
+        )
+        or 0
     )
 
 

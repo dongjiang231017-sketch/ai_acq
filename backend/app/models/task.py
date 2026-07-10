@@ -77,12 +77,26 @@ class CallRecord(Base):
     gateway_call_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     gateway_status: Mapped[str] = mapped_column(String(40), default="completed", index=True)
     raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recording_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recording_status: Mapped[str] = mapped_column(String(40), default="unavailable", index=True)
+    recording_mime_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    recording_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     need_handoff: Mapped[bool] = mapped_column(Boolean, default=False)
     recall_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     def __repr__(self) -> str:
         return f"{self.merchant_name} {self.outcome}"
+
+    @property
+    def recording_available(self) -> bool:
+        return self.recording_status == "available" and bool(self.recording_path)
+
+    @property
+    def recording_url(self) -> str | None:
+        if not self.recording_available:
+            return None
+        return f"/api/outbound/records/{self.id}/recording"
 
 
 class RecallRule(Base):

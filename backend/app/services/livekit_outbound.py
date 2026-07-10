@@ -10,6 +10,10 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.livekit_call_persistence import (
+    create_pending_livekit_call_record,
+    mark_livekit_call_dispatch_failed,
+)
 from app.services.realtime_sales_playbook import VIDEO_GROUP_BUYING_OPENING_A
 from app.services.runtime_ai_config import get_runtime_ai_config
 
@@ -160,6 +164,13 @@ def dispatch_livekit_outbound_call(
         "sipFromNumber": settings.livekit_sip_from_number.strip(),
         "openingText": VIDEO_GROUP_BUYING_OPENING_A,
     }
+    create_pending_livekit_call_record(
+        action_id=action_id,
+        phone=str(phone),
+        merchant_name=merchant_name,
+        task_id=task_id,
+        lead_id=lead_id,
+    )
     _emit_livekit_event(
         "livekit_dispatch_start",
         callId=action_id,
@@ -170,7 +181,14 @@ def dispatch_livekit_outbound_call(
         agentName=settings.livekit_agent_name.strip(),
         agentMode=metadata["agentMode"],
     )
-    result = asyncio.run(_create_livekit_dispatch(room_name=room_name, metadata=metadata))
+    try:
+        result = asyncio.run(_create_livekit_dispatch(room_name=room_name, metadata=metadata))
+    except Exception as exc:
+        try:
+            mark_livekit_call_dispatch_failed(action_id, str(exc))
+        except Exception:  # noqa: BLE001 - preserve the original dispatch failure.
+            pass
+        raise
     dispatch_id = str(
         result.get("agent_dispatch_id")
         or result.get("dispatchId")

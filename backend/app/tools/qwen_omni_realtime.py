@@ -119,6 +119,10 @@ class QwenOmniRealtimeSession(RealtimeSession):
         # conversation.item.input_audio_transcription.completed（带 transcript）。
         # 签名：on_user_transcript(transcript: str)，在事件循环线程回调。
         self.on_user_transcript = None
+        # 通话录音回调：(pcm16, sample_rate, num_channels)。业务层可用它
+        # 将客户输入和 Omni 输出对齐混录，不改变模型路线或播放链路。
+        self.on_input_audio_frame = None
+        self.on_output_audio_frame = None
         self._connect()
 
     @property
@@ -271,6 +275,7 @@ class QwenOmniRealtimeSession(RealtimeSession):
                     data=chunk, sample_rate=self._OUT_RATE,
                     num_channels=1, samples_per_channel=self._FRAME_SAMPLES,
                 )
+                self._record_output_audio(chunk)
                 gen.audio_ch.send_nowait(frame)
         except Exception as e:
             logger.error("audio delta error: %s", e)
@@ -285,9 +290,19 @@ class QwenOmniRealtimeSession(RealtimeSession):
             chunk = chunk[:-1]
         samples = len(chunk) // 2
         if samples:
+            self._record_output_audio(chunk)
             gen.audio_ch.send_nowait(
                 rtc.AudioFrame(data=chunk, sample_rate=self._OUT_RATE, num_channels=1, samples_per_channel=samples)
             )
+
+    def _record_output_audio(self, pcm: bytes) -> None:
+        callback = self.on_output_audio_frame
+        if callback is None:
+            return
+        try:
+            callback(pcm, self._OUT_RATE, 1)
+        except Exception as exc:  # noqa: BLE001 - recording must never break playback.
+            logger.error("输出音频录制回调失败: %s", exc)
 
     def _handle_response_done(self):
         self._flush_audio_buf()
@@ -368,6 +383,12 @@ class QwenOmniRealtimeSession(RealtimeSession):
 
     # ===== RealtimeSession 抽象方法 =====
     def push_audio(self, frame: rtc.AudioFrame) -> None:
+        callback = self.on_input_audio_frame
+        if callback is not None:
+            try:
+                callback(bytes(frame.data), frame.sample_rate, frame.num_channels)
+            except Exception as exc:  # noqa: BLE001 - recording must never break recognition.
+                logger.error("输入音频录制回调失败: %s", exc)
         # 输入总闸：开场白播完前不喂音频，避免模型抢答客户的"喂"
         if not self.input_open:
             return

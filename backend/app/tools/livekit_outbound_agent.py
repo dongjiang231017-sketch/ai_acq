@@ -11,6 +11,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from app.core.config import settings
+from app.services.call_audio_recorder import CallAudioRecorder
+from app.services.livekit_call_persistence import mark_livekit_call_connected, mark_livekit_call_dispatch_failed
 from app.services.livekit_outbound import _emit_livekit_event, _masked_phone
 from app.services.realtime_intent_capture import record_realtime_wechat_signal
 from app.services.realtime_outbound import _classify_intent
@@ -173,6 +175,27 @@ async def entrypoint(ctx: Any) -> None:
     requested_agent_mode = str(metadata.get("agentMode") or settings.livekit_agent_mode or _QWEN_OMNI_MODE)
     agent_mode = _normalize_agent_mode(requested_agent_mode)
     call_direction = "outbound" if dial_phone else "inbound"
+    full_persistence_registered = {"v": False}
+
+    async def _close_unfinished_pending_record(reason: str = "") -> None:
+        if call_direction != "outbound" or full_persistence_registered["v"]:
+            return
+        try:
+            await asyncio.to_thread(
+                mark_livekit_call_dispatch_failed,
+                action_id,
+                f"Agent 在完整通话收口前退出：{reason or 'unknown'}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit_livekit_event(
+                "call_record_save_error",
+                callId=action_id,
+                roomName=room_name,
+                error=str(exc),
+                detail="Agent 早期退出，未能将预建通话记录更新为失败。",
+            )
+
+    ctx.add_shutdown_callback(_close_unfinished_pending_record)
 
     _emit_livekit_event(
         "livekit_agent_job_start",
@@ -223,6 +246,25 @@ async def entrypoint(ctx: Any) -> None:
     instructions = _build_agent_instructions(merchant_name=merchant_name)
     session = _build_agent_session(inference=inference, agent_mode=agent_mode, instructions=instructions)
     agent = Agent(instructions=instructions)
+    call_recorder: CallAudioRecorder | None = None
+    recording_state: dict[str, Any] = {
+        "finalized": False,
+        "status": "unavailable",
+        "path": None,
+        "mime_type": None,
+        "size_bytes": 0,
+    }
+    try:
+        call_recorder = CallAudioRecorder(action_id)
+    except Exception as exc:  # noqa: BLE001 - a recording failure must not block the call.
+        recording_state["status"] = "failed"
+        _emit_livekit_event(
+            "call_recording_error",
+            callId=action_id,
+            roomName=room_name,
+            error=str(exc),
+            detail="录音文件初始化失败，本通继续外呼并保存转写。",
+        )
 
     for component_name, component in (("stt", session.stt), ("llm", session.llm), ("tts", session.tts)):
         if component is None:
@@ -468,6 +510,19 @@ async def entrypoint(ctx: Any) -> None:
             sync_transcription=True,
         ),
     )
+    llm_obj = getattr(session, "llm", None) or getattr(session, "_llm", None)
+    realtime_session = getattr(llm_obj, "last_session", None)
+    if call_recorder is not None and realtime_session is not None:
+        realtime_session.on_input_audio_frame = call_recorder.write_customer
+        realtime_session.on_output_audio_frame = call_recorder.write_assistant
+    elif call_recorder is not None:
+        recording_state["status"] = "failed"
+        _emit_livekit_event(
+            "call_recording_error",
+            callId=action_id,
+            roomName=room_name,
+            detail="Qwen Omni 实时会话未就绪，无法绑定双向音频录制回调。",
+        )
     _emit_livekit_event(
         "livekit_agent_session_started",
         callId=action_id,
@@ -656,8 +711,6 @@ async def entrypoint(ctx: Any) -> None:
             detail="客户说话（实时转写）",
         )
 
-    llm_obj = getattr(session, "llm", None) or getattr(session, "_llm", None)
-    realtime_session = getattr(llm_obj, "last_session", None)
     if realtime_session is not None:
         realtime_session.on_user_transcript = _on_user_transcript
 
@@ -750,6 +803,35 @@ async def entrypoint(ctx: Any) -> None:
         participant = await ctx.wait_for_participant(identity=participant_identity or None)
         participant_identity = str(getattr(participant, "identity", participant_identity) or participant_identity)
         call_state["joined_at"] = time.monotonic()
+        try:
+            await asyncio.to_thread(mark_livekit_call_connected, action_id)
+        except Exception as exc:  # noqa: BLE001 - DB status must not block live audio.
+            _emit_livekit_event(
+                "call_record_save_error",
+                callId=action_id,
+                roomName=room_name,
+                error=str(exc),
+                detail="通话已接通，但实时记录状态更新失败；挂断时会重试完整落库。",
+            )
+        if call_recorder is not None and recording_state["status"] != "failed":
+            try:
+                call_recorder.start()
+                recording_state["status"] = "recording"
+                _emit_livekit_event(
+                    "call_recording_started",
+                    callId=action_id,
+                    roomName=room_name,
+                    detail="客户与 Qwen Omni 双向音频已开始本地混录。",
+                )
+            except Exception as exc:  # noqa: BLE001
+                recording_state["status"] = "failed"
+                _emit_livekit_event(
+                    "call_recording_error",
+                    callId=action_id,
+                    roomName=room_name,
+                    error=str(exc),
+                    detail="双向录音启动失败，通话和转写仍继续。",
+                )
         _emit_livekit_event(
             "livekit_customer_joined",
             callId=action_id,
@@ -815,6 +897,35 @@ async def entrypoint(ctx: Any) -> None:
             wechat_kind = "当前手机号" if call_state["wechat_is_phone"] else "客户口述微信号"
             final_summary += f"；{wechat_kind}={call_state['wechat_id']}"
         persisted_transcript = "\n".join([*conversation_log, final_summary])
+        if not recording_state["finalized"]:
+            recording_state["finalized"] = True
+            try:
+                artifact = call_recorder.finalize() if call_recorder is not None else None
+                if artifact is not None:
+                    recording_state.update(
+                        status="available",
+                        path=artifact.relative_path,
+                        mime_type=artifact.mime_type,
+                        size_bytes=artifact.size_bytes,
+                    )
+                    _emit_livekit_event(
+                        "call_recording_saved",
+                        callId=action_id,
+                        roomName=room_name,
+                        sizeBytes=artifact.size_bytes,
+                        detail="双向通话录音已保存并关联通话记录。",
+                    )
+                elif recording_state["status"] != "failed":
+                    recording_state["status"] = "unavailable"
+            except Exception as exc:  # noqa: BLE001
+                recording_state["status"] = "failed"
+                _emit_livekit_event(
+                    "call_recording_error",
+                    callId=action_id,
+                    roomName=room_name,
+                    error=str(exc),
+                    detail="双向通话录音收口失败，转写与通话结果仍正常落库。",
+                )
         from app.services.livekit_call_persistence import persist_livekit_call_result
 
         # 落库对连接类异常有限重试（远程 PG 会静默回收空闲连接）；persist 按
@@ -835,6 +946,10 @@ async def entrypoint(ctx: Any) -> None:
                     transcript=persisted_transcript,
                     intent_reason=reason,
                     refused=intent_level == "D",
+                    recording_path=recording_state["path"],
+                    recording_status=str(recording_state["status"]),
+                    recording_mime_type=recording_state["mime_type"],
+                    recording_size_bytes=int(recording_state["size_bytes"] or 0),
                 )
                 call_state["persisted"] = True  # 仅成功后置位，失败可由下次挂断回调重试
                 _emit_livekit_event(
@@ -862,6 +977,10 @@ async def entrypoint(ctx: Any) -> None:
                     "refused": intent_level == "D", "transcript": persisted_transcript,
                     "wechat_id": call_state["wechat_id"],
                     "wechat_is_phone": call_state["wechat_is_phone"],
+                    "recording_path": recording_state["path"],
+                    "recording_status": recording_state["status"],
+                    "recording_mime_type": recording_state["mime_type"],
+                    "recording_size_bytes": recording_state["size_bytes"],
                     "at": datetime.now().isoformat(timespec="seconds"),
                 }, ensure_ascii=False) + "\n")
         except Exception:  # noqa: BLE001
@@ -880,6 +999,7 @@ async def entrypoint(ctx: Any) -> None:
         )
         done.set()
 
+    full_persistence_registered["v"] = True
     ctx.add_shutdown_callback(_on_shutdown)
 
     # 看门狗：只保留硬上限和“三次在线确认”，不再因单一静默时长直接挂断。

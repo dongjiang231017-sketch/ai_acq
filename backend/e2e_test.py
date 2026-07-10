@@ -57,7 +57,7 @@ for i in range(10):
     check(f"raw_page#{i}", status == 200 and len(data["items"]) <= 10, str(status))
     status, data = req("/collections/runs?page=1&pageSize=10", token=token)
     check(f"runs_page#{i}", status == 200 and "total" in data, str(status))
-    status, data = req("/outbound/records?page=1&pageSize=10")
+    status, data = req("/outbound/records?page=1&pageSize=10", token=token)
     check(f"records_page#{i}", status == 200 and "total" in data, str(status))
 
 # ---------- 3. 线路状态 ×10 ----------

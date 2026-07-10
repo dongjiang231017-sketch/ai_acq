@@ -225,6 +225,11 @@ export type CallRecord = {
   gatewayCallId?: string | null;
   gatewayStatus: string;
   rawPayload?: string | null;
+  recordingStatus?: string;
+  recordingAvailable?: boolean;
+  recordingUrl?: string | null;
+  recordingMimeType?: string | null;
+  recordingSizeBytes?: number;
   needHandoff: boolean;
   recallAt?: string | null;
   createdAt: string;
@@ -1443,6 +1448,16 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestBlob(path: string): Promise<Blob> {
+  const response = await fetchWithRetry(`${API_BASE_URL}${path}`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response));
+  }
+  return response.blob();
+}
+
 type LeadListParams = {
   source?: string;
   platform?: string;
@@ -1537,7 +1552,12 @@ export const api = {
     request<OutreachTask>(`/outbound/tasks/${taskId}/start`, {
       method: "POST",
     }),
-  callRecords: () => request<PageResp<CallRecord>>("/outbound/records").then((r) => r.items),
+  callRecords: (keyword?: string) => {
+    const query = keyword?.trim() ? `?keyword=${encodeURIComponent(keyword.trim())}` : "";
+    return request<PageResp<CallRecord>>(`/outbound/records${query}`).then((r) => r.items);
+  },
+  callRecord: (recordId: string) => request<CallRecord>(`/outbound/records/${recordId}`),
+  callRecording: (recordId: string) => requestBlob(`/outbound/records/${recordId}/recording`),
   liveCalls: () => request<CallRecord[]>("/outbound/live"),
   callScripts: () => request<CallScript[]>("/outbound/scripts"),
   createCallScript: (script: Omit<CallScript, "id" | "createdAt">) =>

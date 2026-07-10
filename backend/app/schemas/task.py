@@ -97,6 +97,11 @@ class CallRecordRead(BaseModel):
     gateway_call_id: Annotated[str | None, Field(alias="gatewayCallId")]
     gateway_status: Annotated[str, Field(alias="gatewayStatus")]
     raw_payload: Annotated[str | None, Field(alias="rawPayload")]
+    recording_status: Annotated[str, Field(alias="recordingStatus")] = "unavailable"
+    recording_available: Annotated[bool, Field(alias="recordingAvailable")] = False
+    recording_url: Annotated[str | None, Field(alias="recordingUrl")] = None
+    recording_mime_type: Annotated[str | None, Field(alias="recordingMimeType")] = None
+    recording_size_bytes: Annotated[int, Field(alias="recordingSizeBytes")] = 0
     need_handoff: Annotated[bool, Field(alias="needHandoff")]
     recall_at: Annotated[datetime | None, Field(alias="recallAt")]
     created_at: Annotated[datetime, Field(alias="createdAt")]

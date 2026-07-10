@@ -3,7 +3,8 @@ import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from fastapi.responses import FileResponse
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
@@ -50,6 +51,7 @@ from app.services.livekit_outbound import (
     build_livekit_test_call_response,
     dispatch_livekit_outbound_call,
 )
+from app.services.call_audio_recorder import resolve_call_recording_path
 from app.services.realtime_intent_capture import register_realtime_test_call_context
 from app.services.realtime_outbound import (
     RealtimeSessionNotFound,
@@ -490,13 +492,26 @@ def start_outbound_task(
 
 @router.get("/records", response_model=Page[CallRecordRead])
 def list_call_records(
+    keyword: str | None = Query(default=None, max_length=120),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=1000, ge=1, le=1000, alias="pageSize"),
+    _current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Page[CallRecordRead]:
-    total = db.scalar(select(func.count()).select_from(CallRecord)) or 0
+    statement = select(CallRecord)
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                CallRecord.merchant_name.ilike(pattern),
+                CallRecord.phone.ilike(pattern),
+                CallRecord.transcript.ilike(pattern),
+                CallRecord.outcome.ilike(pattern),
+            )
+        )
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     offset, page = paginate(total, page, page_size)
-    items = db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc()).offset(offset).limit(page_size)).all()
+    items = db.scalars(statement.order_by(CallRecord.created_at.desc()).offset(offset).limit(page_size)).all()
     return Page(
         items=[CallRecordRead.model_validate(i, from_attributes=True) for i in items],
         total=total,
@@ -505,8 +520,47 @@ def list_call_records(
     )
 
 
+@router.get("/records/{record_id}", response_model=CallRecordRead)
+def get_call_record(
+    record_id: str,
+    _current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CallRecord:
+    record = db.get(CallRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="通话记录不存在")
+    return record
+
+
+@router.get("/records/{record_id}/recording")
+def get_call_recording(
+    record_id: str,
+    _current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    record = db.get(CallRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="通话记录不存在")
+    if not record.recording_available or not record.recording_path:
+        raise HTTPException(status_code=404, detail="该通话没有可播放的录音")
+    try:
+        recording_path = resolve_call_recording_path(record.recording_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="录音文件路径无效") from exc
+    if not recording_path.is_file():
+        raise HTTPException(status_code=404, detail="录音文件不存在")
+    return FileResponse(
+        recording_path,
+        media_type=record.recording_mime_type or "audio/wav",
+        filename=f"call-{record.id}.wav",
+    )
+
+
 @router.get("/live", response_model=list[CallRecordRead])
-def live_calls(db: Session = Depends(get_db)) -> list[CallRecord]:
+def live_calls(
+    _current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[CallRecord]:
     return list(db.scalars(select(CallRecord).order_by(CallRecord.created_at.desc()).limit(8)).all())
 
 
