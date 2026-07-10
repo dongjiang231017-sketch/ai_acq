@@ -37,6 +37,11 @@ _FAREWELL_PATTERN = re.compile(
 _HANGUP_GRACE_SECONDS = float(os.getenv("LIVEKIT_HANGUP_GRACE_SECONDS", "1.5"))
 
 _QWEN_OMNI_MODE = "omni"
+_ACTIVE_AGENT_STATES = {"speaking", "thinking"}
+
+
+def _conversation_turn_in_progress(agent_state: str, user_state: str) -> bool:
+    return agent_state in _ACTIVE_AGENT_STATES or user_state == "speaking"
 
 
 def _normalize_agent_mode(value: str) -> str:
@@ -227,6 +232,7 @@ async def entrypoint(ctx: Any) -> None:
     hangup_state: dict[str, Any] = {"pending": False, "task": None}
     last_activity = {"t": time.monotonic()}
     last_agent_state = {"v": ""}
+    last_user_state = {"v": ""}
     call_started = {"t": 0.0}
     done = asyncio.Event()
 
@@ -330,6 +336,7 @@ async def entrypoint(ctx: Any) -> None:
     @session.on("user_state_changed")
     def _on_user_state(ev: Any) -> None:
         new_state = str(getattr(ev, "new_state", ""))
+        last_user_state["v"] = new_state
         last_activity["t"] = time.monotonic()
         if new_state == "speaking":
             _cancel_farewell_hangup()
@@ -787,7 +794,7 @@ async def entrypoint(ctx: Any) -> None:
     ctx.add_shutdown_callback(_on_shutdown)
 
     # 看门狗：2s 一查，静默超时 + 硬上限（道别挂断由 _on_item 异步触发）
-    idle_hangup_seconds = float(os.getenv("LIVEKIT_IDLE_HANGUP_SECONDS", "25"))
+    idle_hangup_seconds = float(os.getenv("LIVEKIT_IDLE_HANGUP_SECONDS", "45"))
     start_t = time.monotonic()
     while not done.is_set():
         try:
@@ -811,6 +818,11 @@ async def entrypoint(ctx: Any) -> None:
                 done.set()
                 ctx.shutdown("max_call_seconds_reached")
             break
+        # speaking/thinking 本身就是活动。以前只在状态“切换”时更新时间，
+        # Qwen 单次长回复超过 25s 就会被误判为双方静默，直接从句子中间删房。
+        if _conversation_turn_in_progress(last_agent_state["v"], last_user_state["v"]):
+            last_activity["t"] = time.monotonic()
+            continue
         if time.monotonic() - last_activity["t"] > idle_hangup_seconds:
             ended = await _hangup(
                 f"双方静默超 {idle_hangup_seconds:.0f}s",
