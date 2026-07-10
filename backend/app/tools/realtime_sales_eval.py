@@ -39,8 +39,9 @@ SCENARIOS = [
     Scenario("谁？", "identity", ("视频号", "团购", "到店"), ("方便", "十秒", "半分钟", "资料", "加微信")),
     Scenario("你好", "identity", ("视频号", "团购", "到店"), ("方便", "十秒", "二十秒", "半分钟", "资料", "加微信")),
     Scenario("在在。", "identity", ("视频号", "团购", "到店"), ("方便", "十秒", "二十秒", "半分钟", "资料", "加微信")),
-    Scenario("这个要不要钱？", "price", ("付费", "收费", "费用", "价格")),
-    Scenario("多少钱，别绕。", "price", ("付费", "费用", "价格", "收费"), ("资料", "加微信")),
+    Scenario("这个要不要钱？", "price", ("不报", "门店方案", "千分之六"), ("299", "400", "500", "580", "2500")),
+    Scenario("多少钱，别绕。", "price", ("不报", "门店方案", "千分之六"), ("299", "400", "500", "580", "2500")),
+    Scenario("平台抽成多少？", "platform_fee", ("微信支付手续费千分之六",), ("不抽成", "299", "400", "500", "580", "2500")),
     Scenario("效果怎么保证？", "guarantee", ("不能", "测试", "数据", "保底")),
     Scenario("你怎么保证能带来客流？", "guarantee", ("不能", "测试", "到店", "数据")),
     Scenario("我已经做美团了，有什么区别？", "channel_difference", ("美团", "视频号", "微信")),
@@ -97,13 +98,13 @@ SCENARIOS = [
     Scenario("可以，你说一下。", "process", ("套餐", "测试", "品类", "团购")),
     Scenario("这个靠谱吗？", "guarantee", ("测试", "数据", "不能", "保底")),
     Scenario("是不是官方的？", "identity", ("顾问", "服务", "视频号")),
-    Scenario("是不是还要另外付费？", "price", ("付费", "费用", "收费")),
-    Scenario("基础费用多少钱？", "price", ("付费", "费用", "报价"), ("不合适不建议做", "资料", "加微信")),
+    Scenario("是不是还要另外付费？", "price", ("不报", "门店方案", "千分之六"), ("299", "400", "500", "580", "2500")),
+    Scenario("基础费用多少钱？", "price", ("不报", "门店方案", "千分之六"), ("299", "400", "500", "580", "2500")),
     Scenario("和美团比优势在哪里？", "advantage", ("优势", "微信", "同城")),
     Scenario("那你能给我带来多少单？", "guarantee", ("不能", "测试", "数据", "保底")),
     Scenario("你说的我听不懂。", "quality", ("视频号", "团购", "到店")),
     Scenario("什么意思啊？", "quality", ("视频号", "团购", "到店")),
-    Scenario("不是问这个，我问费用。", "price", ("付费", "费用", "价格", "收费")),
+    Scenario("不是问这个，我问费用。", "price", ("不报", "门店方案", "千分之六"), ("299", "400", "500", "580", "2500")),
     Scenario("我的问题你还没解决。", "quality", ("费用", "效果", "美团", "流程")),
     Scenario("说话。", "quality", ("视频号", "团购", "到店"), ("更缺新客", "团购套餐转化")),
     Scenario("我没有提什么问题。", "correction", ("理解错", "猜错", "问我是谁", "来电目的"), ("费用", "效果", "美团", "餐饮", "美业")),
@@ -368,18 +369,20 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
         }
     )
     recovery_instruction = build_barge_recovery_instruction(
-        [{"role": "assistant", "content": "费用看套餐和投放，先判断适不适合再报价。"}],
-        last_assistant_reply="费用看套餐和投放，先判断适不适合再报价。",
+        [{"role": "assistant", "content": "电话里不报服务价；平台侧是微信支付手续费千分之六。"}],
+        last_assistant_reply="电话里不报服务价；平台侧是微信支付手续费千分之六。",
     )
     gates.append(
         {
             "text": "barge_recovery_contextual_no_technical_tone",
             "score": 100
-            if "费用看套餐" in recovery_instruction
+            if "电话里不报服务价" in recovery_instruction
+            and "千分之六" in recovery_instruction
             and all(word not in recovery_instruction for word in ["被打断", "系统识别", "没听清"])
             else 45,
             "issues": []
-            if "费用看套餐" in recovery_instruction
+            if "电话里不报服务价" in recovery_instruction
+            and "千分之六" in recovery_instruction
             and all(word not in recovery_instruction for word in ["被打断", "系统识别", "没听清"])
             else ["bad_barge_recovery_instruction"],
         }
@@ -703,7 +706,7 @@ def _evaluate_live_gates() -> list[dict[str, object]]:
         }
     )
     wechat_fsm = SalesStateMachine()
-    wechat_fsm.record_assistant_reply("方便加个微信吗？我微信上把案例和费用发您。")
+    wechat_fsm.record_assistant_reply("方便加个微信吗？我微信上把案例和门店方案发您。")
     phone_confirm = wechat_fsm.handle_wechat_closing_turn("可以。", "低信息确认", phone="18107090349")
     gates.append(
         {
@@ -898,7 +901,8 @@ def main() -> None:
         )
         weak = [item for item in report["results"] + report.get("gateResults", []) if int(item["score"]) < 85]
         for item in weak[:8]:
-            print(f"- {item['score']} {item['text']} -> {item['reply']} ({','.join(item['issues'])})")
+            detail = item.get("reply") or item.get("detail") or ""
+            print(f"- {item['score']} {item.get('text', 'gate')} -> {detail} ({','.join(item.get('issues', []))})")
     if not report["passed"]:
         raise SystemExit(1)
 

@@ -845,6 +845,8 @@ class CallScriptAdmin(ModelView, model=CallScript):
         CallScript.qualification: "筛选问题",
         CallScript.objection: "异议处理",
         CallScript.closing: "收尾动作",
+        CallScript.entries: "结构化条目",
+        CallScript.audio_mapping: "编号→音频映射",
         CallScript.is_active: "启用",
         CallScript.created_at: "创建时间",
     }

@@ -72,6 +72,7 @@ class VoiceCacheStatusRead(BaseModel):
     profile: str
     display_name: Annotated[str, Field(alias="displayName")]
     asset_version: Annotated[str, Field(alias="assetVersion")]
+    opening_seq: Annotated[str, Field(alias="openingSeq")]
     manifest_loaded: Annotated[bool, Field(alias="manifestLoaded")]
     item_count: Annotated[int, Field(alias="itemCount")]
     intent_count: Annotated[int, Field(alias="intentCount")]

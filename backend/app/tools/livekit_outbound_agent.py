@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 from app.core.config import settings
 from app.services.livekit_outbound import _emit_livekit_event, _looks_like_dashscope_realtime_url, _masked_phone
 from app.services.runtime_ai_config import get_runtime_ai_config
-from app.services.realtime_sales_playbook import build_video_group_buying_sales_instructions
+from app.services.realtime_sales_playbook import VIDEO_GROUP_BUYING_OPENING_A, build_video_group_buying_sales_instructions
+from app.services.realtime_voice_cache import voice_cache_opening_audio_path
 
 
 load_dotenv()
@@ -30,10 +31,17 @@ _HANGUP_GRACE_SECONDS = float(os.getenv("LIVEKIT_HANGUP_GRACE_SECONDS", "1.5"))
 # 为什么不用模型说开场白：DashScope 对空上下文的 response.create 静默忽略
 # （2026-07-09 真机复现：generate_reply 后 7.5s 无响应，直到客户先开口"喂"），
 # Workbuddy 台子同日已验证固定录音方案。默认路径 backend/assets/opening.wav。
-_OPENING_WAV_PATH = os.getenv(
-    "OPENING_WAV_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "opening.wav"),
+_CONFIGURED_OPENING_WAV_PATH = os.getenv("OPENING_WAV_PATH", "").strip()
+_FALLBACK_OPENING_WAV_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "opening.wav"
 )
+
+
+def _opening_wav_path() -> str:
+    if _CONFIGURED_OPENING_WAV_PATH:
+        return _CONFIGURED_OPENING_WAV_PATH
+    cached_path = voice_cache_opening_audio_path()
+    return str(cached_path) if cached_path else _FALLBACK_OPENING_WAV_PATH
 
 
 class _OpeningPlayer:
@@ -124,7 +132,7 @@ async def entrypoint(ctx: Any) -> None:
     batch_lead_id = str(metadata.get("leadId") or "").strip() or None
     trunk_id = str(metadata.get("sipOutboundTrunkId") or settings.livekit_sip_outbound_trunk_id).strip()
     merchant_name = str(metadata.get("merchantName") or "您的门店")
-    opening_text = str(metadata.get("openingText") or settings.realtime_call_opening_text)
+    opening_text = str(metadata.get("openingText") or VIDEO_GROUP_BUYING_OPENING_A)
     agent_mode = str(metadata.get("agentMode") or settings.livekit_agent_mode or "openai_realtime").strip().lower()
     call_direction = "outbound" if dial_phone else "inbound"
 
@@ -387,9 +395,10 @@ async def entrypoint(ctx: Any) -> None:
     # 忽略，兜底模式下 AI 可能等客户先开口才响应）。
     call_started["t"] = time.monotonic()
     opening_player: _OpeningPlayer | None = None
-    if os.path.exists(_OPENING_WAV_PATH):
+    opening_wav_path = _opening_wav_path()
+    if os.path.exists(opening_wav_path):
         try:
-            opening_player = _OpeningPlayer(ctx.room, _OPENING_WAV_PATH)
+            opening_player = _OpeningPlayer(ctx.room, opening_wav_path)
         except Exception as exc:  # noqa: BLE001
             _emit_livekit_event("opening_wav_load_error", callId=action_id, roomName=room_name, error=str(exc))
     if opening_player is not None:
@@ -738,7 +747,7 @@ def _build_agent_instructions(*, merchant_name: str) -> str:
         "确认有意向后，问客户方不方便加个微信，我们在微信上继续聊。"
         "客户同意加微信后必须确认当前手机号是不是微信；如果是，就明确记录为当前手机号可加微信；如果不是，就问微信号并复述确认。"
         "商家名称整通电话最多说一次（开场提一下即可），之后一律用「您」称呼对方，禁止每句话重复商家名。"
-        "同一个问题整通电话最多问一次（比如「想看案例还是看费用」），客户没有正面回答就换个角度说，或直接推进到加微信，禁止原样复读。"
+        "同一个问题整通电话最多问一次（比如「想看案例还是看门店方案」），客户没有正面回答就换个角度说，或直接推进到加微信，禁止原样复读。"
         "客户报出或更正微信号/手机号后，必须复述最新号码请客户确认；客户再次补充或更正时，以最新说法为准重新复述确认，号码未经客户确认不得道别。"
     )
 

@@ -20,6 +20,18 @@ _SPLIT_RE = re.compile(r"[|/／,，;；]+")
 _PUNCT_RE = re.compile(r"[\s。！？?!，,、.：:；;（）()【】\\[\\]《》<>“”\"'`~·…—_-]+")
 _SEQ_PREFIX_RE = re.compile(r"^seq", re.IGNORECASE)
 _EXTRA_TRIGGERS_BY_INTENT = {
+    "script_10": (
+        "抽成多少",
+        "平台抽成多少",
+        "手续费多少",
+        "平台手续费多少",
+        "手续费几个点",
+        "怎么抽成",
+        "抽几个点",
+        "怎么抽佣",
+        "扣几个点",
+    ),
+    "script_23": ("服务费多少", "你们服务费多少", "怎么计费", "怎么报价"),
     "greeting_confirm_store": ("喂", "喂喂", "你好", "您好", "哪位", "你哪位", "谁啊", "谁呀"),
     "willing_but_alert": (
         "你说",
@@ -120,6 +132,7 @@ class VoiceCacheLibrary:
     root: Path
     items_by_seq: dict[str, CachedVoiceItem]
     intents: tuple[CachedVoiceIntent, ...]
+    opening_seq: str = "002"
     profile: str = VOICE_CACHE_PROFILE_ID
     display_name: str = VOICE_CACHE_DISPLAY_NAME
     asset_version: str = VOICE_CACHE_VERSION
@@ -183,7 +196,7 @@ def get_cached_opening_voice_match() -> CachedVoiceMatch | None:
     if not runtime_config.realtime_voice_cache_enabled:
         return None
     library = _load_library(runtime_config.realtime_voice_cache_dir)
-    item = library.items_by_seq.get("002")
+    item = library.items_by_seq.get(library.opening_seq)
     if not item or not item.pcm_path.exists():
         return None
     return CachedVoiceMatch(
@@ -219,6 +232,7 @@ def voice_cache_status() -> dict[str, object]:
         "profile": library.profile,
         "displayName": library.display_name,
         "assetVersion": library.asset_version,
+        "openingSeq": library.opening_seq,
         "manifestLoaded": bool(library.items_by_seq),
         "itemCount": len(library.items_by_seq),
         "intentCount": len(library.intents),
@@ -266,6 +280,15 @@ def voice_cache_item_audio_path(seq: str) -> Path | None:
     if not item or not item.wav_path.exists() or not item.wav_path.is_file():
         return None
     return item.wav_path
+
+
+def voice_cache_opening_audio_path() -> Path | None:
+    runtime_config = get_runtime_ai_config()
+    if not runtime_config.realtime_voice_cache_enabled:
+        return None
+    library = _load_library(runtime_config.realtime_voice_cache_dir)
+    path = library.root / "audio_24k" / f"seq{library.opening_seq}.wav"
+    return path if path.exists() and path.is_file() else None
 
 
 @lru_cache(maxsize=8)
@@ -319,6 +342,7 @@ def _load_library(cache_dir: str) -> VoiceCacheLibrary:
         root=root,
         items_by_seq=items_by_seq,
         intents=tuple(intents),
+        opening_seq=_normalize_seq(meta["openingSeq"]),
         profile=meta["profile"],
         display_name=meta["displayName"],
         asset_version=meta["assetVersion"],
@@ -330,6 +354,7 @@ def _load_cache_meta(root: Path) -> dict[str, str]:
         "profile": VOICE_CACHE_PROFILE_ID,
         "displayName": VOICE_CACHE_DISPLAY_NAME,
         "assetVersion": VOICE_CACHE_VERSION,
+        "openingSeq": "002",
     }
     meta_path = root / "voice_cache_meta.json"
     if not meta_path.exists():

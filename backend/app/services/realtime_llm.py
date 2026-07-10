@@ -38,7 +38,10 @@ _DEEPSEEK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-ac
 _DEEPSEEK_BACKOFF_LOCK = threading.Lock()
 _DEEPSEEK_BACKOFF_UNTIL = 0.0
 _DEEPSEEK_BACKOFF_SECONDS = 45.0
+_CURRENCY_AMOUNT_RE = re.compile(r"(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)\s*(?:元|块钱|人民币)")
+_RATE_RE = re.compile(r"(?:百分之[零〇一二两三四五六七八九十百千万\d.]+|千分之[零〇一二两三四五六七八九十百千万\d.]+|\d+(?:\.\d+)?\s*%)")
 _FAST_LOCAL_INTENTS = {
+    "价格异议",
     "明确拒绝",
     "礼貌结束",
     "稍后联系",
@@ -149,6 +152,14 @@ def generate_realtime_reply(
             fallback_used=True,
             error="DeepSeek 返回空回复",
         )
+    if _violates_pricing_policy(cleaned):
+        return RealtimeReplyResult(
+            reply=contextual_reply,
+            strategy="local_context_pricing_policy_fallback",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            fallback_used=True,
+            error="DeepSeek 回复触发价格口径保护，已切回本地话术。",
+        )
     if _repeats_recent_reply(cleaned, history):
         return RealtimeReplyResult(
             reply=contextual_reply,
@@ -190,6 +201,9 @@ def _build_contextual_local_reply(
     merchant = merchant_name.strip() or "您的门店"
     signal = signal or _analyze_dialogue_signal(clean, intent, conversation_history)
 
+    if _is_platform_fee_question(clean):
+        return _avoid_repeat("平台侧是微信支付手续费千分之六。", last_assistant)
+
     if signal.topic == "identity":
         if compact in {"喂", "喂喂", "你好"}:
             return _avoid_repeat("您好，我在。我是做视频号团购到店获客的，给您来电是确认微信同城曝光这块。", last_assistant)
@@ -204,7 +218,7 @@ def _build_contextual_local_reply(
     if signal.topic == "repetition_complaint":
         history_topic = _infer_history_topic(clean, last_user, last_assistant)
         if history_topic == "price":
-            return _avoid_repeat("明白，我不重复。费用看套餐和投放，先判断适不适合再报价。", last_assistant)
+            return _avoid_repeat("明白，我不重复。电话里不报服务价，具体按门店方案确认。", last_assistant)
         if history_topic == "guarantee":
             return _avoid_repeat("明白，我直接答：效果不能保底，只能先测曝光、咨询和到店。", last_assistant)
         if history_topic in {"existing_channel", "channel_difference"} or _is_channel_difference_question(clean):
@@ -215,7 +229,7 @@ def _build_contextual_local_reply(
         if _is_channel_difference_question(clean):
             return _avoid_repeat("不发资料，我直接说：美团偏搜索成交，视频号偏微信同城曝光和私域沉淀。", last_assistant)
         if _is_price_question(clean):
-            return _avoid_repeat("不发资料，直接说费用：这是付费服务，按套餐和投放节奏报价。", last_assistant)
+            return _avoid_repeat("不发资料，我直接说：电话里不报服务价；平台侧是微信支付手续费千分之六。", last_assistant)
         if _has_any(clean, ["效果", "客流", "到店", "有没有用", "靠谱吗"]):
             return _avoid_repeat("不发资料，直接说效果：先测曝光、咨询和到店数据，不空口保底。", last_assistant)
         return _avoid_repeat("明白，不发资料。您直接问我费用、效果或流程，我就按问题答。", last_assistant)
@@ -229,9 +243,9 @@ def _build_contextual_local_reply(
 
     if signal.topic == "price":
         return _avoid_repeat(
-            "是要付费，具体看套餐和投放，不合适不建议做。",
+            "电话里不报服务价。不同门店内容不一样，我加您微信发同行案例和门店方案，您看完再比较。",
             last_assistant,
-            ["您问费用对吧，是付费服务，但先看适不适合再报价。"],
+            ["平台侧是微信支付手续费千分之六；具体服务按门店方案确认，电话里不报价。"],
         )
 
     if signal.topic == "guarantee":
@@ -254,7 +268,7 @@ def _build_contextual_local_reply(
     if signal.topic == "materials":
         if _has_any(last_assistant, ["案例", "资料", "微信"]):
             return _avoid_repeat("可以，那我确认一下，这个手机号就是您的微信吗？", last_assistant)
-        return _avoid_repeat("可以，方便加个微信吗？我微信上把案例和费用发您。", last_assistant)
+        return _avoid_repeat("可以，方便加个微信吗？我微信上把案例和门店方案发您。", last_assistant)
 
     if signal.topic == "quality":
         return _avoid_repeat(
@@ -286,7 +300,7 @@ def _build_contextual_local_reply(
     if signal.topic == "context_repair":
         history_topic = _infer_history_topic(clean, last_user, last_assistant)
         if history_topic == "price":
-            return _avoid_repeat("您问费用对吧，是付费服务，但先看适不适合再报价。", last_assistant)
+            return _avoid_repeat("您问费用对吧。电话里不报服务价，平台侧是微信支付手续费千分之六。", last_assistant)
         if history_topic == "guarantee":
             return _avoid_repeat("您问保障对吧，不能保底，只能先用数据测试效果。", last_assistant)
         if history_topic == "process":
@@ -309,11 +323,11 @@ def _build_contextual_local_reply(
             return _avoid_repeat("可以，那我确认一下，这个手机号就是您的微信吗？", last_assistant)
         if _has_any(clean, ["怎么", "哪里", "发到", "短信"]):
             return _avoid_repeat("可以，短信或微信发案例和流程给您。", last_assistant)
-        return _avoid_repeat("可以，方便加个微信吗？我微信上把案例和费用发您。", last_assistant)
+        return _avoid_repeat("可以，方便加个微信吗？我微信上把案例和门店方案发您。", last_assistant)
 
     if intent == "听不清/澄清":
         if _has_any(clean + last_user, ["付费", "要钱", "花钱", "付钱", "费用", "收费", "价格"]):
-            return _avoid_repeat("是要付费，具体看套餐和投放，不合适不建议做。", last_assistant)
+            return _avoid_repeat("电话里不报服务价；平台侧是微信支付手续费千分之六。", last_assistant)
         if _has_any(clean + last_user, ["保证", "承诺", "保底"]):
             return _avoid_repeat("不能空口保证，只能先测曝光、咨询和到店数据。", last_assistant)
         if _has_any(clean, ["信号", "断断续续", "太慢", "反应慢", "卡"]):
@@ -332,9 +346,10 @@ def _build_contextual_local_reply(
         return _avoid_repeat("我接着说：先小范围测曝光和到店。", last_assistant)
 
     if intent == "价格异议":
-        if _has_any(clean, ["付费", "要钱", "花钱", "付钱"]):
-            return _avoid_repeat("是要付费，具体看套餐和投放，不合适不建议做。", last_assistant)
-        return _avoid_repeat("费用看套餐和投放，先判断适不适合再报价。", last_assistant)
+        return _avoid_repeat(
+            "电话里不报服务价。不同门店内容不一样，我加您微信发同行案例和门店方案，您看完再比较。",
+            last_assistant,
+        )
 
     if intent == "效果询问":
         return _avoid_repeat("先测曝光、咨询、到店数据，不跟您空口保证。", last_assistant)
@@ -366,9 +381,9 @@ def _build_contextual_local_reply(
         if _has_any(clean, ["效果", "客流", "到店", "有没有用"]):
             return _avoid_repeat("关键看套餐吸引力，先小范围测到店。", last_assistant)
         if _has_any(clean, ["费用", "多少钱", "价格", "收费"]):
-            return _avoid_repeat("价格要看套餐和投放节奏，不先硬报。", last_assistant)
+            return _avoid_repeat("电话里不报服务价；平台侧是微信支付手续费千分之六。", last_assistant)
         if _has_any(clean, ["付费", "要钱", "花钱", "付钱"]):
-            return _avoid_repeat("是要付费，具体看套餐和投放，不合适不建议做。", last_assistant)
+            return _avoid_repeat("具体服务按门店方案确认，电话里不直接报价。", last_assistant)
         if _has_any(clean, ["保证", "承诺", "保底"]):
             return _avoid_repeat("不能空口保证，只能先测曝光、咨询和到店数据。", last_assistant)
         if _has_any(last_assistant, ["更想提升到店客流", "还是先了解怎么做"]):
@@ -426,6 +441,9 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
         if history_topic != "unknown":
             return DialogueSignal(history_topic, direct_question=True, from_context_repair=True)
         return DialogueSignal("context_repair", direct_question=True, from_context_repair=True)
+
+    if _is_platform_fee_question(clean):
+        return DialogueSignal("platform_fee", direct_question=True)
 
     if _is_price_question(clean):
         return DialogueSignal("price", direct_question=True)
@@ -506,6 +524,7 @@ def _analyze_dialogue_signal(text: str, intent: str, conversation_history: list[
 def _should_answer_locally_first(signal: DialogueSignal) -> bool:
     return signal.topic in {
         "identity",
+        "platform_fee",
         "price",
         "guarantee",
         "effect_goal",
@@ -525,7 +544,22 @@ def _should_answer_locally_first(signal: DialogueSignal) -> bool:
 
 
 def _is_price_question(text: str) -> bool:
-    return _has_any(text, ["多少钱", "费用", "价格", "收费", "贵", "付费", "要钱", "花钱", "付钱"])
+    return _has_any(text, ["多少钱", "费用", "价格", "收费", "服务费", "怎么计费", "手续费", "抽成", "抽佣", "扣点", "贵", "付费", "要钱", "花钱", "付钱"])
+
+
+def _is_platform_fee_question(text: str) -> bool:
+    return _has_any(text, ["手续费", "抽成", "抽佣", "扣点"])
+
+
+def _violates_pricing_policy(text: str) -> bool:
+    if any(claim in text for claim in ["不抽成", "没有抽成", "零抽成", "0抽成", "免费帮您", "免费拉客"]):
+        return True
+    if _CURRENCY_AMOUNT_RE.search(text):
+        return True
+    without_allowed_rate = text.replace("千分之六", "")
+    if _RATE_RE.search(without_allowed_rate):
+        return True
+    return any(keyword in text for keyword in ["手续费", "抽成", "抽佣", "扣点"]) and "千分之六" not in text
 
 
 def _is_channel_difference_question(text: str) -> bool:
@@ -624,6 +658,8 @@ def _request_deepseek_reply(
                     "任务是销售视频号团购到店获客服务，并礼貌确认对方是否有兴趣。"
                     "不能自称平台官方、微信官方、视频号官方或官方合作方；只能称本地生活服务顾问。"
                     "不能承诺已合作、补贴、保底效果或未授权身份。"
+                    "电话中任何时候都不报本公司服务价、打包价、底价或折扣，不输出人民币金额。"
+                    "涉及平台抽成或手续费，只能说微信支付手续费千分之六，不能说其他费率或零抽成。"
                     "必须先回答客户当前问题，再轻轻推进下一步。"
                     "客户说不要资料、不加微信、直接回答、别重复时，本轮停止推进资料和微信，只回答问题。"
                     "推进下一步时只问一次是否方便加微信；客户同意后先确认当前手机号是不是微信，不是再问微信号。"

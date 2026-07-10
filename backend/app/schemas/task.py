@@ -47,12 +47,25 @@ class OutboundTaskCreate(BaseModel):
     scheduled_at: Annotated[datetime | None, Field(alias="scheduledAt")] = None
 
 
+class CallScriptEntry(BaseModel):
+    number: str = Field(pattern=r"^\d{2}$")
+    category: str = Field(min_length=1, max_length=40)
+    customer_trigger: Annotated[str, Field(alias="customerTrigger")] = ""
+    content: str = Field(min_length=1)
+    execution_tip: Annotated[str, Field(alias="executionTip")] = ""
+    audio_file: Annotated[str, Field(alias="audioFile", min_length=1)]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CallScriptCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     opening: str = Field(min_length=1)
     qualification: str = Field(min_length=1)
     objection: str = Field(min_length=1)
     closing: str = Field(min_length=1)
+    entries: list[CallScriptEntry] = Field(default_factory=list)
+    audio_mapping: Annotated[dict[str, str], Field(alias="audioMapping")] = Field(default_factory=dict)
     is_active: Annotated[bool, Field(alias="isActive")] = True
 
 

@@ -9,7 +9,7 @@ from app.services.realtime_text_normalizer import normalize_realtime_sales_text
 
 
 SOLUTION_INTRO_REPLY = "我先多讲一句：我们先看门店品类和客单价，设计可核销团购套餐，再小范围测曝光、咨询和到店数据。"
-SOFT_WECHAT_OFFER_REPLY = "落地流程就是诊断品类、设计套餐、上架测试和复盘。如果您愿意，我可以微信发一份同品类案例和费用区间。"
+SOFT_WECHAT_OFFER_REPLY = "落地流程就是诊断品类、设计套餐、上架测试和复盘。如果您愿意，我可以微信发一份同品类案例和门店方案。"
 
 
 class SalesStage(str, Enum):
@@ -145,13 +145,13 @@ class SalesStateMachine:
             return "好的，不打扰了，再见。"
         if self.state.push_forbidden and _has_any(clean, ["加微信", "发资料", "发案例", "留个微信"]):
             return "不继续推。您直接问费用、效果或流程，我按问题答。"
-        if self.state.solution_intro_count == 0 and _has_any(clean, ["加微信", "加个微信", "微信上", "微信聊", "发资料", "发案例", "费用区间发您"]):
-            return SOLUTION_INTRO_REPLY
         if self._repeats_wechat_materials_pitch(clean):
             if not self.state.wechat_confirmed and not self.state.wechat_phone_confirm_pending and not self.state.wechat_id_pending:
                 self.state.wechat_phone_confirm_pending = True
-                return "可以，我加您微信，把案例、流程和费用区间发您。这个手机号就是您的微信吗？"
+                return "可以，我加您微信，把案例和门店方案发您。这个手机号就是您的微信吗？"
             return "我不重复刚才那句。您直接问费用、效果或流程，我按问题答。"
+        if self.state.solution_intro_count == 0 and _has_any(clean, ["加微信", "加个微信", "微信上", "微信聊", "发资料", "发案例", "门店方案发您"]):
+            return SOLUTION_INTRO_REPLY
         if self.state.last_assistant_reply and _normalize(clean) == _normalize(self.state.last_assistant_reply):
             return "我换个角度说：视频号团购补的是微信同城和私域到店。"
         return _suppress_habitual_ack(clean, self.state.last_assistant_reply)
@@ -257,7 +257,7 @@ class SalesStateMachine:
                 )
             if phone_digits:
                 self.state.wechat_phone_confirm_pending = True
-                return WechatClosingResult(reply="可以，我加您微信，把案例、流程和费用区间发您。这个手机号就是您的微信吗？", action="ask_phone_is_wechat")
+                return WechatClosingResult(reply="可以，我加您微信，把案例和门店方案发您。这个手机号就是您的微信吗？", action="ask_phone_is_wechat")
             self.state.wechat_id_pending = True
             return WechatClosingResult(reply="可以，那您的微信号是哪个？我记一下，稍后添加您。", action="ask_wechat_id")
         if (
@@ -492,7 +492,7 @@ def _customer_accepts_wechat(text: str, intent: str, last_reply: str) -> bool:
     explicit_request = _explicit_wechat_or_materials_request(text, intent)
     if explicit_request and "短信" not in compact:
         return True
-    asked_wechat = _has_any(last_reply, ["加微信", "加个微信", "微信上", "微信聊", "微信发", "发资料", "发案例", "发流程", "费用区间发您"])
+    asked_wechat = _has_any(last_reply, ["加微信", "加个微信", "微信上", "微信聊", "微信发", "发资料", "发案例", "发流程", "门店方案发您"])
     if not asked_wechat:
         return False
     if _is_affirmative_confirmation(compact):
@@ -618,7 +618,7 @@ def _is_interest_or_continue_signal(compact: str) -> bool:
 
 def _wechat_confirmed_reply(*, use_phone: bool = True) -> str:
     target = "这个手机号" if use_phone else "这个微信"
-    return f"好的，我稍后按{target}添加您，您通过后我把案例和费用区间发过去。感谢您接听，先不多打扰了。"
+    return f"好的，我稍后按{target}添加您，您通过后我把案例和门店方案发过去。感谢您接听，先不多打扰了。"
 
 
 def _looks_like_solution_intro(reply: str) -> bool:

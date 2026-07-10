@@ -44,9 +44,12 @@ TOPIC_ANSWERS = {
         "简单说，我是帮门店做视频号团购获客的，不是平台官方。",
     ],
     "price": [
-        "是付费服务，基础费用要看套餐和投放节奏，我不在电话里乱报。",
-        "费用按套餐设计和投放范围定，适合再给明确报价。",
-        "要收费，但先看品类和客单价，能做再谈具体费用。",
+        "电话里不报本公司服务价。不同门店内容不一样，我加您微信发同行案例和门店方案，您看完再比较。",
+        "平台侧是微信支付手续费千分之六；具体服务要按门店方案判断，电话里不直接报价。",
+        "不同门店要做的内容不一样，电话里直接报一个数不准。我加您微信，把案例和门店方案发过去。",
+    ],
+    "platform_fee": [
+        "平台侧是微信支付手续费千分之六。",
     ],
     "roi_risk": [
         "这个风险要控制：先小预算测曝光、咨询和到店，达不到就不放大投入。",
@@ -84,7 +87,7 @@ TOPIC_ANSWERS = {
         "不搜索也有推荐流机会；客户能从门店主页和团购券入口看到，视频不用重拍很多。",
     ],
     "materials": [
-        "可以，方便加个微信吗？我微信上把案例和费用发您。",
+        "可以，方便加个微信吗？我微信上把案例和门店方案发您。",
         "可以发，先确认下加微信方便吗？后面微信上继续聊。",
     ],
     "owner": [
@@ -119,7 +122,8 @@ TOPIC_ANSWERS = {
 
 ADVANCE_LINES = {
     "identity": "",
-    "price": "您更关心基础费用，还是先看适不适合？",
+    "price": "您这号是微信吧？",
+    "platform_fee": "",
     "roi_risk": "",
     "guarantee": "可以先拿小测试看数据，不用一上来做大投入。",
     "channel_difference": "已有美团也能做补充，不冲突。",
@@ -206,6 +210,7 @@ def plan_sales_turn(text: str, intent: str = "", conversation_history: list[dict
         "source",
         "owner",
         "identity",
+        "platform_fee",
         "correction",
         "visibility",
         "need_confirmed",
@@ -354,7 +359,9 @@ def _detect_topic(text: str, intent: str, history: list[dict[str, str]]) -> str:
         return "process"
     if _is_roi_risk_question(text):
         return "roi_risk"
-    if _has_any(text, ["多少钱", "费用", "价格", "收费", "付费", "要钱", "花钱", "成本", "预算", "投入", "贵"]):
+    if _has_any(text, ["手续费", "抽成", "抽佣", "扣点"]):
+        return "platform_fee"
+    if _has_any(text, ["多少钱", "费用", "价格", "收费", "服务费", "怎么计费", "付费", "要钱", "花钱", "成本", "预算", "投入", "贵"]):
         return "price"
     if normalized.has_fix("group_buying_package") or (
         "团购套餐" in text and _has_any(text, ["什么意思", "什么", "怎么做", "怎么弄", "要帮我"])
@@ -507,7 +514,7 @@ def _detect_emotion(text: str, history: list[dict[str, str]]) -> str:
 def _detect_stage(topic: str, intent: str, history: list[dict[str, str]]) -> str:
     if topic in {"identity", "quality", "correction"} or not history:
         return "opening_repair"
-    if topic in {"price", "roi_risk", "guarantee", "channel_difference", "advantage", "source", "visibility", "exposure_detail"}:
+    if topic in {"price", "platform_fee", "roi_risk", "guarantee", "channel_difference", "advantage", "source", "visibility", "exposure_detail"}:
         return "objection_handling"
     if topic in {"process", "open_need", "need_confirmed"}:
         return "discovery"

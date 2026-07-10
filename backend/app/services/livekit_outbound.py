@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.realtime_sales_playbook import VIDEO_GROUP_BUYING_OPENING_A
 from app.services.runtime_ai_config import get_runtime_ai_config
 
 
@@ -133,7 +134,7 @@ def dispatch_livekit_outbound_call(
         "leadId": lead_id or "",
         "sipOutboundTrunkId": settings.livekit_sip_outbound_trunk_id.strip(),
         "sipFromNumber": settings.livekit_sip_from_number.strip(),
-        "openingText": settings.realtime_call_opening_text,
+        "openingText": VIDEO_GROUP_BUYING_OPENING_A,
     }
     _emit_livekit_event(
         "livekit_dispatch_start",

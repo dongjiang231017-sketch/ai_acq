@@ -738,7 +738,7 @@ def _classify_intent(text: str) -> tuple[str, str]:
         return "身份确认", "身份说明"
     if compact in {"喂", "喂喂", "你好", "您好", "在", "在在", "你谁", "谁", "谁啊", "谁呀", "哪位", "您哪位", "你哪位"}:
         return "身份确认", "身份说明"
-    if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "贵", "付费", "要钱", "花钱", "付钱"]):
+    if any(keyword in text for keyword in ["多少钱", "费用", "价格", "收费", "服务费", "手续费", "抽成", "抽佣", "扣点", "贵", "付费", "要钱", "花钱", "付钱"]):
         return "价格异议", "价格说明"
     material_only_decline = any(
         keyword in clean
@@ -1006,8 +1006,10 @@ def _build_reply(text: str, intent: str, merchant_name: str) -> str:
     text = normalization.normalized_text
     if normalization.has_fix("group_buying_package"):
         return "不是4G套餐，是团购套餐，就是客户线上下单、到店核销的优惠套餐。"
+    if any(keyword in text for keyword in ["手续费", "抽成", "抽佣", "扣点"]):
+        return "平台侧是微信支付手续费千分之六。"
     replies = {
-        "价格异议": "费用先不急，我先帮您判断视频号团购适不适合您的门店。",
+        "价格异议": "电话里不报服务价。平台侧是微信支付手续费千分之六，我加您微信发同行案例和门店方案。",
         "明确拒绝": "好的，不打扰了，再见。",
         "稍后联系": "可以，我不多打扰。今天下午还是明天上午再跟您确认方便？",
         "加微信/发资料": "我先补充一下：我们会先看门店品类和客单价，设计团购套餐，小范围测曝光、咨询和到店数据。",

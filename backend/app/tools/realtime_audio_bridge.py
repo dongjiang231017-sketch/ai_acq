@@ -43,6 +43,7 @@ from app.services.realtime_llm import generate_realtime_reply
 from app.services.realtime_outbound import _build_reply, _classify_intent
 from app.services.realtime_route_health import mark_omni_route_unavailable, omni_route_unavailable_reason
 from app.services.realtime_sales_playbook import (
+    VIDEO_GROUP_BUYING_OPENING_A,
     build_omni_turn_instruction,
     build_video_group_buying_sales_instructions,
     classify_realtime_call_input,
@@ -80,7 +81,7 @@ OMNI_FIRST_AUDIO_DEADLINE_SECONDS = 1.8
 OMNI_TRANSCRIPTION_FALLBACK_DELAY_SECONDS = 0.75
 OMNI_NO_AUDIO_FALLBACK_TEXT = "我短说：我是做视频号团购到店获客的，帮门店做套餐和微信同城曝光。"
 SOLUTION_INTRO_REPLY = "我先多讲一句：我们先看门店品类和客单价，设计可核销团购套餐，再小范围测曝光、咨询和到店数据。"
-SOFT_WECHAT_OFFER_REPLY = "落地流程就是诊断品类、设计套餐、上架测试和复盘。如果您愿意，我可以微信发一份同品类案例和费用区间。"
+SOFT_WECHAT_OFFER_REPLY = "落地流程就是诊断品类、设计套餐、上架测试和复盘。如果您愿意，我可以微信发一份同品类案例和门店方案。"
 BUSINESS_CATEGORY_REPLY = "您这类门店适合先做低门槛引流套餐，用视频号同城推荐带附近客户到店，再看咨询和核销数据。"
 INTERRUPTED_OPENING_SHORT_FALLBACK_REPLY = (
     "嗯，不是卖课，也不是平台招商，就是看你们店应该能做到店套餐，"
@@ -192,6 +193,10 @@ ASR_PARTIAL_FAST_MARKERS = (
     "别绕",
     "收费",
     "怎么收费",
+    "手续费",
+    "抽成",
+    "抽佣",
+    "扣点",
     "价格",
     "报价",
     "多少钱",
@@ -242,6 +247,10 @@ ASR_PARTIAL_COMPLETE_QUESTION_MARKERS = (
     "多少钱",
     "费用",
     "收费",
+    "手续费",
+    "抽成",
+    "抽佣",
+    "扣点",
     "价格",
     "报价",
     "成本",
@@ -1445,10 +1454,7 @@ class AudioSocketCallSession:
         return f"当前通话商户/店名：{merchant}。开场和后续回复可以自然称呼“{merchant}”，不要编造其他店名。"
 
     def _opening_text_for_call(self) -> str:
-        merchant = self._merchant_name()
-        if merchant == "您的门店":
-            return "您好，我是做视频号团购到店获客的，想确认您门店需不需要微信同城曝光。"
-        return f"喂，老板您好，是{merchant}吗？我是做视频号团购到店获客的，想确认您门店需不需要微信同城曝光。"
+        return VIDEO_GROUP_BUYING_OPENING_A
 
     def _screening_handoff_reply(self) -> str:
         return f"您好，我这边做视频号团购到店获客，来电想确认{self._merchant_subject()}微信同城曝光合作，麻烦转接负责人，谢谢。"
@@ -2372,9 +2378,9 @@ class AudioSocketCallSession:
             return turn_count, "我直接说身份：做视频号团购到店获客，不是平台官方，也不是催您马上办理。"
         if intent == "加微信/发资料":
             if "怎么" in clean or "哪里" in clean:
-                return turn_count, "短信或微信都可以，您看哪种方便？我只发一份案例资料。"
+                return turn_count, "微信发最方便，我只发案例和门店方案。您这个手机号就是微信吗？"
             if turn_count > 0:
-                return turn_count, "可以，我加您微信，把案例、流程和费用区间发您。这个手机号就是您的微信吗？"
+                return turn_count, "可以，我加您微信，把案例和门店方案发您。这个手机号就是您的微信吗？"
         if intent == "听不清/澄清" and turn_count > 0:
             return turn_count, "我再说短一点：做视频号团购，帮门店多拿到店客户。"
         if intent == "合作咨询" and turn_count > 0:
@@ -3836,15 +3842,15 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             or compact in {"就是", "是我是我的"}
             or any(keyword in compact for keyword in ("是我的微信", "就是我的微信", "手机号就是微信", "这个号就是微信"))
         ):
-            return "好的，我稍后按这个手机号添加您，您通过后我把案例和费用区间发过去。感谢您接听，先不多打扰了。", True
+            return "好的，我稍后按这个手机号添加您，您通过后我把案例和门店方案发过去。感谢您接听，先不多打扰了。", True
         if any(keyword in compact for keyword in ("是我的微信", "就是我的微信", "手机号就是微信", "这个号就是微信")):
-            return "好的，我稍后按这个手机号添加您，您通过后我把案例和费用区间发过去。感谢您接听，先不多打扰了。", True
+            return "好的，我稍后按这个手机号添加您，您通过后我把案例和门店方案发过去。感谢您接听，先不多打扰了。", True
         if any(keyword in compact for keyword in ("不方便", "挂电话", "挂了", "再见", "拜拜", "不聊了", "不说了")):
             return "好的，不打扰了，再见。", True
         if compact == "不要":
             return "我确认一下，您是想先了解资料，还是暂时不需要？", False
         if asking_wechat and _is_wechat_affirmative_text(clean):
-            return "可以，我加您微信，把案例、流程和费用区间发您。这个手机号就是您的微信吗？", False
+            return "可以，我加您微信，把案例和门店方案发您。这个手机号就是您的微信吗？", False
         if compact in {"喂", "喂喂", "你好", "您好"} and self._opening_started:
             return "嗯，不是卖课，也不是平台招商，就是看你们店应该能做到店套餐，想问下你有没有了解过视频号团购这块。", False
 
@@ -3875,8 +3881,10 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             return "美团偏搜索下单，视频号偏微信同城曝光和私域沉淀，是补充，不是替代。", False
         if any(keyword in compact for keyword in ("效果能保证", "能保证吗", "保证吗", "保底", "效果")):
             return "不能空口保证成交，只能先用小范围测试看真实曝光、咨询和到店数据，再决定要不要放大。", False
-        if any(keyword in compact for keyword in ("费用怎么算", "费用", "价格", "收费", "多少钱", "报价")):
-            return "费用要看门店品类、套餐数量和投放节奏，我这边先判断适不适合，不合适就不建议做。", False
+        if any(keyword in compact for keyword in ("手续费", "抽成", "抽佣", "扣点")):
+            return "平台侧是微信支付手续费千分之六。", False
+        if any(keyword in compact for keyword in ("费用怎么算", "费用", "价格", "收费", "服务费", "多少钱", "报价", "怎么计费")):
+            return "电话里不报服务价。不同门店内容不一样，我加您微信发同行案例和门店方案，您看完再比较。您这号是微信吧？", False
         if any(keyword in compact for keyword in ("具体怎么做", "具体做", "怎么做", "流程", "怎么合作")):
             return SOFT_WECHAT_OFFER_REPLY if has_solution_intro else SOLUTION_INTRO_REPLY, False
         if _is_business_category_signal(clean):
@@ -4320,8 +4328,10 @@ class OmniAudioSocketCallSession(AudioSocketCallSession):
             with self._omni_lock:
                 last_reply = self._last_omni_reply
             return SOFT_WECHAT_OFFER_REPLY if _reply_has_solution_intro(last_reply) else SOLUTION_INTRO_REPLY
-        if any(keyword in text for keyword in ["费用", "价格", "收费", "要钱", "付费"]):
-            return "费用要看门店品类、套餐数量和投放节奏，我这边先判断适不适合，不合适就不建议做。"
+        if any(keyword in text for keyword in ["手续费", "抽成", "抽佣", "扣点"]):
+            return "平台侧是微信支付手续费千分之六。"
+        if any(keyword in text for keyword in ["费用", "价格", "收费", "服务费", "多少钱", "怎么计费", "要钱", "付费"]):
+            return "电话里不报服务价。不同门店内容不一样，我加您微信发同行案例和门店方案。"
         if any(keyword in text for keyword in ["美团", "抖音", "大众点评"]):
             return "美团偏搜索成交，视频号偏微信同城曝光和私域沉淀，是补充。"
         if any(keyword in text for keyword in ["效果", "客流", "到店", "保证", "保底"]):
@@ -4752,7 +4762,7 @@ def build_config(args: argparse.Namespace) -> BridgeConfig:
         omni_input_transcription_model=(
             args.omni_input_transcription_model or runtime_config.dashscope_omni_input_transcription_model
         ).strip(),
-        opening_text=args.opening_text or settings.realtime_call_opening_text,
+        opening_text=args.opening_text or VIDEO_GROUP_BUYING_OPENING_A,
         log_path=Path(args.log_path or settings.realtime_call_event_log_path).expanduser(),
         workspace=workspace,
         barge_rms_threshold=max(1, settings.realtime_barge_rms_threshold),

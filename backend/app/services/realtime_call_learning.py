@@ -146,7 +146,7 @@ def _topic_counts(customer_turns: list[str]) -> dict[str, int]:
             labels.append("advantage")
         if _has_any(text, ["美团", "抖音", "大众点评", "小红书", "高德"]):
             labels.append("channel_difference")
-        if _has_any(text, ["收费", "费用", "价格", "多少钱", "付费", "要钱", "基础费"]):
+        if _has_any(text, ["收费", "费用", "价格", "多少钱", "服务费", "手续费", "抽成", "抽佣", "扣点", "付费", "要钱", "基础费"]):
             labels.append("price")
         if _has_any(text, ["流程", "怎么做", "怎么合作", "开发流程"]):
             labels.append("process")
@@ -162,7 +162,7 @@ def _repeated_reply_patterns(assistant_turns: list[str]) -> list[str]:
         "美团偏搜索",
         "视频号偏微信同城",
         "不合适不建议做",
-        "费用看套餐",
+        "电话里不报服务价",
         "给您来电是确认",
         "先看品类",
     ]
@@ -228,7 +228,7 @@ def _build_next_guidance(
     if topics.get("advantage") or topics.get("channel_difference"):
         guidance.append("客户问优势/为什么用你时，直接给具体差异：微信同城内容曝光、私域沉淀、套餐核销；不要只重复“美团偏搜索”。")
     if topics.get("price"):
-        guidance.append("客户问收费/基础费用时，先承认付费，再说明报价取决于套餐和投放节奏；不要连续说“不合适不建议做”。")
+        guidance.append("客户问收费时，电话中不报本公司服务价；只说明微信支付手续费千分之六，再转微信发同行案例和门店方案。")
     if topics.get("process"):
         guidance.append("客户问流程时，用三步说清：看品类和客单价、设计可核销团购套餐、小范围测曝光/咨询/到店。")
     if topics.get("identity"):

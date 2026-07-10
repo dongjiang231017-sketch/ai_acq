@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -42,6 +42,8 @@ class CallScript(Base):
     qualification: Mapped[str] = mapped_column(Text)
     objection: Mapped[str] = mapped_column(Text)
     closing: Mapped[str] = mapped_column(Text)
+    entries: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
+    audio_mapping: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

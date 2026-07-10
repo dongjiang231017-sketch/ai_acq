@@ -230,6 +230,15 @@ export type CallRecord = {
   createdAt: string;
 };
 
+export type CallScriptEntry = {
+  number: string;
+  category: string;
+  customerTrigger: string;
+  content: string;
+  executionTip: string;
+  audioFile: string;
+};
+
 export type CallScript = {
   id: string;
   name: string;
@@ -237,6 +246,8 @@ export type CallScript = {
   qualification: string;
   objection: string;
   closing: string;
+  entries?: CallScriptEntry[];
+  audioMapping?: Record<string, string>;
   isActive: boolean;
   createdAt: string;
 };
@@ -1145,6 +1156,7 @@ export type VoiceCacheStatus = {
   profile: string;
   displayName: string;
   assetVersion: string;
+  openingSeq?: string;
   manifestLoaded: boolean;
   itemCount: number;
   intentCount: number;
