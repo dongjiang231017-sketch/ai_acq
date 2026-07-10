@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -7,6 +10,12 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.operations import SystemSetting
+
+
+logger = logging.getLogger(__name__)
+
+_MODEL_OVERRIDES_CACHE: dict[str, str] | None = None
+_MODEL_OVERRIDES_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -160,12 +169,34 @@ def get_runtime_ai_config() -> RuntimeAiConfig:
 
 
 def _load_model_overrides() -> dict[str, str]:
-    try:
-        with SessionLocal() as db:
-            rows = db.scalars(select(SystemSetting).where(SystemSetting.group_key == "model")).all()
-            return {MODEL_SETTING_MAP[row.item_key]: row.value for row in rows if row.item_key in MODEL_SETTING_MAP}
-    except Exception:  # noqa: BLE001 - runtime config must not break boot when migrations are not applied yet.
-        return {}
+    global _MODEL_OVERRIDES_CACHE
+
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            with SessionLocal() as db:
+                rows = db.scalars(select(SystemSetting).where(SystemSetting.group_key == "model")).all()
+            overrides = {
+                MODEL_SETTING_MAP[row.item_key]: row.value
+                for row in rows
+                if row.item_key in MODEL_SETTING_MAP
+            }
+            with _MODEL_OVERRIDES_LOCK:
+                _MODEL_OVERRIDES_CACHE = dict(overrides)
+            return overrides
+        except Exception as exc:  # noqa: BLE001 - runtime config must survive transient DB failures.
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.15)
+
+    with _MODEL_OVERRIDES_LOCK:
+        cached = dict(_MODEL_OVERRIDES_CACHE or {})
+    logger.warning(
+        "运行时模型配置读取失败，使用最近一次成功配置（cached=%s）: %s",
+        bool(cached),
+        last_error,
+    )
+    return cached
 
 
 def _str(values: dict[str, str], key: str, fallback: str) -> str:
