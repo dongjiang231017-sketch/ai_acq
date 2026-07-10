@@ -19,13 +19,14 @@ class LiveKitOutboundError(RuntimeError):
 
 
 _PIPELINE_MODE = "pipeline_clone"
+_QWEN_OMNI_MODE = "omni"
 
 
 def _normalize_livekit_agent_mode(value: str) -> str:
     mode = str(value or "").strip().lower()
-    if mode in {"omni", "qwen_omni", "openai_realtime_legacy"}:
-        return "omni"
-    return _PIPELINE_MODE
+    if mode in {_PIPELINE_MODE, "pipeline"}:
+        return _PIPELINE_MODE
+    return _QWEN_OMNI_MODE
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class LiveKitOutboundResult:
 
 
 def livekit_config_status() -> dict[str, object]:
-    mode = _normalize_livekit_agent_mode(settings.livekit_agent_mode or _PIPELINE_MODE)
+    mode = _normalize_livekit_agent_mode(settings.livekit_agent_mode or _QWEN_OMNI_MODE)
     runtime_config = get_runtime_ai_config()
     realtime_base_url = settings.livekit_openai_realtime_base_url.strip() or runtime_config.dashscope_omni_realtime_url.strip()
     realtime_provider = "qwen_omni_realtime" if _looks_like_dashscope_realtime_url(realtime_base_url) else "openai_realtime"
@@ -153,7 +154,7 @@ def dispatch_livekit_outbound_call(
         "merchantName": merchant_name,
         "roomName": room_name,
         "participantIdentity": participant_identity,
-        "agentMode": _normalize_livekit_agent_mode(settings.livekit_agent_mode or _PIPELINE_MODE),
+        "agentMode": _normalize_livekit_agent_mode(settings.livekit_agent_mode or _QWEN_OMNI_MODE),
         "taskId": task_id or "",
         "leadId": lead_id or "",
         "sipOutboundTrunkId": settings.livekit_sip_outbound_trunk_id.strip(),

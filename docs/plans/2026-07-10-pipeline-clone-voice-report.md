@@ -1,5 +1,7 @@
 # 2026-07-10 Pipeline 克隆音色与 RTP 保活验收报告
 
+> 后续路线变更（2026-07-10 13:54）：用户明确要求继续使用千问 Omni，不再使用 Pipeline 作为当前外呼路线。当前 `LIVEKIT_AGENT_MODE=qwen_omni`，实际模型 `qwen3-omni-flash-realtime`、内置音色 `Cherry`；Pipeline 代码仅作备用保留，普通调度不会进入。当前 LiveKit agent Python PID `72871`。以下内容是切换前的 Pipeline 实施和验收记录，保留作历史证据。
+
 ## 结论
 
 - LiveKit 外呼默认路由已从 Omni 切换为 `pipeline_clone`：DashScope Paraformer ASR -> Qwen/DeepSeek 兼容 LLM -> CosyVoice 克隆 TTS。

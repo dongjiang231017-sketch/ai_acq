@@ -11,7 +11,7 @@ from livekit import api
 
 DEFAULT_ENV_KEYS = {
     "REALTIME_CONVERSATION_MODE": "livekit",
-    "LIVEKIT_AGENT_MODE": "pipeline_clone",
+    "LIVEKIT_AGENT_MODE": "qwen_omni",
     "LIVEKIT_DEFAULT_COUNTRY_CODE": "raw",
     "LIVEKIT_SIP_WAIT_UNTIL_ANSWERED": "true",
     "LIVEKIT_SIP_KRISP_ENABLED": "false",

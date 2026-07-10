@@ -37,13 +37,14 @@ _FALLBACK_OPENING_WAV_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "opening.wav"
 )
 _PIPELINE_MODE = "pipeline_clone"
+_QWEN_OMNI_MODE = "omni"
 
 
 def _normalize_agent_mode(value: str) -> str:
     mode = str(value or "").strip().lower()
-    if mode in {"omni", "qwen_omni", "openai_realtime_legacy"}:
-        return "omni"
-    return _PIPELINE_MODE
+    if mode in {_PIPELINE_MODE, "pipeline"}:
+        return _PIPELINE_MODE
+    return _QWEN_OMNI_MODE
 
 
 def _opening_wav_path() -> str:
@@ -219,7 +220,7 @@ async def entrypoint(ctx: Any) -> None:
     trunk_id = str(metadata.get("sipOutboundTrunkId") or settings.livekit_sip_outbound_trunk_id).strip()
     merchant_name = str(metadata.get("merchantName") or "您的门店")
     opening_text = str(metadata.get("openingText") or VIDEO_GROUP_BUYING_OPENING_A)
-    requested_agent_mode = str(metadata.get("agentMode") or settings.livekit_agent_mode or _PIPELINE_MODE)
+    requested_agent_mode = str(metadata.get("agentMode") or settings.livekit_agent_mode or _QWEN_OMNI_MODE)
     agent_mode = _normalize_agent_mode(requested_agent_mode)
     call_direction = "outbound" if dial_phone else "inbound"
 

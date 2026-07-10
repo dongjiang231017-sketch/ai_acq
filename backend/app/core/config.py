@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     livekit_dispatch_timeout_seconds: float = 20.0
     livekit_sip_wait_until_answered: bool = True
     livekit_sip_krisp_enabled: bool = True
-    livekit_agent_mode: str = "pipeline_clone"
+    livekit_agent_mode: str = "qwen_omni"
     livekit_agent_stt_model: str = "deepgram/flux-general-multi"
     livekit_agent_stt_language: str = "multi"
     livekit_agent_llm_model: str = "openai/gpt-5-mini"
