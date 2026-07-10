@@ -20,6 +20,10 @@ python3 voice_clone_kit/clone_and_tts.py --voice <已有音色ID> --lines lines_
 - `lines_part3.json`：26 条平台、价格、决策、信任和 AI 兜底话术。
 - `lines_part3_pending.json`：7 条待确认业务承诺，默认不合成。
 
+## 报价口径
+
+电话中不报本公司服务价格、打包价或底价。客户问价时，引导加微信，发送同行案例和适合门店的方案。微信官方支付手续费千分之六可以正常说明。
+
 ## 产出
 
 - `output/*.mp3` — 已合成的试听音频
