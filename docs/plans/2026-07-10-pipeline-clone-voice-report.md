@@ -1,6 +1,6 @@
 # 2026-07-10 Pipeline 克隆音色与 RTP 保活验收报告
 
-> 后续路线变更（2026-07-10 13:54）：用户明确要求继续使用千问 Omni，不再使用 Pipeline 作为当前外呼路线。当前 `LIVEKIT_AGENT_MODE=qwen_omni`，实际模型 `qwen3-omni-flash-realtime`、内置音色 `Cherry`；Pipeline 代码仅作备用保留，普通调度不会进入。当前 LiveKit agent Python PID `72871`。以下内容是切换前的 Pipeline 实施和验收记录，保留作历史证据。
+> 后续路线变更（2026-07-10 14:29）：所有正式 LiveKit 外呼已强制使用 `qwen3.5-omni-plus-realtime` + `Aiden`，开场和后续回复共用同一 Omni 实时会话，不再播放固定开场录音，历史 `pipeline_clone` metadata 也会被强制归一为 Omni。当前 LiveKit agent Python PID `24702`；原生 LiveKit SIP PID `902` 未变。以下内容是切换前的 Pipeline 实施和验收记录，保留作历史证据。
 
 ## 结论
 

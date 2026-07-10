@@ -162,12 +162,37 @@ class SalesStateMachine:
             self.state.wechat_offered = True
             self.state.wechat_add_asked = True
             self.state.wechat_ask_count += 1
-        if _has_any(reply, ["手机号就是", "手机号是", "这个手机号", "当前手机号"]) and "微信" in reply:
+        if _has_any(
+            reply,
+            [
+                "手机号就是",
+                "手机号是",
+                "这个手机号",
+                "当前手机号",
+                "这个号",
+                "这号",
+                "当前号码",
+                "号码就是",
+                "号码是",
+            ],
+        ) and "微信" in reply:
             self.state.wechat_add_asked = True
             self.state.wechat_offered = True
             self.state.wechat_phone_confirm_pending = True
             self.state.wechat_id_pending = False
-        if _has_any(reply, ["微信号是哪个", "您的微信是哪个", "你微信是哪个", "微信号多少"]):
+        if _has_any(
+            reply,
+            [
+                "微信号是哪个",
+                "您的微信是哪个",
+                "你微信是哪个",
+                "微信号多少",
+                "微信号是什么",
+                "您的微信号",
+                "请报一下微信号",
+                "告诉我微信号",
+            ],
+        ):
             self.state.wechat_id_pending = True
             self.state.wechat_phone_confirm_pending = False
         if _has_any(reply, ["发资料", "发案例", "发流程"]):
@@ -179,7 +204,11 @@ class SalesStateMachine:
         clean = normalize_realtime_sales_text(customer_text).normalized_text
         compact = _compact(clean)
         phone_digits = _digits(phone)
-        extracted_wechat_id = extract_wechat_id(clean, current_phone=phone_digits)
+        extracted_wechat_id = extract_wechat_id(
+            clean,
+            current_phone=phone_digits,
+            allow_bare=self.state.wechat_id_pending or self.state.wechat_phone_confirm_pending,
+        )
         if not clean:
             return None
         if self.state.wechat_confirmed:
@@ -365,7 +394,7 @@ def _digits(text: str) -> str:
     return "".join(char for char in str(text or "") if char.isdigit())
 
 
-def extract_wechat_id(text: str, *, current_phone: str = "") -> str:
+def extract_wechat_id(text: str, *, current_phone: str = "", allow_bare: bool = False) -> str:
     clean = " ".join(str(text or "").strip().split())
     if not clean:
         return ""
@@ -389,6 +418,14 @@ def extract_wechat_id(text: str, *, current_phone: str = "") -> str:
         for token in tokens:
             if _looks_like_wechat_id(token, current_phone=current_phone):
                 return token[:80]
+    if allow_bare:
+        # 已进入“请报微信号”状态后，客户通常只念 ID，不会再说
+        # “我的微信号是”。仅在该状态放开纯 ID/纯数字提取，避免平时误记。
+        bare = ascii_joined.strip("，,。.;；:： ")
+        if _looks_like_wechat_id(bare, current_phone=current_phone):
+            return bare[:80]
+        if re.fullmatch(r"\d{6,20}", bare) and bare != current_phone:
+            return bare[:80]
     return ""
 
 

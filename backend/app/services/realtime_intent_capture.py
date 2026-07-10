@@ -110,7 +110,7 @@ def record_realtime_intent_signal(
     clean_wechat_id = (wechat_id or "").strip()[:80] or None
     with SessionLocal() as db:
         try:
-            lead = _find_lead(db, phone)
+            lead = _find_lead(db, phone, lead_id=str(context.get("leadId") or "").strip() or None)
             if lead and clean_wechat_id:
                 lead.wechat_id = clean_wechat_id
             customer = _find_customer(db, lead.id if lead else None, phone, merchant_name)
@@ -266,7 +266,11 @@ def _context_for_submit(records: list[dict[str, Any]], submit_id: str) -> dict[s
     return {}
 
 
-def _find_lead(db: Any, phone: str | None) -> MerchantLead | None:
+def _find_lead(db: Any, phone: str | None, *, lead_id: str | None = None) -> MerchantLead | None:
+    if lead_id:
+        lead = db.get(MerchantLead, lead_id)
+        if lead is not None:
+            return lead
     if not phone:
         return None
     return db.scalar(select(MerchantLead).where(MerchantLead.phone == phone).order_by(MerchantLead.updated_at.desc()))

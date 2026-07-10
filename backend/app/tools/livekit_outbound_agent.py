@@ -11,10 +11,16 @@ from typing import Any
 from dotenv import load_dotenv
 
 from app.core.config import settings
-from app.services.livekit_outbound import _emit_livekit_event, _looks_like_dashscope_realtime_url, _masked_phone
+from app.services.livekit_outbound import _emit_livekit_event, _masked_phone
+from app.services.realtime_intent_capture import record_realtime_wechat_signal
+from app.services.realtime_outbound import _classify_intent
 from app.services.runtime_ai_config import get_runtime_ai_config
-from app.services.realtime_sales_playbook import VIDEO_GROUP_BUYING_OPENING_A, build_video_group_buying_sales_instructions
-from app.services.realtime_voice_cache import voice_cache_opening_audio_path
+from app.services.realtime_sales_playbook import (
+    VIDEO_GROUP_BUYING_OPENING_A,
+    build_video_group_buying_sales_instructions,
+    classify_realtime_call_input,
+)
+from app.services.realtime_sales_state import SalesStateMachine
 
 
 load_dotenv()
@@ -30,103 +36,14 @@ _FAREWELL_PATTERN = re.compile(
 # 结束语播完后留给客户反悔的窗口秒数，窗口内客户开口则取消挂机继续对话。
 _HANGUP_GRACE_SECONDS = float(os.getenv("LIVEKIT_HANGUP_GRACE_SECONDS", "1.5"))
 
-# Legacy Omni 仅保留固定开场白录音兜底；Pipeline 开场与动态回复
-# 都走同一 CosyVoice 克隆 TTS。默认录音路径 backend/assets/opening.wav。
-_CONFIGURED_OPENING_WAV_PATH = os.getenv("OPENING_WAV_PATH", "").strip()
-_FALLBACK_OPENING_WAV_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "opening.wav"
-)
-_PIPELINE_MODE = "pipeline_clone"
 _QWEN_OMNI_MODE = "omni"
 
 
 def _normalize_agent_mode(value: str) -> str:
-    mode = str(value or "").strip().lower()
-    if mode in {_PIPELINE_MODE, "pipeline"}:
-        return _PIPELINE_MODE
+    # 生产外呼统一使用 Qwen Omni。即使历史 dispatch metadata 仍携带
+    # pipeline_clone，worker 也不得在通话中切换到 ASR -> LLM -> TTS 路线。
+    del value
     return _QWEN_OMNI_MODE
-
-
-def _opening_wav_path() -> str:
-    if _CONFIGURED_OPENING_WAV_PATH:
-        return _CONFIGURED_OPENING_WAV_PATH
-    cached_path = voice_cache_opening_audio_path()
-    return str(cached_path) if cached_path else _FALLBACK_OPENING_WAV_PATH
-
-
-class _OpeningPlayer:
-    """移植自 Workbuddy livekit-local/agent.py（2026-07-09 真机验证版）。"""
-
-    def __init__(self, room: Any, path: str) -> None:
-        self._room = room
-        self._stop = False
-        self._data = self._load(path)
-
-    @staticmethod
-    def _load(path: str) -> bytes:
-        import struct
-        import wave as _wave
-
-        with _wave.open(path, "rb") as w:
-            assert w.getframerate() == 24000 and w.getnchannels() == 1
-            data = w.readframes(w.getnframes())
-
-        def rms(seg: bytes) -> float:
-            n = len(seg) // 2
-            if not n:
-                return 0.0
-            ss = struct.unpack(f"<{n}h", seg[: n * 2])
-            return (sum(x * x for x in ss) / n) ** 0.5
-
-        win = 4800  # 100ms @24k
-        start, end = 0, len(data)
-        while start + win < end and rms(data[start:start + win]) < 200:
-            start += win
-        while end - win > start and rms(data[end - win:end]) < 200:
-            end -= win
-        return data[start:end]
-
-    def stop(self) -> None:
-        self._stop = True
-
-    async def play(self, delay: float = 0.3) -> None:
-        from livekit import rtc
-
-        await asyncio.sleep(delay)
-        src = rtc.AudioSource(24000, 1)
-        track = rtc.LocalAudioTrack.create_audio_track("opening", src)
-        publication = await self._room.local_participant.publish_track(
-            track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_UNKNOWN)
-        )
-        total = len(self._data) // 480  # 每帧 10ms @24k 16bit mono
-        # 墙钟驱动：保证 play() 跑满真实时长才返回，避免音频一次性灌进缓冲、
-        # 输入闸过早打开、模型抢答客户"喂"（Workbuddy 真机复现过的 bug）。
-        try:
-            start = time.monotonic()
-            next_frame = 0
-            while not self._stop:
-                due = int((time.monotonic() - start) / 0.01)
-                while next_frame <= due and next_frame < total:
-                    chunk = self._data[next_frame * 480:(next_frame + 1) * 480]
-                    if len(chunk) < 480:
-                        chunk += b"\x00" * (480 - len(chunk))
-                    await src.capture_frame(
-                        rtc.AudioFrame(data=chunk, sample_rate=24000, num_channels=1, samples_per_channel=240)
-                    )
-                    next_frame += 1
-                if next_frame >= total:
-                    break
-                await asyncio.sleep(0.01)
-        finally:
-            # 播完/被打断后清理开场白轨道与音频源，别留到删房间才回收（审计 bug E）
-            try:
-                await self._room.local_participant.unpublish_track(publication.sid)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await src.aclose()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 class _RtpSilenceKeepalive:
@@ -482,7 +399,206 @@ async def entrypoint(ctx: Any) -> None:
     # 通话落库状态：必须在 customer_joined 回调（下方写 joined_at）之前定义，
     # 否则 Python 视 call_state 为整函数局部变量、读取时 UnboundLocalError。
     conversation_log: list[str] = []
-    call_state = {"joined_at": 0.0, "refused": False, "persisted": False}
+    call_state: dict[str, Any] = {
+        "joined_at": 0.0,
+        "refused": False,
+        "persisted": False,
+        "intent_level": "",
+        "intent_reason": "",
+        "wechat_id": "",
+        "wechat_is_phone": False,
+    }
+    sales_fsm = SalesStateMachine()
+    transcript_dedupe = {"text": "", "at": 0.0}
+    persistence_tasks: set[asyncio.Task[Any]] = set()
+    context_phone = str(metadata.get("phone") or dial_phone).strip()
+    realtime_context = {
+        "phone": context_phone,
+        "merchantName": merchant_name,
+        "taskId": batch_task_id or "",
+        "leadId": batch_lead_id or "",
+    }
+    interest_intents = {"价格异议", "效果询问", "合作咨询", "加微信/发资料"}
+    interest_markers = (
+        "想了解",
+        "有兴趣",
+        "可以做",
+        "想做",
+        "怎么合作",
+        "怎么开通",
+        "发我",
+        "发过来",
+        "加我微信",
+        "你加我",
+    )
+    rejection_markers = ("不需要", "不用了", "没兴趣", "不感兴趣", "别打", "别联系", "拉黑", "投诉")
+
+    def _on_background_task_done(task: asyncio.Task[Any]) -> None:
+        persistence_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _emit_livekit_event(
+                "livekit_background_task_error",
+                callId=action_id,
+                roomName=room_name,
+                error=str(exc),
+            )
+
+    def _track_persistence_task(coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        persistence_tasks.add(task)
+        task.add_done_callback(_on_background_task_done)
+
+    def _set_final_intent(text: str, intent: str) -> None:
+        if intent == "明确拒绝" or any(marker in text for marker in rejection_markers):
+            call_state["intent_level"] = "D"
+            call_state["intent_reason"] = f"客户最后明确表示无意向：{text[:120]}"
+            call_state["refused"] = True
+            return
+        if intent in interest_intents or any(marker in text for marker in interest_markers):
+            call_state["intent_level"] = "A" if intent == "加微信/发资料" else "B"
+            call_state["intent_reason"] = f"客户最后表示有意向：{text[:120]}"
+            call_state["refused"] = False
+
+    async def _save_wechat_capture(
+        customer_text: str,
+        signal: str,
+        *,
+        wechat_id: str,
+        wechat_is_phone: bool,
+        summary: str,
+    ) -> None:
+        try:
+            result = await asyncio.to_thread(
+                record_realtime_wechat_signal,
+                call_id=action_id,
+                context=realtime_context,
+                text=customer_text,
+                signal=signal,
+                source="livekit_qwen_omni",
+                wechat_id=wechat_id,
+                wechat_is_phone=wechat_is_phone,
+                summary=summary,
+            )
+            _emit_livekit_event(
+                "realtime_wechat_saved",
+                callId=action_id,
+                roomName=room_name,
+                wechatId=wechat_id,
+                wechatIsPhone=wechat_is_phone,
+                customerId=str((result or {}).get("customerId") or ""),
+                detail=(
+                    "客户确认当前手机号就是微信，已写入意向库。"
+                    if wechat_is_phone
+                    else "客户口述了不同于手机号的微信号，已写入意向库。"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit_livekit_event(
+                "realtime_wechat_save_error",
+                callId=action_id,
+                roomName=room_name,
+                wechatId=wechat_id,
+                error=str(exc),
+                detail="微信号实时写库失败；通话结束时仍会随转写和最终意向一起落库。",
+            )
+
+    def _refresh_omni_instructions(action: str = "", reply_hint: str = "") -> None:
+        llm_obj = getattr(session, "llm", None) or getattr(session, "_llm", None)
+        realtime_session = getattr(llm_obj, "last_session", None)
+        if realtime_session is None:
+            return
+        state_instruction = sales_fsm.get_stage_instruction()
+        action_instruction = ""
+        if action and reply_hint:
+            action_instruction = f"\n当前微信收口动作={action}。下一句按这个含义回复：{reply_hint}"
+        _track_persistence_task(realtime_session.update_instructions(f"{instructions}\n{state_instruction}{action_instruction}"))
+
+    def _on_user_transcript(text: str) -> None:
+        # DashScope 的转写完成回调和 LiveKit conversation 事件可能同时到达，
+        # 短窗口去重后再判定意向，避免一句客户话被记两次。
+        text = " ".join(str(text or "").strip().split())
+        if not text:
+            return
+        now = time.monotonic()
+        fingerprint = re.sub(r"\s+", "", text)
+        if transcript_dedupe["text"] == fingerprint and now - transcript_dedupe["at"] < 0.8:
+            return
+        transcript_dedupe.update(text=fingerprint, at=now)
+        last_activity["t"] = now
+        conversation_log.append(f"客户：{text}")
+        intent, _node = _classify_intent(text)
+        signal = classify_realtime_call_input(text)
+        sales_fsm.update(text, intent, signal)
+        _set_final_intent(text, intent)
+        wechat_result = sales_fsm.handle_wechat_closing_turn(text, intent, phone=context_phone)
+        if wechat_result is not None:
+            _emit_livekit_event(
+                "wechat_closing_state",
+                callId=action_id,
+                roomName=room_name,
+                action=wechat_result.action,
+                record=wechat_result.record,
+                detail="Qwen Omni 微信收口状态已更新。",
+            )
+            if wechat_result.record and wechat_result.wechat_id:
+                call_state["intent_level"] = "A"
+                call_state["intent_reason"] = wechat_result.summary or "客户同意加微信"
+                call_state["refused"] = False
+                call_state["wechat_id"] = wechat_result.wechat_id
+                call_state["wechat_is_phone"] = wechat_result.wechat_is_phone
+                _track_persistence_task(
+                    _save_wechat_capture(
+                        text,
+                        signal,
+                        wechat_id=wechat_result.wechat_id,
+                        wechat_is_phone=wechat_result.wechat_is_phone,
+                        summary=wechat_result.summary,
+                    )
+                )
+        _refresh_omni_instructions(
+            wechat_result.action if wechat_result else "",
+            wechat_result.reply if wechat_result else "",
+        )
+        _emit_livekit_event(
+            "user_transcript",
+            callId=action_id,
+            roomName=room_name,
+            text=text[:200],
+            intent=intent,
+            finalIntentLevel=call_state["intent_level"] or "C",
+            detail="客户说话（实时转写）",
+        )
+
+    llm_obj = getattr(session, "llm", None) or getattr(session, "_llm", None)
+    realtime_session = getattr(llm_obj, "last_session", None)
+    if realtime_session is not None:
+        realtime_session.on_user_transcript = _on_user_transcript
+
+    @session.on("conversation_item_added")
+    def _on_item(ev: Any) -> None:
+        item = getattr(ev, "item", None)
+        role = str(getattr(item, "role", ""))
+        text = str(getattr(item, "text_content", "") or "").strip()
+        if not text:
+            return
+        if role == "user":
+            _on_user_transcript(text)
+            return
+        if role != "assistant":
+            return
+        conversation_log.append(f"AI：{text}")
+        sales_fsm.record_assistant_reply(text)
+        _emit_livekit_event(
+            "ai_transcript",
+            callId=action_id,
+            roomName=room_name,
+            text=text[:200],
+            detail="Qwen Omni Plus 回复（实时转写）",
+        )
+        _arm_farewell_hangup(text)
 
     if call_direction == "outbound":
         if not trunk_id:
@@ -556,144 +672,28 @@ async def entrypoint(ctx: Any) -> None:
             error=str(exc),
         )
 
-    # Pipeline 开场直接走同一个 CosyVoice TTS，保证开场和后续回复音色一致。
-    # 仅显式选择 legacy Omni 时保留固定录音兜底。
+    # 开场和后续每一句都由同一 Qwen Omni Plus 实时会话生成。
+    # 这里不再检查 opening.wav，也不发布任何录音播放轨。
     call_started["t"] = time.monotonic()
-    if agent_mode == _PIPELINE_MODE:
-        session.say(opening_text, allow_interruptions=True, add_to_chat_ctx=True)
-        _emit_livekit_event(
-            "tts_start",
-            callId=action_id,
-            roomName=room_name,
-            provider="dashscope_cosyvoice_pipeline",
-            text=opening_text,
-            detail="开场白通过 Pipeline 克隆 TTS 播放，后续回复使用同一音色。",
+    session.generate_reply(
+        instructions=(
+            "你现在直接向电话里的客户说开场白。"
+            "只输出下面的开场白本身，不解释、不增删、不改写：\n"
+            f"{opening_text}"
         )
-    else:
-        opening_player: _OpeningPlayer | None = None
-        opening_wav_path = _opening_wav_path()
-        if os.path.exists(opening_wav_path):
-            try:
-                opening_player = _OpeningPlayer(ctx.room, opening_wav_path)
-            except Exception as exc:  # noqa: BLE001
-                _emit_livekit_event("opening_wav_load_error", callId=action_id, roomName=room_name, error=str(exc))
-        if opening_player is not None:
-            asyncio.create_task(opening_player.play())
-            _emit_livekit_event(
-                "tts_start",
-                callId=action_id,
-                roomName=room_name,
-                provider="legacy_omni_opening",
-                text=opening_text,
-                detail="Legacy Omni 使用固定开场录音。",
-            )
-        else:
-            session.generate_reply(instructions=f"用一句话自然开场，不要多说：{opening_text}")
-
-    # ---- 意向标记（对齐 bench：AI 问过微信 + 客户同意 => 落库）----
-    # 注：conversation_log / call_state 已在 session 启动后、customer_joined 前定义
-    wechat_ask = {"pending": 0, "ai_text": ""}
-    lead_marked = {"v": False}
-    _WECHAT_HINTS = (
-        "加您微信",
-        "加你微信",
-        "加个微信",
-        "加一下微信",
-        "这个号就是微信",
-        "这号是微信",
-        "手机号是微信",
-        "号码是微信",
     )
-    # 判定顺序先拒绝后同意："不对/不是"先被拒绝分支拦住，"对/是的"才能安全进同意词表
-    _AGREE_WORDS = ("可以", "行", "好的", "好啊", "嗯", "加吧", "发吧", "就是微信", "是微信",
-                    "同意", "没问题", "对", "是的", "对的", "嗯嗯", "方便")
-    _REFUSE_WORDS = ("不用", "不加", "别加", "不需要", "不方便", "不行", "不对", "不是")
-    lead_path = os.getenv("INTENT_LEADS_PATH", "intent_leads.jsonl")
-
-    def _mark_lead(customer_text: str) -> None:
-        if lead_marked["v"]:
-            return
-        lead_marked["v"] = True
-        record = {
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "phone": dial_phone,
-            "room": room_name,
-            "level": "A",
-            "reason": "客户同意加微信",
-            "ai_ask": wechat_ask["ai_text"][:120],
-            "customer_reply": customer_text[:120],
-        }
-        try:
-            with open(lead_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception as exc:  # noqa: BLE001
-            _emit_livekit_event("intent_lead_write_error", callId=action_id, roomName=room_name, error=str(exc))
-        _emit_livekit_event(
-            "intent_lead_marked",
-            callId=action_id,
-            roomName=room_name,
-            phone=_masked_phone(dial_phone),
-            customerReply=customer_text[:80],
-            detail="客户同意加微信，已写入意向池。",
-        )
-
-    def _on_user_transcript(text: str) -> None:
-        # 挂适配器 on_user_transcript（DashScope 转写完成事件，带 transcript）。
-        # 不用 conversation_item_added——user 事件在转写完成前发出，常拿到空文本。
-        text = (text or "").strip()
-        if not text:
-            return
-        last_activity["t"] = time.monotonic()
-        conversation_log.append(f"客户：{text}")
-        if any(w in text for w in ("不需要", "不用了", "别打", "别再", "不感兴趣", "投诉")):
-            call_state["refused"] = True
-        # 实时字幕流：客户侧转写推给前端实时监听页
-        _emit_livekit_event(
-            "user_transcript",
-            callId=action_id,
-            roomName=room_name,
-            text=text[:200],
-            detail="客户说话（实时转写）",
-        )
-        if wechat_ask["pending"] > 0:
-            if any(w in text for w in _REFUSE_WORDS):
-                wechat_ask["pending"] = 0
-            elif any(w in text for w in _AGREE_WORDS):
-                _mark_lead(text)
-                wechat_ask["pending"] = 0
-            else:
-                wechat_ask["pending"] -= 1
-
-    _llm_obj = getattr(session, "llm", None) or getattr(session, "_llm", None)
-    _rt = getattr(_llm_obj, "last_session", None)
-    if _rt is not None:
-        _rt.on_user_transcript = _on_user_transcript
-
-    @session.on("conversation_item_added")
-    def _on_item(ev: Any) -> None:
-        item = getattr(ev, "item", None)
-        role = str(getattr(item, "role", ""))
-        text = str(getattr(item, "text_content", "") or "")
-        if not text:
-            return
-        if role == "user":
-            _on_user_transcript(text)
-            return
-        if role != "assistant":
-            return
-        conversation_log.append(f"AI：{text}")
-        # 实时字幕流：AI 侧回复推给前端实时监听页
-        _emit_livekit_event(
-            "ai_transcript",
-            callId=action_id,
-            roomName=room_name,
-            text=text[:200],
-            detail="AI 回复（实时转写）",
-        )
-        if any(w in text for w in _WECHAT_HINTS):
-            wechat_ask["pending"] = 2  # 给客户 2 轮回应窗口
-            wechat_ask["ai_text"] = text
-        _arm_farewell_hangup(text)
+    model_name = str(getattr(llm_obj, "_model", "") or "qwen3.5-omni-plus-realtime")
+    voice_name = str(getattr(llm_obj, "_voice", "") or "Aiden")
+    _emit_livekit_event(
+        "tts_start",
+        callId=action_id,
+        roomName=room_name,
+        provider="qwen_omni_realtime",
+        model=model_name,
+        voice=voice_name,
+        text=opening_text,
+        detail="开场白由当前 Qwen Omni Plus 实时会话直接生成；未播放固定录音。",
+    )
 
     def _persist_call() -> None:
         """通话结束落库：CallRecord + 线索状态 + 意向池 + 工单 + 勿扰（需求 7.7.7/7.7.9）。"""
@@ -702,14 +702,23 @@ async def entrypoint(ctx: Any) -> None:
         # wait_until_answered=true：客户 participant 进房 == 电话已接通（含静默接听/语音信箱）
         connected = call_state["joined_at"] > 0
         duration = int(time.monotonic() - call_state["joined_at"]) if call_state["joined_at"] else 0
-        if lead_marked["v"]:
-            intent_level, outcome, reason = "A", "有意向", "客户同意加微信"
-        elif call_state["refused"] and connected:
-            intent_level, outcome, reason = "D", "拒绝", "客户明确拒绝"
-        elif connected:
-            intent_level, outcome, reason = "C", "已接通", "接通对话，未确认意向"
-        else:
+        final_level = str(call_state["intent_level"] or "")
+        if not connected:
             intent_level, outcome, reason = "无效", "未接通", "未接通或无人说话"
+        elif final_level in {"A", "B"}:
+            intent_level, outcome = final_level, "有意向"
+            reason = str(call_state["intent_reason"] or "客户表示愿意继续了解")
+        elif final_level == "D":
+            intent_level, outcome = "D", "拒绝"
+            reason = str(call_state["intent_reason"] or "客户最后明确表示无意向")
+        else:
+            intent_level, outcome, reason = "C", "已接通", "接通对话，最终意向未确认"
+        final_intent_label = "有意向" if intent_level in {"A", "B"} else "无意向" if intent_level == "D" else "未确认"
+        final_summary = f"系统：最终客户意向={final_intent_label}（{intent_level}）；依据={reason}"
+        if call_state["wechat_id"]:
+            wechat_kind = "当前手机号" if call_state["wechat_is_phone"] else "客户口述微信号"
+            final_summary += f"；{wechat_kind}={call_state['wechat_id']}"
+        persisted_transcript = "\n".join([*conversation_log, final_summary])
         from app.services.livekit_call_persistence import persist_livekit_call_result
 
         # 落库对连接类异常有限重试（远程 PG 会静默回收空闲连接）；persist 按
@@ -727,9 +736,9 @@ async def entrypoint(ctx: Any) -> None:
                     connected=connected,
                     intent_level=intent_level,
                     outcome=outcome,
-                    transcript="\n".join(conversation_log),
+                    transcript=persisted_transcript,
                     intent_reason=reason,
-                    refused=bool(call_state["refused"]),
+                    refused=intent_level == "D",
                 )
                 call_state["persisted"] = True  # 仅成功后置位，失败可由下次挂断回调重试
                 _emit_livekit_event(
@@ -754,7 +763,9 @@ async def entrypoint(ctx: Any) -> None:
                     "action_id": action_id, "phone": dial_phone, "task_id": batch_task_id,
                     "lead_id": batch_lead_id, "duration": duration, "connected": connected,
                     "intent_level": intent_level, "outcome": outcome, "reason": reason,
-                    "refused": bool(call_state["refused"]), "transcript": "\n".join(conversation_log),
+                    "refused": intent_level == "D", "transcript": persisted_transcript,
+                    "wechat_id": call_state["wechat_id"],
+                    "wechat_is_phone": call_state["wechat_is_phone"],
                     "at": datetime.now().isoformat(timespec="seconds"),
                 }, ensure_ascii=False) + "\n")
         except Exception:  # noqa: BLE001
@@ -762,6 +773,8 @@ async def entrypoint(ctx: Any) -> None:
         _emit_livekit_event("call_record_save_error", callId=action_id, roomName=room_name, error=last_error, detail="落库失败已写本地 outbox 兜底。")
 
     async def _on_shutdown(reason: str = "") -> None:
+        if persistence_tasks:
+            await asyncio.gather(*tuple(persistence_tasks), return_exceptions=True)
         await asyncio.to_thread(_persist_call)
         _emit_livekit_event(
             "livekit_agent_shutdown",
@@ -811,84 +824,38 @@ async def entrypoint(ctx: Any) -> None:
 
 
 def _build_agent_session(*, inference: Any, agent_mode: str, instructions: str = "") -> Any:
-    from livekit.agents import APIConnectOptions
-
-    if agent_mode == _PIPELINE_MODE:
-        return _build_pipeline_clone_agent_session(inference)
-    return _build_openai_realtime_agent_session(
-        connect_options=APIConnectOptions(max_retry=2, retry_interval=0.8, timeout=8.0),
-        instructions=instructions,
-    )
+    # 无论历史配置或 dispatch metadata 传入什么，正式 worker 只构建
+    # Qwen Omni 实时会话；不存在通话中切入 Pipeline 的路径。
+    del inference, agent_mode
+    return _build_qwen_omni_agent_session(instructions=instructions)
 
 
-def _build_openai_realtime_agent_session(*, connect_options: Any, instructions: str = "") -> Any:
+def _build_qwen_omni_agent_session(*, instructions: str = "") -> Any:
     from livekit.agents import AgentSession
 
+    from app.tools.qwen_omni_realtime import QwenOmniRealtimeModel
+
     runtime_config = get_runtime_ai_config()
-    base_url = (
-        settings.livekit_openai_realtime_base_url.strip()
-        or os.getenv("LIVEKIT_OPENAI_REALTIME_BASE_URL", "").strip()
-        or runtime_config.dashscope_omni_realtime_url.strip()
+    base_url = runtime_config.dashscope_omni_realtime_url.strip() or (
+        "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     )
-    if _looks_like_dashscope_realtime_url(base_url):
-        # 【WORKER_MIGRATION 必改2】DashScope 分支不走 openai 插件——协议有三个暗坑
-        # 插件不处理（空上下文 response.create 被静默忽略、大音频帧被丢、modalities
-        # 声明时序），2026-07-08 真机验证版适配器 app/tools/qwen_omni_realtime.py
-        # 已内置全部修复。AgentSession 保持裸构造，与验证形态（livekit-poc/agent/
-        # main.py）完全一致，不叠加未经真机测试的 pipeline 参数组合。
-        # 判停毫秒用环境变量 VAD_SILENCE_MS 调（适配器内部读取，默认 400）。
-        from app.tools.qwen_omni_realtime import QwenOmniRealtimeModel
-
-        api_key = (
-            settings.livekit_openai_realtime_api_key.strip()
-            or os.getenv("LIVEKIT_OPENAI_REALTIME_API_KEY", "").strip()
-            or runtime_config.dashscope_api_key.strip()
-            or os.getenv("DASHSCOPE_API_KEY", "").strip()
-            or settings.dashscope_api_key.strip()
-        )
-        # 默认值必须是真机验证过的组合 qwen3-omni-flash-realtime + Cherry，
-        # 不要换成未验证的模型串/音色（原 qwen3.5-omni-plus-realtime/Serena 未经真机验证）。
-        model = runtime_config.dashscope_omni_realtime_model.strip() or settings.livekit_openai_realtime_model.strip() or "qwen3-omni-flash-realtime"
-        voice = runtime_config.dashscope_omni_realtime_voice.strip() or settings.livekit_openai_realtime_voice.strip() or "Cherry"
-        return AgentSession(
-            llm=QwenOmniRealtimeModel(
-                model=model,
-                api_key=api_key,
-                voice=voice,
-                base_url=base_url or "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
-                instructions=instructions,
-            )
-        )
-
-    # OpenAI 官方端点：插件对自家协议没问题，保留原实现。
-    from livekit.plugins import openai
-
     api_key = (
         settings.livekit_openai_realtime_api_key.strip()
         or os.getenv("LIVEKIT_OPENAI_REALTIME_API_KEY", "").strip()
-        or settings.openai_api_key.strip()
-        or os.getenv("OPENAI_API_KEY", "").strip()
+        or runtime_config.dashscope_api_key.strip()
+        or os.getenv("DASHSCOPE_API_KEY", "").strip()
+        or settings.dashscope_api_key.strip()
     )
-    model = settings.livekit_openai_realtime_model.strip() or "gpt-realtime"
-    voice = settings.livekit_openai_realtime_voice.strip() or "marin"
-    model_kwargs = {
-        "model": model,
-        "voice": voice,
-        "api_key": api_key or None,
-        "conn_options": connect_options,
-    }
-    if base_url:
-        model_kwargs["base_url"] = base_url
+    # 当前生产组合固定为 Qwen 3.5 Omni Plus + Aiden，开场和后续共用。
+    # 不读取历史 flash/Cherry/OpenAI 覆盖，避免老配置在重启后切路。
     return AgentSession(
-        llm=openai.realtime.RealtimeModel(**model_kwargs),
-        allow_interruptions=True,
-        min_interruption_duration=0.12,
-        min_interruption_words=1,
-        min_endpointing_delay=0.12,
-        max_endpointing_delay=0.65,
-        false_interruption_timeout=0.8,
-        preemptive_generation=True,
-        user_away_timeout=12.0,
+        llm=QwenOmniRealtimeModel(
+            model="qwen3.5-omni-plus-realtime",
+            api_key=api_key,
+            voice="Aiden",
+            base_url=base_url,
+            instructions=instructions,
+        )
     )
 
 

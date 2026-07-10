@@ -23,9 +23,9 @@ _QWEN_OMNI_MODE = "omni"
 
 
 def _normalize_livekit_agent_mode(value: str) -> str:
-    mode = str(value or "").strip().lower()
-    if mode in {_PIPELINE_MODE, "pipeline"}:
-        return _PIPELINE_MODE
+    # 所有正式 LiveKit 外呼固定走 Qwen Omni，历史配置不得把新任务
+    # 调度到 Pipeline，从而避免一通电话出现多种声音/模型路线。
+    del value
     return _QWEN_OMNI_MODE
 
 
@@ -44,11 +44,10 @@ class LiveKitOutboundResult:
 def livekit_config_status() -> dict[str, object]:
     mode = _normalize_livekit_agent_mode(settings.livekit_agent_mode or _QWEN_OMNI_MODE)
     runtime_config = get_runtime_ai_config()
-    realtime_base_url = settings.livekit_openai_realtime_base_url.strip() or runtime_config.dashscope_omni_realtime_url.strip()
-    realtime_provider = "qwen_omni_realtime" if _looks_like_dashscope_realtime_url(realtime_base_url) else "openai_realtime"
+    realtime_base_url = runtime_config.dashscope_omni_realtime_url.strip()
+    realtime_provider = "qwen_omni_realtime"
     realtime_key_configured = bool(
         settings.livekit_openai_realtime_api_key.strip()
-        or settings.openai_api_key.strip()
         or runtime_config.dashscope_api_key.strip()
     )
     pipeline_ready = bool(

@@ -40,8 +40,8 @@ from livekit.agents.types import NOT_GIVEN
 logger = logging.getLogger("qwen-omni-realtime")
 
 DASHSCOPE_WSS = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-DEFAULT_MODEL = "qwen3-omni-flash-realtime"
-DEFAULT_VOICE = "Chelsie"
+DEFAULT_MODEL = "qwen3.5-omni-plus-realtime"
+DEFAULT_VOICE = "Aiden"
 
 
 class QwenOmniRealtimeModel(RealtimeModel):
